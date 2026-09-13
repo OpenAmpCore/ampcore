@@ -50,9 +50,12 @@ export function useLinkedSync({
   useEffect(() => {
     // `checking`/`unreadable` keep the session: the amp is still the source of
     // truth, and a reading gap (e.g. FC=50 bridge not answered yet) shouldn't
-    // drop live editing. Only losing the amp does.
+    // drop live editing. Only losing the amp — or the user stepping out of the
+    // session by hand — does. `following` is sticky otherwise, so `disengaged`
+    // has to clear it explicitly or a disengage from a live session would
+    // leave the editor still writing to the amp.
     if (state === "matches") setFollowing(true);
-    else if (state === "offline" || state === "unlinked") setFollowing(false);
+    else if (state === "offline" || state === "unlinked" || state === "disengaged") setFollowing(false);
   }, [state]);
 
   useEffect(() => {

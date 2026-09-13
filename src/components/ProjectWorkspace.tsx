@@ -29,6 +29,10 @@ const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
+  /** Configure-tab per open amp. Held here because `AmpConfigureView` is
+   * unmounted whenever you switch to another amp or back to the Workspace —
+   * keeping the tab in the editor itself would lose it every time. */
+  const [configureTabById, setConfigureTabById] = useState<Record<string, string | null>>({});
 
   useEffect(() => {
     commands.ampModelsList().then((result) => {
@@ -45,6 +49,12 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
 
   function closeDevice(assignmentId: string) {
     setOpenDeviceIds((prev) => prev.filter((id) => id !== assignmentId));
+    setConfigureTabById((prev) => {
+      if (!(assignmentId in prev)) return prev;
+      const next = { ...prev };
+      delete next[assignmentId];
+      return next;
+    });
     if (activeTab === deviceTabValue(assignmentId)) {
       onActiveTabChange("workspace");
     }
@@ -156,6 +166,10 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
           {activeTab === "operator" && <OperatorView />}
           {activeDevice && (
             <AmpConfigureView
+              activeTab={configureTabById[activeDevice.id] ?? "input"}
+              onActiveTabChange={(tab) =>
+                setConfigureTabById((prev) => ({ ...prev, [activeDevice.id]: tab }))
+              }
               source={{
                 kind: "project",
                 project,

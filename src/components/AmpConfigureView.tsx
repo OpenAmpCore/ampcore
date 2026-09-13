@@ -24,11 +24,17 @@ import {
 } from "@mantine/core";
 import {
   Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
   ChevronRight,
+  Eye,
   FlipVertical2,
+  GitCompare,
+  Plug,
   RefreshCw,
   Route,
   SquareArrowRightEnter,
+  Unplug,
   SquareArrowRightExit,
   ShieldAlert,
   ListPlus,
@@ -53,6 +59,7 @@ import { ChannelStateBadge } from "./ChannelStateBadge";
 import { InputClipPill } from "./InputClipPill";
 import {
   PresetActionTile,
+  STAT_TILE_FOCUS,
   StatEditorTile,
   StatReadout,
   StatToggle,
@@ -96,6 +103,7 @@ import {
   createLiveConfigureActions,
   LIVE_CONFIGURE_CAPABILITIES,
 } from "../lib/liveConfigureAdapter";
+import { usePreference } from "../lib/preferences";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
  * Configure screen instance targets — the single seam that lets the same
@@ -138,6 +146,12 @@ export type ConfigureSource =
 interface AmpConfigureViewProps {
   /** Omitted while a Project/live device hasn't been picked yet. */
   source?: ConfigureSource;
+  /** Lets a parent that outlives this view own the selected tab, so the
+   * selection survives anything that unmounts the editor — switching
+   * between open amps, or a layout that re-renders around it. Uncontrolled
+   * (falling back to internal state) when omitted. */
+  activeTab?: string | null;
+  onActiveTabChange?: (tab: string | null) => void;
 }
 
 type SkeletonVariant = "list" | "grid";
@@ -299,7 +313,7 @@ const OUTPUT_ROW_MAX_WIDTH = 1180;
 function CenteredScrollPane({ children }: { children: ReactNode }) {
   return (
     <div className="h-full min-h-0 overflow-auto">
-      <div className="flex min-h-full min-w-0 flex-col justify-center gap-4 p-3 md:p-8">
+      <div className="flex min-h-full min-w-0 flex-col justify-center gap-4 p-4">
         {children}
       </div>
     </div>
@@ -486,8 +500,24 @@ function RenameableLabel({
           are pills — putting it on the `Text` as well would double it. */}
       <Group gap={6} align="center" wrap="nowrap" mb={6} className="min-w-0">
         <Popover.Target>
-          <UnstyledButton onClick={() => setOpened((o) => !o)}>
-            <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+          {/* A bordered tile rather than bare text: every other editable
+           * value in the app is a Tile+Popover, and a plain label gave no
+           * hint at all that the channel could be renamed — a hint that
+           * can't be a hover effect, since this ships to touch. Sized to
+           * its content, not to `STAT_TILE_W`, because the row beneath it
+           * has a fixed width budget an oversized header would wrap. */}
+          <UnstyledButton
+            onClick={() => setOpened((o) => !o)}
+            aria-label={`Rename channel (${name && name.length > 0 ? name : defaultLabel})`}
+            px={6}
+            py={2}
+            className={`inline-flex min-w-0 shrink cursor-pointer items-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
+            style={{
+              borderRadius: "var(--mantine-radius-sm)",
+              border: "1px solid var(--mantine-color-default-border)",
+            }}
+          >
+            <Text size="xs" fw={700} c="dimmed" tt="uppercase" truncate>
               {name && name.length > 0 ? name : defaultLabel}
             </Text>
           </UnstyledButton>
@@ -1985,11 +2015,16 @@ function PresetSlotRow({
         {empty ? (
           <div style={{ width: 58 }} className="shrink-0" />
         ) : (
+          /* Direction is the meaning here: Recall lifts the preset out of
+           * the slot, Store drops the amp's current settings into it. These
+           * deliberately avoid `SquareArrowRightEnter`/`Exit` — that pair is
+           * already the Input/Output tab icons in this same view, so reusing
+           * it made the tiles read as "Input/Output". */
           <Tooltip label={`Recall "${slot.name}"`} openDelay={400} withArrow>
             <div>
               <PresetActionTile
                 label="Recall"
-                icon={<SquareArrowRightEnter size={14} />}
+                icon={<ArrowUpFromLine size={14} />}
                 visualValidation
                 onClick={onRecall}
               />
@@ -2010,7 +2045,7 @@ function PresetSlotRow({
           <Popover.Target>
             <PresetActionTile
               label="Store"
-              icon={<SquareArrowRightExit size={14} />}
+              icon={<ArrowDownToLine size={14} />}
               opens="popover"
               visualValidation={storeFeedback}
               // Occupied slots tint red: storing overwrites them, and red
@@ -2201,7 +2236,7 @@ function PresetConfigurationTab({
        * rows run the full width of a maximised window would strand the
        * actions a screen away from the name they belong to. Rows are divided
        * by hairlines rather than each being boxed. */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         <div
           className="min-w-0"
           style={{
@@ -2242,7 +2277,11 @@ const TAB_COMPONENTS: Record<
   output: OutputTab,
 };
 
-export function AmpConfigureView({ source }: AmpConfigureViewProps) {
+export function AmpConfigureView({
+  source,
+  activeTab,
+  onActiveTabChange,
+}: AmpConfigureViewProps) {
   const ampModel = source?.ampModel;
   // The live amp this view reads and writes: Direct Edit's own device, or the
   // online amp a matched project amp is following (`useLinkedSync`). Both
@@ -2278,6 +2317,11 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
 
   const [capability, setCapability] = useState<AmpCapability | null>(null);
   const [capabilityLoading, setCapabilityLoading] = useState(false);
+  const showFingerprintMenu = usePreference("showFingerprintMenu");
+  // Fallback for callers that don't own the tab themselves.
+  const [ownTab, setOwnTab] = useState<string | null>("input");
+  const currentTab = activeTab ?? ownTab;
+  const handleTabChange = onActiveTabChange ?? setOwnTab;
 
   useEffect(() => {
     if (!ampModel) {
@@ -2306,6 +2350,27 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   // lock: a difference while following is only the moment before the next
   // pull (see `useLinkedSync`).
   const locked = !live && (editLock?.locked ?? false);
+  // Stepped out of the live session by hand. The editor behaves exactly as it
+  // does for an offline amp — the lock already resolves to editable — but the
+  // amp is reachable, so anything that would *write* to it has to be held
+  // back explicitly (see `liveAmpDeviceId` below).
+  const disengaged = editLock?.state === "disengaged";
+  const projectSource = source?.kind === "project" ? source : null;
+  const [disengageBusy, setDisengageBusy] = useState(false);
+
+  async function setDisengaged(next: boolean) {
+    if (!projectSource) return;
+    setDisengageBusy(true);
+    const result = await commands.projectsSetAmpLiveDisengaged(
+      projectSource.project.id,
+      projectSource.assignment.id,
+      next,
+    );
+    setDisengageBusy(false);
+    // `project:updated` is what re-resolves the edit lock, so the banner
+    // swaps itself — nothing else to do here.
+    if (result.status === "ok") projectSource.onProjectUpdate(result.data);
+  }
 
   const actions: ConfigureActions | undefined = live
     ? createLiveConfigureActions(live.device.id)
@@ -2369,10 +2434,11 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
 
   // Target for the amp-level live controls (front-panel lock, standby): the
   // live device itself, or a project amp's linked network amp while it is
-  // online.
+  // online. Not while disengaged: these two write straight to the amp, and
+  // leaving them live would contradict the banner one row above them.
   const liveAmpDeviceId =
     live?.device.id ??
-    (source?.kind === "project" && source.linkedDevice?.online
+    (source?.kind === "project" && source.linkedDevice?.online && !disengaged
       ? source.linkedDevice.id
       : undefined);
   const rotaryLocked = live
@@ -2418,17 +2484,70 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             </Text>
             {/* A matched amp has nothing to jump to, so this opens the
                 summary the way the modal normally starts. */}
-            <Button
-              size="compact-xs"
-              variant="light"
-              color="green"
-              onClick={() => {
-                setFocusDifferences(false);
-                setMismatchOpen(true);
-              }}
-            >
-              Compare
-            </Button>
+            <Group gap="xs" wrap="nowrap">
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="green"
+                leftSection={<GitCompare size={14} />}
+                onClick={() => {
+                  setFocusDifferences(false);
+                  setMismatchOpen(true);
+                }}
+              >
+                Compare
+              </Button>
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="gray"
+                leftSection={<Unplug size={14} />}
+                loading={disengageBusy}
+                onClick={() => void setDisengaged(true)}
+              >
+                Disengage
+              </Button>
+            </Group>
+          </Group>
+        </Alert>
+      )}
+
+      {/* Stepped out of the live session on purpose. Amber, not gray: this is
+          a deliberate choice the user made and can undo, not a fault and not
+          the amp having gone away — that one keeps its own Offline banner
+          even while this flag is set. */}
+      {disengaged && (
+        <Alert radius={0} py={6} color="amber" variant="light" icon={<Unplug size={16} />}>
+          <Group justify="space-between" wrap="wrap" gap="xs">
+            <Text size="sm">
+              Disengaged — edits stay in this project. The amp is untouched.
+            </Text>
+            <Group gap="xs" wrap="nowrap">
+              {/* The fingerprints are still compared while disengaged, so the
+                  drift is visible here — which is what informs re-engaging. */}
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="amber"
+                leftSection={<GitCompare size={14} />}
+                onClick={() => {
+                  setFocusDifferences(false);
+                  setMismatchOpen(true);
+                }}
+              >
+                Compare
+              </Button>
+              <Button
+                size="compact-xs"
+                variant="filled"
+                color="amber"
+                leftSection={<Plug size={14} />}
+                loading={disengageBusy}
+                onClick={() => void setDisengaged(false)}
+              >
+                Re-engage
+              </Button>
+            </Group>
           </Group>
         </Alert>
       )}
@@ -2460,18 +2579,33 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
                 ? "Locked — the online amp's settings can't be fully compared."
                 : "Locked — the offline amp differs from the online amp."}
             </Text>
-            {/* Its label is a promise: open on the differing rows. */}
-            <Button
-              size="compact-xs"
-              variant="light"
-              color="red"
-              onClick={() => {
-                setFocusDifferences(true);
-                setMismatchOpen(true);
-              }}
-            >
-              Show differences
-            </Button>
+            <Group gap="xs" wrap="nowrap">
+              {/* Its label is a promise: open on the differing rows. */}
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="red"
+                leftSection={<Eye size={14} />}
+                onClick={() => {
+                  setFocusDifferences(true);
+                  setMismatchOpen(true);
+                }}
+              >
+                Show differences
+              </Button>
+              {/* The way out of a lock without resolving the merge: keep
+                  planning offline and settle the difference later. */}
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="gray"
+                leftSection={<Unplug size={14} />}
+                loading={disengageBusy}
+                onClick={() => void setDisengaged(true)}
+              >
+                Disengage
+              </Button>
+            </Group>
           </Group>
         </Alert>
       )}
@@ -2485,7 +2619,12 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         onProjectUpdate={source?.kind === "project" ? source.onProjectUpdate : undefined}
         following={Boolean(live)}
       />
-    <Tabs defaultValue="input" orientation="vertical" className="min-h-0 flex-1">
+    <Tabs
+      value={currentTab}
+      onChange={handleTabChange}
+      orientation="vertical"
+      className="min-h-0 flex-1"
+    >
       {/* `min-w-0` on the panel is what lets the tab body shrink below its
           content's intrinsic width instead of pushing the whole window into
           a horizontal scroll; the rail itself scrolls once five tabs no
@@ -2504,8 +2643,10 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             </Tabs.Tab>
           </Tooltip>
         ))}
-        <FingerprintInspector target={fingerprintTarget} />
-        {(live || (source?.kind === "project" && source.linkedDevice)) && (
+        {showFingerprintMenu && <FingerprintInspector target={fingerprintTarget} />}
+        {/* Hidden entirely while disengaged rather than rendered inert: they
+            are the only controls left that would reach the amp. */}
+        {!disengaged && (live || (source?.kind === "project" && source.linkedDevice)) && (
           <>
             <RotaryLockToggle deviceId={liveAmpDeviceId} rotaryLocked={rotaryLocked} />
             <StandbyToggle

@@ -311,6 +311,15 @@ pub struct AmpAssignment {
     /// BASIC_INFO). Not yet editable here.
     #[serde(default)]
     pub device_name: Option<String>,
+    /// Manual override: this amp is linked to hardware that may well be
+    /// online, but the user has deliberately stepped out of the live session.
+    /// The plan then edits exactly as it does for an offline amp, and nothing
+    /// is written to the amp. Persisted here rather than held in the UI so it
+    /// survives the amp dropping offline and coming back — the Offline banner
+    /// takes over while it is away, and the Disengaged one returns with it.
+    /// See `edit_lock::AmpEditLockState::Disengaged`.
+    #[serde(default)]
+    pub live_disengaged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -355,7 +364,12 @@ pub struct Project {
 /// Bumped to 17 when the schema-13 `AmpChannel.knob_gain_db` was dropped: CVR
 /// amps have no per-channel knob gain setting. Same leftover-field handling
 /// as 14.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 17;
+///
+/// Bumped to 18 for `AmpAssignment.live_disengaged`, the manual "leave the amp
+/// alone" override. Defaults to `false` via serde — an older file loads as
+/// engaged, which is exactly how it behaved — so no custom migration is
+/// needed; files below 18 are rewritten once.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 18;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -393,6 +407,7 @@ impl AmpAssignment {
             firmware_version,
             channels,
             device_name: None,
+            live_disengaged: false,
         }
     }
 

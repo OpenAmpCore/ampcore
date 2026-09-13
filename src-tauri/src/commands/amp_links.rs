@@ -278,6 +278,42 @@ pub fn projects_merge_amp_from_live(
     Ok(AmpMergeResult { merged: true, project: Some(project), amp_hash: live_fp.amp_hash, remaining: Vec::new() })
 }
 
+/// Steps a project amp in or out of the live session with its linked amp by
+/// hand. While disengaged the plan edits exactly as it does for an offline
+/// amp and nothing reaches the hardware; see
+/// `edit_lock::AmpEditLockState::Disengaged` for how the flag is applied, and
+/// `AmpAssignment.live_disengaged` for why it is persisted rather than held
+/// in the UI.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_amp_live_disengaged(
+    app: AppHandle,
+    project_data: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    disengaged: bool,
+) -> Result<Project, AppError> {
+    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    assignment.live_disengaged = disengaged;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
 /// Clears a project amp's linked MAC. Planned config is left untouched.
 #[tauri::command]
 #[specta::specta]
@@ -300,6 +336,10 @@ pub fn projects_unlink_amp(
         .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
 
     assignment.mac = None;
+    // A disengagement from hardware this slot is no longer linked to means
+    // nothing, and leaving it set would make a later re-link start silently
+    // disengaged.
+    assignment.live_disengaged = false;
     project.touch();
 
     let project = project.clone();

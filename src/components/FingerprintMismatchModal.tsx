@@ -26,6 +26,7 @@ const STATE_BADGE: Record<AmpEditLockState, { color: string; label: string }> = 
   matches: { color: "green", label: "Matches" },
   mismatch: { color: "red", label: "Mismatch" },
   unreadable: { color: "red", label: "Unreadable" },
+  disengaged: { color: "amber", label: "Disengaged" },
 };
 
 // `transition-colors`: after a match, the red tints fade out instead of
@@ -106,7 +107,7 @@ export function FingerprintMismatchModal({
   const [push, setPush] = useState({ running: false, attempt: 0 });
 
   const pushBlocked = following
-    ? "This amp is following the online one, so its settings are already the amp's. Stop following to push a plan instead."
+    ? "This amp is following the online one, so its settings are already the amp's. Stop following to write to the amp instead."
     : null;
 
   const liveHash = lock?.live?.ampHash ?? null;

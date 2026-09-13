@@ -326,7 +326,7 @@ export function AmpCatalogueModal({
 
         <Box className="flex min-w-0 flex-1 flex-col">
           {selectedModel ? (
-            <Stack className="flex-1">
+            <Stack className="min-h-0 flex-1">
               {selectedModel.brand === "CVR" && (
                 <img src="/cvr_dsp_amp.png" alt="CVR amp" className="h-20 w-full object-contain" />
               )}
@@ -378,6 +378,7 @@ export function AmpCatalogueModal({
                   </UnstyledButton>
 
                   <Collapse expanded={specsExpanded}>
+                    <Table.ScrollContainer minWidth={240}>
                     <Table mt={4}>
                       <Table.Tbody>
                         <Table.Tr>
@@ -413,6 +414,7 @@ export function AmpCatalogueModal({
                         </Table.Tr>
                       </Table.Tbody>
                     </Table>
+                    </Table.ScrollContainer>
                   </Collapse>
                 </Stack>
               ) : (

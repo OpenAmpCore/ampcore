@@ -409,6 +409,15 @@ export const commands = {
 	/**  Clears a project amp's linked MAC. Planned config is left untouched. */
 	projectsUnlinkAmp: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_amp", { projectId, assignmentId })),
 	/**
+	 *  Steps a project amp in or out of the live session with its linked amp by
+	 *  hand. While disengaged the plan edits exactly as it does for an offline
+	 *  amp and nothing reaches the hardware; see
+	 *  `edit_lock::AmpEditLockState::Disengaged` for how the flag is applied, and
+	 *  `AmpAssignment.live_disengaged` for why it is persisted rather than held
+	 *  in the UI.
+	 */
+	projectsSetAmpLiveDisengaged: (projectId: string, assignmentId: string, disengaged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_live_disengaged", { projectId, assignmentId, disengaged })),
+	/**
 	 *  Read-only: whether this project amp is editable right now, with both
 	 *  fingerprints and the field-by-field comparison when it's locked. See
 	 *  `data/edit_lock.rs`.
@@ -486,6 +495,16 @@ export type AmpAssignment = {
 	 *  BASIC_INFO). Not yet editable here.
 	 */
 	deviceName?: string | null,
+	/**
+	 *  Manual override: this amp is linked to hardware that may well be
+	 *  online, but the user has deliberately stepped out of the live session.
+	 *  The plan then edits exactly as it does for an offline amp, and nothing
+	 *  is written to the amp. Persisted here rather than held in the UI so it
+	 *  survives the amp dropping offline and coming back — the Offline banner
+	 *  takes over while it is away, and the Disengaged one returns with it.
+	 *  See `edit_lock::AmpEditLockState::Disengaged`.
+	 */
+	liveDisengaged?: boolean,
 };
 
 /**
@@ -724,7 +743,15 @@ export type AmpEditLockState =
 /**  Amp hashes differ — locked. */
 "mismatch" | 
 /**  A fingerprint couldn't be fully computed — locked. */
-"unreadable";
+"unreadable" | 
+/**
+ *  Online and readable, but the user has deliberately stepped out of the
+ *  live session (`AmpAssignment.live_disengaged`) — editable, and nothing
+ *  is written to the amp. Only ever resolved against a *reachable* amp:
+ *  an unlinked or offline amp keeps its own state, since that is the
+ *  honest reason it is editable.
+ */
+"disengaged";
 
 export type AmpFingerprint = {
 	fingerprintVersion: number,

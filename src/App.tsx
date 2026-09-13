@@ -11,7 +11,7 @@ import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { SettingsModal } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateAvailableModal } from "./components/UpdateAvailableModal";
-import { getAutoUpdateChecksEnabled, setAutoUpdateChecksEnabled } from "./lib/preferences";
+import { getPreference, setPreference } from "./lib/preferences";
 import type { Project } from "./lib/bindings";
 
 type AppMode = "modeSelect" | "liveControl" | "projectDesign";
@@ -34,7 +34,7 @@ function App() {
   useEffect(() => {
     getVersion().then(setVersion);
 
-    if (import.meta.env.DEV || !getAutoUpdateChecksEnabled()) {
+    if (import.meta.env.DEV || !getPreference("autoUpdateChecks")) {
       return;
     }
 
@@ -60,7 +60,7 @@ function App() {
   }
 
   function handleDisableUpdateChecks() {
-    setAutoUpdateChecksEnabled(false);
+    setPreference("autoUpdateChecks", false);
     setPendingUpdate(null);
   }
 

@@ -90,15 +90,32 @@ function caption(
     default:
       return {
         text: pull
-          ? "Hold to copy every online setting into this project amp."
-          : "Hold to write every differing setting to the online amp.",
+          ? "Replaces every setting in this project amp with the online amp's."
+          : "Replaces every differing setting on the online amp with this project's.",
       };
   }
 }
 
 /** One side of the strip. `pulseKey` replays a green ring pulse whenever it
- * changes — used on whichever side just received data. */
-function AmpEnd({ icon, label, color, pulseKey }: { icon: ReactNode; label: string; color: string; pulseKey?: string }) {
+ * changes — used on whichever side just received data.
+ *
+ * `role` is the static half of "which way does this go": one word under each
+ * end naming what it is in *this* transfer. The flowing dashes on the track
+ * say the same thing, but only while they're moving — this survives a
+ * screenshot, a reduced-motion setting, and a glance. */
+function AmpEnd({
+  icon,
+  label,
+  color,
+  role,
+  pulseKey,
+}: {
+  icon: ReactNode;
+  label: string;
+  color: string;
+  role?: "source" | "destination";
+  pulseKey?: string;
+}) {
   return (
     <Stack gap={4} align="center" className="shrink-0">
       <span
@@ -111,9 +128,23 @@ function AmpEnd({ icon, label, color, pulseKey }: { icon: ReactNode; label: stri
           {icon}
         </ThemeIcon>
       </span>
-      <Text size="xs" c="dimmed">
+      <Text size="xs" c="dimmed" ta="center">
         {label}
       </Text>
+      {/* Amber on the side that loses its settings — the same "this changes
+          something" accent the tiles use — and a plain dimmed word on the
+          side that doesn't. */}
+      {role && (
+        <Text
+          fz={10}
+          fw={700}
+          tt="uppercase"
+          ta="center"
+          c={role === "destination" ? "amber" : "dimmed"}
+        >
+          {role === "destination" ? "Overwritten" : "Source"}
+        </Text>
+      )}
     </Stack>
   );
 }
@@ -186,6 +217,9 @@ function MergeStrip({
   // The fill grows from the sending amp, so its transform origin is that side.
   const origin = pull ? "origin-right" : "origin-left";
   const pulse = state === "merged" ? `merged-${attempt}` : undefined;
+  // Once the two match there is no source and no destination any more, so the
+  // roles drop away rather than claiming something is about to be overwritten.
+  const showRoles = !green;
 
   return (
     <div className="flex w-full max-w-[520px] min-w-0 items-start gap-3">
@@ -193,6 +227,7 @@ function MergeStrip({
         icon={<Server size={20} />}
         label="Offline Amp"
         color={green ? "green" : state === "failed" ? "red" : "gray"}
+        role={showRoles ? (pull ? "destination" : "source") : undefined}
         pulseKey={pull ? pulse : undefined}
       />
 
@@ -246,6 +281,7 @@ function MergeStrip({
         icon={<Network size={20} />}
         label="Online Amp"
         color={green ? "green" : !pull && state === "failed" ? "red" : "gray"}
+        role={showRoles ? (pull ? "source" : "destination") : undefined}
         pulseKey={pull ? undefined : pulse}
       />
     </div>
@@ -363,11 +399,17 @@ export function AmpMergePanel({
 
   const hold = useHoldToConfirm({ durationMs: HOLD_MS, disabled: !runnable, onConfirm: () => void run() });
 
+  // Compared by hash rather than by `state === "matches"`: a disengaged amp
+  // reports `disengaged` whether or not the two agree, and offering a merge
+  // for settings that are already identical would be a lie.
+  const hashesAgree =
+    lock?.project?.ampHash != null && lock.project.ampHash === lock.live?.ampHash;
+
   const state: StripState = busy
     ? "pending"
     : outcome?.kind === "merged"
       ? "merged"
-      : lock?.state === "matches"
+      : hashesAgree
         ? "inSync"
         : outcome
           ? "failed"
@@ -379,7 +421,11 @@ export function AmpMergePanel({
   const { text, color } = caption(state, outcome, reason, direction);
   const done = state === "merged" || state === "inSync";
   const Arrow = direction === "pull" ? ArrowLeft : ArrowRight;
-  const idleLabel = direction === "pull" ? "Hold to match offline to online" : "Hold to match online to offline";
+  // "Match offline to online" was ambiguous English — it can mean "make
+  // offline resemble online" or "pair the two". Name the side that loses its
+  // settings instead.
+  const idleLabel =
+    direction === "pull" ? "Hold to overwrite the offline amp" : "Hold to overwrite the online amp";
   const retryLabel = outcome?.kind === "partial" ? "Hold to carry on" : "Hold to try again";
 
   return (
@@ -392,9 +438,16 @@ export function AmpMergePanel({
         // Switching direction mid-write would leave the step list describing a
         // run that is no longer the one in flight.
         disabled={busy}
+        // Deliberately *not* "Offline ← Online" / "Online ← Offline": two
+        // labels built from the same two words in swapped order can only be
+        // told apart by decoding an arrow, and `dest ← src` is a convention
+        // the panel never states. These share no words, so they read
+        // differently at a glance, and from/to carries the direction in
+        // plain English. Which side gets overwritten is named by the role
+        // badges in the strip below.
         data={[
-          { value: "pull", label: "Offline ← Online" },
-          { value: "push", label: "Online ← Offline", disabled: Boolean(pushBlocked) },
+          { value: "pull", label: "Read from Amp" },
+          { value: "push", label: "Write to Amp", disabled: Boolean(pushBlocked) },
         ]}
       />
 

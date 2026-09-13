@@ -312,7 +312,17 @@ export function LimiterEditor({
           Bridged with Out{partnerLetter} — showing combined values
         </Text>
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, width: "100%" }}>
+      {/* `1fr` is `minmax(auto, 1fr)`, so four columns can't shrink below
+       * their content and would push the window into a horizontal scroll.
+       * Below `useIsTight` they fold to 2x2 — same order, two rows. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: tight ? "1fr 1fr" : "1fr 1fr 1fr 1fr",
+          gap: 16,
+          width: "100%",
+        }}
+      >
         <ThresholdSliderColumn
           label="RMS"
           value={rmsPowerWatts(rmsThresholdVrmsDisplay, effectiveOhms)}
@@ -359,9 +369,20 @@ export function LimiterEditor({
         />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, width: "100%", alignItems: "end" }}>
+      {/* Folds to a single column rather than 2x2: the Load input's `span 2`
+       * would strand an On/Off button on a row of its own in two columns, so
+       * tight just stacks the three controls in DOM order. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: tight ? "1fr" : "1fr 1fr 1fr 1fr",
+          gap: 16,
+          width: "100%",
+          alignItems: "end",
+        }}
+      >
         <OnOffButton enabled={limiter.rms.enabled} onClick={() => patch({ rmsEnabled: !limiter.rms.enabled })} />
-        <div style={{ gridColumn: "span 2" }}>
+        <div style={{ gridColumn: tight ? "span 1" : "span 2" }}>
           <NumberInput
             size="sm"
             label="Load"

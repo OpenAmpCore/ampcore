@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ActionIcon, Button, Group, Menu, Text } from "@mantine/core";
 import { Copy, Minus, Square, X } from "lucide-react";
+import { useIsTight } from "../lib/breakpoints";
 
 const appWindow = getCurrentWindow();
 
@@ -26,6 +27,7 @@ export function TitleBar({
   centerContent,
 }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
+  const tight = useIsTight();
 
   useEffect(() => {
     appWindow.isMaximized().then(setIsMaximized);
@@ -65,12 +67,16 @@ export function TitleBar({
             )}
           </Menu.Dropdown>
         </Menu>
-        {/* Below 640px the File menu, the centered tabs and the three window
-            buttons already fill the bar, so the title (also shown in the OS
-            taskbar) is the one thing that gives up its space. */}
-        <Text data-tauri-drag-region size="sm" fw={500} truncate className="hidden min-w-0 flex-1 sm:block">
-          {title}
-        </Text>
+        {/* Below `useIsTight` the File menu, the centered tabs and the three
+            window buttons already fill the bar, so the title (also shown in
+            the OS taskbar) is the one thing that gives up its space. Driven
+            by the shared breakpoint rather than Tailwind's own `sm:`, which
+            happened to match today but could drift from it silently. */}
+        {!tight && (
+          <Text data-tauri-drag-region size="sm" fw={500} truncate className="min-w-0 flex-1">
+            {title}
+          </Text>
+        )}
       </Group>
 
       <Group data-tauri-drag-region gap={4} wrap="nowrap" justify="center" className="min-w-0">

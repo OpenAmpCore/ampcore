@@ -7,8 +7,8 @@ use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
 use commands::amp_links::{
-    projects_amp_edit_lock, projects_link_amp, projects_merge_amp_from_live, projects_unlink_amp,
-    projects_validate_amp_link,
+    projects_amp_edit_lock, projects_link_amp, projects_merge_amp_from_live,
+    projects_set_amp_live_disengaged, projects_unlink_amp, projects_validate_amp_link,
 };
 use commands::amp_push::{projects_plan_amp_push, projects_push_amp_to_live};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
@@ -117,6 +117,7 @@ pub fn run() {
             projects_validate_amp_link,
             projects_link_amp,
             projects_unlink_amp,
+            projects_set_amp_live_disengaged,
             projects_amp_edit_lock,
             projects_merge_amp_from_live,
             projects_plan_amp_push,

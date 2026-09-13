@@ -49,7 +49,7 @@ const DEFAULT_BORDER = "var(--mantine-color-default-border)";
 /** Tiles are the only focusable things in a strip now that readouts are
  * plain divs, so they need a visible focus ring — `UnstyledButton` ships
  * none. */
-const STAT_TILE_FOCUS =
+export const STAT_TILE_FOCUS =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--mantine-color-amber-filled)]";
 
 function wash(color: string, percent: number): string {

@@ -33,6 +33,16 @@ const CARD_CONTROL_CLASS =
   "bg-[var(--mantine-color-gray-3)] text-black hover:bg-[var(--mantine-color-gray-4)] " +
   "dark:bg-[var(--mantine-color-gray-7)] dark:text-white dark:hover:bg-[var(--mantine-color-gray-6)]";
 
+/** Card controls fade in on hover so the grid stays calm at rest. Hover is
+ * not a thing on touch, though, and these are the *only* way to edit, delete
+ * or link an amp — so they also reveal on keyboard focus, and stay visible
+ * outright on any pointer that can't hover. `(hover: none)` is a pointer
+ * *capability* query, not a width breakpoint, so it doesn't belong in
+ * `lib/breakpoints.ts`. */
+const CARD_CONTROL_REVEAL =
+  "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 " +
+  "focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
+
 interface WorkspaceViewProps {
   project: Project;
   onProjectUpdate: (project: Project) => void;
@@ -212,7 +222,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       </Badge>
                     )}
                     <ActionIcon
-                      className={`absolute -top-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100 ${CARD_CONTROL_CLASS}`}
+                      className={`absolute -top-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
                       size="sm"
                       radius="sm"
                       color="gray"
@@ -229,7 +239,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       <Pencil size={12} />
                     </ActionIcon>
                     <ActionIcon
-                      className="absolute -top-1.5 -right-1.5 opacity-0 transition-opacity group-hover:opacity-100"
+                      className={`absolute -top-1.5 -right-1.5 ${CARD_CONTROL_REVEAL}`}
                       size="sm"
                       radius="sm"
                       color="red"
@@ -243,7 +253,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       <X size={12} />
                     </ActionIcon>
                     <ActionIcon
-                      className={`absolute -bottom-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100 ${CARD_CONTROL_CLASS}`}
+                      className={`absolute -bottom-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
                       size="sm"
                       radius="sm"
                       color="gray"

@@ -9,6 +9,7 @@ import { useLivePolling } from "../hooks/useLivePolling";
 import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
 import { commands, type AmpModelCatalogEntry, type DiscoveredDevice } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
+import { usePreference } from "../lib/preferences";
 
 /** Resolves which catalog `AmpModelCatalogEntry` a live device should be
  * configured as — Direct Edit's counterpart to a Project's
@@ -66,8 +67,16 @@ export function LiveControlView() {
   const channelConfigById = useLiveChannelConfig();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState("configure");
+  const showRawTelemetry = usePreference("showRawTelemetry");
+  /** Owned here rather than inside `AmpConfigureView` so the editor's tab
+   * survives anything that re-renders this view. */
+  const [configureTab, setConfigureTab] = useState<string | null>("input");
 
   const selectedDevice = devices.find((d) => d.id === selectedId) ?? null;
+  // Derived, not stored: turning the setting off while the telemetry panel
+  // is open falls back to Configure instead of stranding the user on a view
+  // whose switch has just disappeared.
+  const effectiveView = showRawTelemetry ? view : "configure";
 
   // Live Control is one consumer of the shared live connector, not its owner:
   // it starts the driver like any other live-aware view would, and subscribes
@@ -112,7 +121,7 @@ export function LiveControlView() {
   );
 
   const deviceContent = selectedDevice ? (
-    view === "telemetry" ? (
+    effectiveView === "telemetry" ? (
       <DeviceTelemetryPanel
         device={selectedDevice}
         telemetry={telemetryById[selectedDevice.id]}
@@ -120,6 +129,8 @@ export function LiveControlView() {
       />
     ) : (
       <AmpConfigureView
+        activeTab={configureTab}
+        onActiveTabChange={setConfigureTab}
         source={{
           kind: "live",
           device: selectedDevice,
@@ -137,100 +148,104 @@ export function LiveControlView() {
     </Center>
   );
 
-  // Compact layout: the 260px discovery rail costs a third of a small
-  // window, so it collapses into a Select in the toolbar. Same data, same
-  // selection state — only the affordance changes.
-  if (compact) {
-    return (
-      <Stack h="100%" gap={0} className="min-w-0">
-        <Group px="sm" py="xs" gap="xs" wrap="wrap" align="center">
-          <Select
-            size="xs"
-            className="min-w-0"
-            style={{ flex: "1 1 160px" }}
-            placeholder={devices.length === 0 ? "Scanning…" : "Discovered amps…"}
-            data={devices.map((d) => ({
-              value: d.id,
-              label: `${d.name || d.mac}${d.online ? "" : " (offline)"}`,
-            }))}
-            value={selectedId}
-            onChange={setSelectedId}
-            searchable
-          />
-          {selectedDevice && viewSwitch}
-          {selectedDevice && modelSelect}
-        </Group>
-        <Divider />
-        <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>
-      </Stack>
-    );
-  }
-
+  // One tree for both layouts, branching only on props/classNames. Returning
+  // two *different* element trees would make React tear the whole subtree
+  // down every time the window crosses the compact boundary — remounting
+  // `AmpConfigureView` and resetting its tab, channel selection and
+  // capability fetch. Conditional siblings (`{cond && <X/>}`) render `false`
+  // but still hold their slot in the children array, so `deviceContent`
+  // keeps a stable position in both modes and survives the switch.
   return (
-    <Group h="100%" gap={0} align="stretch" wrap="nowrap">
-      <Stack w={260} h="100%" p="md" gap="md" className="shrink-0">
-        <Text fw={500} size="sm" c="dimmed">
-          Discovered Amps
-        </Text>
-
-        {devices.length === 0 ? (
-          <Center className="flex-1">
-            <Text c="dimmed" size="sm" ta="center">
-              Scanning for amplifiers on the network…
+    <div className={`flex h-full min-h-0 min-w-0 ${compact ? "flex-col" : "flex-row"}`}>
+      {/* Compact drops the 260px discovery rail — it costs a third of a
+          small window — in favour of the Select in the toolbar below. Same
+          data, same selection state, only the affordance changes. */}
+      {!compact && (
+        <>
+          <Stack w={260} h="100%" p="md" gap="md" className="shrink-0">
+            <Text fw={500} size="sm" c="dimmed">
+              Discovered Amps
             </Text>
-          </Center>
-        ) : (
-          <ScrollArea className="flex-1">
-            <Stack gap="xs">
-              {devices.map((d) => {
-                const isSelected = d.id === selectedId;
-                return (
-                  <Card
-                    key={d.id}
-                    withBorder
-                    padding="sm"
-                    onClick={() => setSelectedId(d.id)}
-                    className={`cursor-pointer${isSelected ? " border-2 border-[var(--mantine-color-amber-filled)]" : ""}`}
-                  >
-                    <Group justify="space-between" wrap="nowrap" gap="xs">
-                      <div className="min-w-0">
-                        <Text fw={500} size="sm" truncate>
-                          {d.name || d.mac}
-                        </Text>
-                        <Text size="xs" c="dimmed">
-                          {d.ip}
-                        </Text>
-                      </div>
-                      <Badge color={d.online ? "green" : "gray"} variant="light" size="xs">
-                        {d.online ? "Online" : "Offline"}
-                      </Badge>
-                    </Group>
-                  </Card>
-                );
-              })}
-            </Stack>
-          </ScrollArea>
-        )}
-      </Stack>
 
-      <Divider orientation="vertical" />
+            {devices.length === 0 ? (
+              <Center className="flex-1">
+                <Text c="dimmed" size="sm" ta="center">
+                  Scanning for amplifiers on the network…
+                </Text>
+              </Center>
+            ) : (
+              <ScrollArea className="min-h-0 flex-1">
+                <Stack gap="xs">
+                  {devices.map((d) => {
+                    const isSelected = d.id === selectedId;
+                    return (
+                      <Card
+                        key={d.id}
+                        withBorder
+                        padding="sm"
+                        onClick={() => setSelectedId(d.id)}
+                        className={`cursor-pointer${isSelected ? " border-2 border-[var(--mantine-color-amber-filled)]" : ""}`}
+                      >
+                        <Group justify="space-between" wrap="nowrap" gap="xs">
+                          <div className="min-w-0">
+                            <Text fw={500} size="sm" truncate>
+                              {d.name || d.mac}
+                            </Text>
+                            <Text size="xs" c="dimmed">
+                              {d.ip}
+                            </Text>
+                          </div>
+                          <Badge color={d.online ? "green" : "gray"} variant="light" size="xs">
+                            {d.online ? "Online" : "Offline"}
+                          </Badge>
+                        </Group>
+                      </Card>
+                    );
+                  })}
+                </Stack>
+              </ScrollArea>
+            )}
+          </Stack>
+          <Divider orientation="vertical" />
+        </>
+      )}
 
-      <div className="h-full min-w-0 flex-1">
-        {selectedDevice ? (
-          <Stack h="100%" gap={0}>
-            <Group justify="space-between" wrap="nowrap" gap="xs" px="md" py="xs">
-              {viewSwitch}
-              {modelSelect}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Rendered whenever it has something in it: the device picker in
+            compact, the view/model controls once an amp is selected. */}
+        {(compact || selectedDevice) && (
+          <>
+            <Group
+              px={compact ? "sm" : "md"}
+              py="xs"
+              gap="xs"
+              wrap="wrap"
+              align="center"
+              justify={compact ? undefined : "space-between"}
+            >
+              {compact && (
+                <Select
+                  size="xs"
+                  className="min-w-0"
+                  style={{ flex: "1 1 160px" }}
+                  placeholder={devices.length === 0 ? "Scanning…" : "Discovered amps…"}
+                  data={devices.map((d) => ({
+                    value: d.id,
+                    label: `${d.name || d.mac}${d.online ? "" : " (offline)"}`,
+                  }))}
+                  value={selectedId}
+                  onChange={setSelectedId}
+                  searchable
+                />
+              )}
+              {selectedDevice && showRawTelemetry && viewSwitch}
+              {selectedDevice && modelSelect}
             </Group>
             <Divider />
-            <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>
-          </Stack>
-        ) : (
-          <Center h="100%">
-            <Text c="dimmed">Select an amp from the list</Text>
-          </Center>
+          </>
         )}
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>
       </div>
-    </Group>
+    </div>
   );
 }

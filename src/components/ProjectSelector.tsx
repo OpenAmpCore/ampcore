@@ -14,7 +14,6 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
 
   const form = useForm({
@@ -72,9 +71,7 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
                 withBorder
                 padding="sm"
                 onClick={() => onSelect(project)}
-                onMouseEnter={() => setHoveredId(project.id)}
-                onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
-                className="cursor-pointer"
+                className="group cursor-pointer"
               >
                 <Group justify="space-between" wrap="nowrap">
                   <div className="min-w-0">
@@ -88,7 +85,15 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
                   <ActionIcon
                     variant="subtle"
                     color="gray"
-                    className={hoveredId === project.id ? "visible" : "invisible"}
+                    // Reveals on hover, on keyboard focus, and always on a
+                    // pointer that can't hover — it used to be `invisible`
+                    // on anything but hover, which both hid it on touch and
+                    // left it sitting there tappable but unseen.
+                    className={
+                      "opacity-0 transition-opacity group-hover:opacity-100 " +
+                      "group-focus-within:opacity-100 focus-visible:opacity-100 " +
+                      "[@media(hover:none)]:opacity-100"
+                    }
                     onClick={(e) => {
                       e.stopPropagation();
                       setEditingProject(project);
