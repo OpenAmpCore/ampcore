@@ -223,6 +223,28 @@ export const commands = {
 	 */
 	liveControlFetchBridge: (deviceId: string) => typedError<DeviceBridge, AppError>(__TAURI_INVOKE("live_control_fetch_bridge", { deviceId })),
 	/**
+	 *  Reads one output channel's FIR filter (FC=43) — name plus the raw 512-tap
+	 *  coefficient array. The on-demand counterpart to nothing: FIR data is not in
+	 *  the FC=27 sync block and nothing polls it in the background, so this command
+	 *  is the only way it ever reaches the app.
+	 * 
+	 *  `expects_fragments` is true because the reply is ~2093 bytes, which the
+	 *  protocol splits into five datagrams. That also makes the request wait for a
+	 *  clear line per `RequestRegistry::conflicts_with` — the per-IP reassembler
+	 *  cannot interleave two fragmented exchanges — so it will collide with the
+	 *  200ms FC=27 poll tick fairly often; `send_request_with_retry`'s `Busy`
+	 *  retry is what absorbs that.
+	 * 
+	 *  **Deliberately unlike `live_control_fetch_presets`/`_fetch_bridge`, this
+	 *  stores nothing in `LiveDeviceState` and emits no event.** Those cache
+	 *  because several views read the same snapshot and a background tick keeps it
+	 *  fresh. FIR has one consumer, is fetched per channel on demand, and is never
+	 *  refreshed behind the caller's back — so a cache here would add an
+	 *  invalidation question and answer none. The snapshot is returned; the caller
+	 *  holds it.
+	 */
+	liveControlFetchChannelFir: (deviceId: string, channelIndex: number) => typedError<DeviceChannelFir, AppError>(__TAURI_INVOKE("live_control_fetch_channel_fir", { deviceId, channelIndex })),
+	/**
 	 *  FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
 	 *  is filled from the crosspoint's current state, since the wire packet has
 	 *  no partial form (see `current_channel`).
@@ -1130,6 +1152,45 @@ export type ChannelFingerprint = {
 	ampFields: ChannelAmpCanonical,
 };
 
+export type ChannelFirSnapshot = {
+	channelIndex: number,
+	/**
+	 *  `None` when the amp replied with the 2048-byte nameless form — a
+	 *  meaningfully different thing from `Some("")`, which is an amp that has
+	 *  a name field with nothing stored in it. The vendor shows the literal
+	 *  `"---"` for the latter.
+	 */
+	name: string | null,
+	/**  Locally known, not read back — see `FIR_SAMPLE_RATE_HZ`. */
+	sampleRateHz: number,
+	/**  Locally known, not read back — see `FIR_MAX_TAPS`. */
+	maxTaps: number,
+	/**
+	 *  Taps minus trailing zeros — the vendor's "Order: N Taps". Derived, not
+	 *  a wire field. See `fir_order`.
+	 */
+	order: number,
+	/**
+	 *  Index of the peak-magnitude tap, and that index in milliseconds — the
+	 *  vendor's zero-time readout. Derived, not a wire field. See
+	 *  `fir_time_zero`.
+	 */
+	timeZeroIndex: number,
+	timeZeroMs: number | null,
+	/**
+	 *  All `FIR_MAX_TAPS` coefficients, trailing zeros included, exactly as
+	 *  the amp sent them: IEEE-754 float32 little-endian with no scaling.
+	 */
+	coefficients: (number | null)[],
+	/**
+	 *  Which of the two reply forms this came from (2048 or 2080). Kept so the
+	 *  answer is visible rather than inferred — the two are distinguished by
+	 *  nothing else.
+	 */
+	bodyLen: number,
+	receivedAt: number | null,
+};
+
 /**
  *  Which physical input feeds a channel — a `SourceKind` alone isn't enough
  *  to identify one, since a model typically exposes several physical inputs
@@ -1238,6 +1299,18 @@ export type DeviceBridgeSnapshot = {
 export type DeviceChannelConfig = {
 	deviceId: string,
 	config: ChannelConfigSnapshot,
+};
+
+/**
+ *  Command payload pairing a device id with one output channel's FC=43 FIR
+ *  snapshot — what `live_control_fetch_channel_fir` returns. Unlike its
+ *  siblings above there is no matching `LiveDeviceInner` field and no event:
+ *  FIR is fetched on demand per channel and never refreshed behind the
+ *  caller's back (see that command's doc comment).
+ */
+export type DeviceChannelFir = {
+	deviceId: string,
+	fir: ChannelFirSnapshot,
 };
 
 /**

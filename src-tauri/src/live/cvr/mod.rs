@@ -5,6 +5,7 @@ pub mod channel_state;
 pub mod channel_state_v118;
 pub mod channel_state_v119;
 pub mod driver;
+pub mod fir;
 pub mod bridge;
 pub mod preset;
 pub mod protocol;

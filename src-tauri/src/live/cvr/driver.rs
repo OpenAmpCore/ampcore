@@ -361,7 +361,7 @@ async fn run(
                     if registry.conflicts_with(&ip, FC_SYNC_DATA, true) {
                         continue;
                     }
-                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), expects_fragments: true, sink: ResultSink::Internal };
+                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), expects_fragments: true, in_out_flag: 0, sink: ResultSink::Internal };
                     let (packet, superseded) = registry.register(spec, Instant::now());
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
@@ -438,6 +438,7 @@ async fn run(
                         body: Vec::new(),
                         // A one-byte body — never fragmented.
                         expects_fragments: false,
+                        in_out_flag: 0,
                         sink: ResultSink::Internal,
                     };
                     let (packet, superseded) = registry.register(spec, now);

@@ -94,11 +94,24 @@ pub struct RequestSpec {
     /// wrongly exclusive only costs latency, wrongly concurrent garbles a
     /// reassembly buffer.
     pub expects_fragments: bool,
+    /// StructHeader `in_out_flag` (0 = input side, 1 = output side). Every
+    /// read this app made before FIR was input-side, which is why
+    /// `build_protocol_packet` hardcoded it to 0 — but FC=43 FIR_datas is an
+    /// output-channel query and the vendor sends it with 1
+    /// (`Mypages/FIRPage.xaml.cs:434`), so it has to reach the packet builder.
+    /// Leave 0 for anything whose vendor call site doesn't set it.
+    pub in_out_flag: u8,
     pub sink: ResultSink,
 }
 
 struct PendingRequest {
     generation: u64,
+    /// Retained verbatim so `poll_deadlines`' retransmit rebuilds the *same*
+    /// packet. It used to hardcode `chx = 0`, which silently retried FC=50
+    /// pair 1 as pair 0 — and would have retried every per-channel FC=43 FIR
+    /// read as channel A.
+    chx: u8,
+    in_out_flag: u8,
     body: Vec<u8>,
     frames: Vec<Vec<u8>>,
     hard_deadline: Instant,
@@ -164,7 +177,7 @@ impl RequestRegistry {
         let generation = self.generations.entry(key.clone()).and_modify(|g| *g += 1).or_insert(1);
         let generation = *generation;
 
-        let packet = super::protocol::build_protocol_packet(spec.function_code, 2, spec.chx, &spec.body);
+        let packet = build_request_packet(spec.function_code, spec.chx, spec.in_out_flag, &spec.body);
 
         let superseded = self.pending.remove(&key).map(|old| ResolvedRequest {
             ip: key.0.clone(),
@@ -177,6 +190,8 @@ impl RequestRegistry {
             key,
             PendingRequest {
                 generation,
+                chx: spec.chx,
+                in_out_flag: spec.in_out_flag,
                 body: spec.body,
                 frames: Vec::new(),
                 hard_deadline: now + Duration::from_millis(REQUEST_TIMEOUT_MS),
@@ -233,7 +248,7 @@ impl RequestRegistry {
                     pending.hard_deadline = now + Duration::from_millis(REQUEST_RETRY_TIMEOUT_MS);
                     pending.frames.clear();
                     pending.settle_deadline = None;
-                    let packet = super::protocol::build_protocol_packet(key.1, 2, 0, &pending.body);
+                    let packet = build_request_packet(key.1, pending.chx, pending.in_out_flag, &pending.body);
                     retransmits.push(Transmit { ip: key.0.clone(), packet });
                 } else {
                     done_keys.push(key.clone());
@@ -254,6 +269,14 @@ impl RequestRegistry {
 
         (resolved, retransmits)
     }
+}
+
+/// One query packet: `status = 2` (`Responsed::Request`), `segment = 0`,
+/// `link = 0`. Identical bytes to the `build_protocol_packet` this replaced
+/// whenever `in_out_flag` is 0 — which is every read but FC=43 — so FC=27,
+/// FC=50 and FC=59 are unchanged on the wire.
+fn build_request_packet(function_code: u8, chx: u8, in_out_flag: u8, body: &[u8]) -> Vec<u8> {
+    super::protocol::build_control_packet_with_status(function_code, 2, chx, 0, 0, in_out_flag, body)
 }
 
 /// Concatenates accumulated frames and, for FC=27 specifically, sanity-checks
@@ -651,6 +674,7 @@ mod tests {
             chx: 0,
             body: Vec::new(),
             expects_fragments,
+            in_out_flag: 0,
             sink: ResultSink::Internal,
         }
     }

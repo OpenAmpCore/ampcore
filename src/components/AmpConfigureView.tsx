@@ -103,6 +103,7 @@ import {
   createLiveConfigureActions,
   LIVE_CONFIGURE_CAPABILITIES,
 } from "../lib/liveConfigureAdapter";
+import { FirPanel } from "./FirPanel";
 import { usePreference } from "../lib/preferences";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
@@ -378,6 +379,13 @@ interface ConfigurableTabProps {
    * return;` rather than assuming every field is always writable. */
   actions: ConfigureActions;
   capabilities: ConfigureCapabilities;
+  /** The live amp this editor can reach right now, if any — Direct Edit's own
+   * device or the online amp a project amp is following, and `undefined` once
+   * that amp is offline or deliberately disengaged (see `liveAmpDeviceId`).
+   * Distinct from `telemetry`'s "is there a live source at all": a tab reads
+   * this to decide whether a *device-only* feature can be queried. Today just
+   * FIR, whose coefficients exist nowhere but on the amp. */
+  deviceId?: string;
 }
 
 const METER_FLOOR_DB = -60;
@@ -1337,6 +1345,7 @@ function OutputTab({
   actions,
   capabilities,
   telemetry,
+  deviceId,
 }: ConfigurableTabProps) {
   const trimRange = capability.paramRanges.outputTrimDb;
   const volumeRange = capability.paramRanges.outputVolumeDb;
@@ -1445,12 +1454,13 @@ function OutputTab({
         </Tabs>
         <div className="min-h-0 flex-1">
           {view === "fir" ? (
-            <Center h="100%">
-              <Text c="dimmed" size="sm">
-                FIR editor for Out{letterLabel(subChannel)} — coming in a later
-                phase.
-              </Text>
-            </Center>
+            <FirPanel
+              key={subChannel.channelIndex}
+              deviceId={deviceId}
+              channelIndex={subChannel.channelIndex}
+              label={letterLabel(subChannel)}
+              capability={capability}
+            />
           ) : view === "eq" ? (
             <div className="h-full overflow-y-auto">
               <EqEditor
@@ -2693,6 +2703,7 @@ export function AmpConfigureView({
               telemetry={telemetry}
               actions={actions}
               capabilities={capabilities}
+              deviceId={liveAmpDeviceId}
             />
           );
         }

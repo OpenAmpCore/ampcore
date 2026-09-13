@@ -10,12 +10,14 @@ use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use crate::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
+use crate::live::cvr::fir;
 use crate::live::cvr::preset;
 use crate::live::cvr::request::{WriteOutcome, WriteSpec};
 use crate::live::cvr::write;
 use crate::live::driver::all_drivers;
 use crate::live::state::{
-    DeviceBridge, DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink, LiveWriteAck,
+    DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
+    LiveEventSink, LiveWriteAck,
 };
 
 /// Shared lookup for every write command below: resolves `device_id` to its
@@ -91,6 +93,22 @@ fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Resu
     if firmware_family != Some("1.1.8") {
         return Err(AppError::from(format!(
             "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
+            device_id, firmware_family
+        )));
+    }
+    Ok(())
+}
+
+/// FC=43 FIR_datas is confirmed against 1.1.8, and 1.1.9 is accepted on the
+/// same basis `write.rs` already accepts it for FC=44 FIR bypass: the two
+/// firmwares share the v118 encoder for every FIR command, and
+/// `capability::cvr` gates the whole feature on vNum >= 118 (`fir_filters`).
+/// Anything older — or an unrecognized firmware — is refused rather than
+/// guessed at, matching this app's no-fallback-encoding rule.
+fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
+    if !matches!(firmware_family, Some("1.1.8") | Some("1.1.9")) {
+        return Err(AppError::from(format!(
+            "device {} FIR data requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
             device_id, firmware_family
         )));
     }
@@ -273,6 +291,7 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
         body: Vec::new(),
         // FC=27 is always fragmented.
         expects_fragments: true,
+        in_out_flag: 0,
         sink: crate::live::cvr::request::ResultSink::External(tx),
     };
     request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -317,8 +336,9 @@ const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 /// things fire close together) would surface a raw "Busy" error instead of
 /// just quietly succeeding a moment later.
 ///
-/// `expects_fragments` is passed straight through to the spec — see its doc
-/// for why a single-datagram read must declare itself as one.
+/// `expects_fragments` and `in_out_flag` are passed straight through to the
+/// spec — see their docs for why a single-datagram read must declare itself as
+/// one, and why an output-side query has to say so.
 async fn send_request_with_retry(
     request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
     ip: &str,
@@ -326,6 +346,7 @@ async fn send_request_with_retry(
     chx: u8,
     body: Vec<u8>,
     expects_fragments: bool,
+    in_out_flag: u8,
 ) -> Result<Vec<u8>, AppError> {
     let mut last_err = AppError::from(format!("device {} request never attempted", ip));
     for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
@@ -336,6 +357,7 @@ async fn send_request_with_retry(
             chx,
             body: body.clone(),
             expects_fragments,
+            in_out_flag,
             sink: crate::live::cvr::request::ResultSink::External(tx),
         };
         request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -372,13 +394,13 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
 
     let list_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true)
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true, 0)
             .await?;
     let slots = preset::parse_preset_list(&list_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
 
     let current_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true)
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true, 0)
             .await?;
     let active_preset_name = preset::parse_preset_current(&current_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
@@ -439,6 +461,7 @@ pub async fn live_control_fetch_bridge(
             pair_index,
             Vec::new(),
             false,
+            0,
         )
         .await?;
         // The pair comes from the reply's own header, not from what was
@@ -792,6 +815,7 @@ pub async fn live_control_set_output_bridge(
             pair_index,
             Vec::new(),
             false,
+            0,
         )
         .await;
         if let Ok(frame) = frame {
@@ -1132,4 +1156,60 @@ pub async fn live_control_set_crossover_slot(
         tally.record(write::send_control(&write_tx, ip, &write::CROSSOVER_COMMIT_PACKET).await.map_err(|e| e.to_string())?);
     }
     Ok(tally.finish())
+}
+
+/// Reads one output channel's FIR filter (FC=43) — name plus the raw 512-tap
+/// coefficient array. The on-demand counterpart to nothing: FIR data is not in
+/// the FC=27 sync block and nothing polls it in the background, so this command
+/// is the only way it ever reaches the app.
+///
+/// `expects_fragments` is true because the reply is ~2093 bytes, which the
+/// protocol splits into five datagrams. That also makes the request wait for a
+/// clear line per `RequestRegistry::conflicts_with` — the per-IP reassembler
+/// cannot interleave two fragmented exchanges — so it will collide with the
+/// 200ms FC=27 poll tick fairly often; `send_request_with_retry`'s `Busy`
+/// retry is what absorbs that.
+///
+/// **Deliberately unlike `live_control_fetch_presets`/`_fetch_bridge`, this
+/// stores nothing in `LiveDeviceState` and emits no event.** Those cache
+/// because several views read the same snapshot and a background tick keeps it
+/// fresh. FIR has one consumer, is fetched per channel on demand, and is never
+/// refreshed behind the caller's back — so a cache here would add an
+/// invalidation question and answer none. The snapshot is returned; the caller
+/// holds it.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_fetch_channel_fir(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+) -> Result<DeviceChannelFir, AppError> {
+    let (ip, firmware_family, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, device.firmware_family, request_tx)
+    };
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+
+    let frame = send_request_with_retry(
+        &request_tx,
+        &ip,
+        fir::FC_FIR_DATA,
+        channel_index,
+        fir::build_fir_request_body(),
+        true,
+        fir::FIR_IN_OUT_FLAG,
+    )
+    .await?;
+
+    let snapshot = fir::parse_fir_data(&frame, channel_index).ok_or_else(|| {
+        AppError::from(format!(
+            "device {} FC=43 response for channel {} had an unexpected shape ({} bytes)",
+            device_id,
+            channel_index,
+            frame.len()
+        ))
+    })?;
+    Ok(DeviceChannelFir { device_id, fir: snapshot })
 }
