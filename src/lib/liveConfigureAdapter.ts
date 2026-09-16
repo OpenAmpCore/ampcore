@@ -1,4 +1,4 @@
-import { notifications } from "@mantine/notifications";
+import { notifications } from "./notify";
 
 import {
   commands,
@@ -200,7 +200,7 @@ async function reportWrite(
  *
  * Rolling goes through `showRollingNotification` rather than a stable `id`,
  * because `notifications.show()` silently *ignores* a repeated id instead of
- * replacing it — see that helper's doc for the two Mantine behaviours involved.
+ * replacing it — see that helper's doc for why.
  *
  * Two deliberate silences:
  * - a command whose packets were *all* coalesced never reached the wire; the

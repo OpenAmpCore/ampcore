@@ -1,5 +1,4 @@
-import { forwardRef, type ReactNode } from "react";
-import { Stack, Text, UnstyledButton } from "@mantine/core";
+import { forwardRef, type CSSProperties, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { ActionFeedbackContent, actionFeedbackAccent } from "./ActionFeedback";
 import {
@@ -27,9 +26,11 @@ import {
  *                     accents itself when its value is off-default
  *   PresetActionTile  row-density sibling of StatEditorTile for lists
  *
- * Accent colours carry one meaning each: red = this channel's audio is being
- * cut (mute) or something is destroyed (overwrite), amber = engaged/off-default
+ * Tile colours carry one meaning each: red = this channel's audio is being cut
+ * (mute) or something is destroyed (overwrite); the accent = engaged/off-default
  * but working as intended (gate, polarity, a non-zero delay, active EQ bands).
+ * Red is fixed, since it reads as danger; the accent is whatever the user picked
+ * in the appearance menu (see `src/lib/appearance.ts`).
  *
  * Visual validation
  *
@@ -44,13 +45,24 @@ import {
 
 const STAT_TILE_W = 72;
 const STAT_TILE_H = 52;
-const DEFAULT_BORDER = "var(--mantine-color-default-border)";
+const DEFAULT_BORDER = "var(--amp-color-default-border)";
+/** Tiles are button/field-shaped, so they use HeroUI's own field radius
+ * (`--radius-field`, ~1.5x the base `--radius`) rather than the generic
+ * `--amp-radius-sm` scale — that scale is meant for small chip/badge-sized
+ * corners and reads visibly sharper than every real HeroUI control next to
+ * it (buttons, selects, popovers all use their own oversized radii). */
+const TILE_RADIUS = "var(--radius-field)";
 
 /** Tiles are the only focusable things in a strip now that readouts are
- * plain divs, so they need a visible focus ring — `UnstyledButton` ships
- * none. */
+ * plain divs, so they need a visible focus ring — a plain reset `<button>`
+ * ships none. */
 export const STAT_TILE_FOCUS =
-  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--mantine-color-amber-filled)]";
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]";
+
+/** Strips a native `<button>` down to an unstyled surface (no Mantine
+ * `UnstyledButton` dependency): no default background/border/padding/font,
+ * no default focus ring (tiles supply their own via `STAT_TILE_FOCUS`). */
+const RESET_BUTTON = "appearance-none bg-transparent border-0 p-0 m-0 font-inherit text-inherit outline-none";
 
 function wash(color: string, percent: number): string {
   return `color-mix(in srgb, ${color} ${percent}%, transparent)`;
@@ -105,18 +117,16 @@ export function StatReadout({ value, label }: { value: string; label: string }) 
       style={{
         width: STAT_TILE_W,
         height: STAT_TILE_H,
-        borderRadius: "var(--mantine-radius-sm)",
-        background: "var(--mantine-color-default)",
+        borderRadius: TILE_RADIUS,
+        background: "var(--amp-color-default)",
       }}
     >
-      <Stack gap={2} align="center" justify="center" h="100%">
-        <Text size="sm" fw={700} ff="monospace">
+      <div className="flex h-full flex-col items-center justify-center gap-0.5">
+        <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontFamily: "monospace" }}>
           {value}
-        </Text>
-        <Text size="xs" c="dimmed">
-          {label}
-        </Text>
-      </Stack>
+        </span>
+        <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{label}</span>
+      </div>
     </div>
   );
 }
@@ -138,35 +148,36 @@ export const StatToggle = forwardRef<
     visualValidation?: VisualValidation;
     onClick?: TileClickHandler;
   }
->(function StatToggle({ label, icon, engaged, accent = "var(--mantine-color-red-6)", visualValidation, onClick }, ref) {
+>(function StatToggle({ label, icon, engaged, accent = "var(--amp-color-red-6)", visualValidation, onClick }, ref) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? (engaged ? accent : undefined);
 
   return (
-    <UnstyledButton
+    <button
+      type="button"
       ref={ref}
       onClick={feedback.handleClick}
       aria-pressed={engaged}
       aria-busy={feedback.busy || undefined}
-      className={`shrink-0 cursor-pointer text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
+      className={`${RESET_BUTTON} shrink-0 cursor-pointer text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
       style={{
         width: STAT_TILE_W,
         height: STAT_TILE_H,
-        borderRadius: "var(--mantine-radius-sm)",
+        borderRadius: TILE_RADIUS,
         border: `1px solid ${tone ?? DEFAULT_BORDER}`,
         background: tone ? wash(tone, 20) : "transparent",
-        color: tone ?? "var(--mantine-color-dimmed)",
+        color: tone ?? "var(--amp-color-dimmed)",
       }}
     >
       <ActionFeedbackContent status={feedback.status}>
-        <Stack gap={2} align="center" justify="center" h="100%">
+        <div className="flex h-full flex-col items-center justify-center gap-0.5">
           {icon}
-          <Text size="xs" fw={engaged ? 700 : 400} style={{ color: "inherit" }}>
+          <span style={{ fontSize: "var(--amp-font-size-xs)", fontWeight: engaged ? 700 : 400, color: "inherit" }}>
             {label}
-          </Text>
-        </Stack>
+          </span>
+        </div>
       </ActionFeedbackContent>
-    </UnstyledButton>
+    </button>
   );
 });
 
@@ -204,7 +215,7 @@ export const StatEditorTile = forwardRef<
     label,
     icon,
     modified,
-    accent = "var(--mantine-color-amber-6)",
+    accent = "var(--accent)",
     opens = "popover",
     width = STAT_TILE_W,
     visualValidation,
@@ -214,18 +225,19 @@ export const StatEditorTile = forwardRef<
 ) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? (modified ? accent : undefined);
-  const color = modified ? accent : "var(--mantine-color-text)";
+  const color = modified ? accent : "var(--amp-color-text)";
 
   return (
-    <UnstyledButton
+    <button
+      type="button"
       ref={ref}
       onClick={feedback.handleClick}
       aria-busy={feedback.busy || undefined}
-      className={`relative shrink-0 cursor-pointer text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
+      className={`${RESET_BUTTON} relative shrink-0 cursor-pointer text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
       style={{
         width,
         height: STAT_TILE_H,
-        borderRadius: "var(--mantine-radius-sm)",
+        borderRadius: TILE_RADIUS,
         border: `1px solid ${tone ?? DEFAULT_BORDER}`,
         background: tone ? wash(tone, 10) : "transparent",
       }}
@@ -239,20 +251,20 @@ export const StatEditorTile = forwardRef<
             }}
           />
         </div>
-        <Stack gap={2} align="center" justify="center" h="100%">
+        <div className="flex h-full flex-col items-center justify-center gap-0.5">
           {icon ? (
             <span style={{ color, display: "flex" }}>{icon}</span>
           ) : (
-            <Text size="sm" fw={700} ff="monospace" style={{ color }}>
+            <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontFamily: "monospace", color }}>
               {value}
-            </Text>
+            </span>
           )}
-          <Text size="xs" c="dimmed">
+          <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
             {label}
-          </Text>
-        </Stack>
+          </span>
+        </div>
       </ActionFeedbackContent>
-    </UnstyledButton>
+    </button>
   );
 });
 
@@ -279,21 +291,23 @@ export const PresetActionTile = forwardRef<
 >(function PresetActionTile({ label, icon, accent, opens, disabled, visualValidation, onClick }, ref) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? accent;
+  const labelStyle: CSSProperties = { fontSize: 10, color: "var(--amp-color-dimmed)", lineHeight: 1.3 };
 
   return (
-    <UnstyledButton
+    <button
+      type="button"
       ref={ref}
       onClick={feedback.handleClick}
       disabled={disabled}
       aria-busy={feedback.busy || undefined}
-      className={`relative shrink-0 text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
+      className={`${RESET_BUTTON} relative shrink-0 text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
       style={{
         width: 58,
         height: 38,
-        borderRadius: "var(--mantine-radius-sm)",
+        borderRadius: TILE_RADIUS,
         border: `1px solid ${tone ?? DEFAULT_BORDER}`,
         background: tone ? wash(tone, 10) : "transparent",
-        color: tone ?? "var(--mantine-color-text)",
+        color: tone ?? "var(--amp-color-text)",
         cursor: "pointer",
       }}
     >
@@ -303,13 +317,11 @@ export const PresetActionTile = forwardRef<
             <ChevronRight size={9} style={{ transform: "rotate(90deg)" }} />
           </div>
         )}
-        <Stack gap={0} align="center" justify="center" h="100%">
+        <div className="flex h-full flex-col items-center justify-center gap-0">
           {icon}
-          <Text fz={10} c="dimmed" lh={1.3}>
-            {label}
-          </Text>
-        </Stack>
+          <span style={labelStyle}>{label}</span>
+        </div>
       </ActionFeedbackContent>
-    </UnstyledButton>
+    </button>
   );
 });

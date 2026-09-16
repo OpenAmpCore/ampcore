@@ -1,4 +1,4 @@
-import { Card, Group, Stack, Text, ThemeIcon, Title } from "@mantine/core";
+import { Card } from "@heroui/react";
 import { FolderCog, Radio } from "lucide-react";
 
 interface AppModeSelectorProps {
@@ -18,16 +18,24 @@ function ModeCard({
   onClick: () => void;
 }) {
   return (
-    <Card withBorder padding="lg" onClick={onClick} className="cursor-pointer" style={{ flex: "1 1 200px" }}>
-      <Stack align="center" gap="xs" ta="center">
-        <ThemeIcon variant="light" color="gray" size={48} radius="xl">
+    <Card onClick={onClick} className="cursor-pointer p-[var(--amp-spacing-lg)]" style={{ flex: "1 1 200px" }}>
+      <div className="flex flex-col items-center gap-2 text-center">
+        <div
+          className="flex items-center justify-center rounded-full"
+          style={{
+            width: 48,
+            height: 48,
+            background: "var(--amp-color-gray-light)",
+            color: "var(--amp-color-gray-6)",
+          }}
+        >
           {icon}
-        </ThemeIcon>
-        <Text fw={600}>{title}</Text>
-        <Text size="sm" c="dimmed">
+        </div>
+        <span style={{ fontWeight: 600 }}>{title}</span>
+        <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
           {description}
-        </Text>
-      </Stack>
+        </span>
+      </div>
     </Card>
   );
 }
@@ -38,19 +46,17 @@ export function AppModeSelector({ onSelectLiveControl, onSelectProjectDesign }: 
      * taller than the viewport — a plain `Center` would clip both ends. */
     <div className="h-full overflow-y-auto">
       <div className="flex min-h-full flex-col items-center justify-center p-4">
-        <Stack w="100%" maw={520} gap="xl">
-          <Stack gap={4}>
-            <Title order={2} ta="center">
-              Welcome to AmpCore
-            </Title>
-            <Text c="dimmed" ta="center">
+        <div className="flex w-full flex-col gap-6" style={{ maxWidth: 520 }}>
+          <div className="flex flex-col gap-1">
+            <h2 className="text-center text-2xl font-semibold m-0">Welcome to AmpCore</h2>
+            <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
               Choose how you'd like to start
-            </Text>
-          </Stack>
+            </span>
+          </div>
 
           {/* Two cards side by side while there's room; below ~420px they
            * stack rather than squeezing to two illegible columns. */}
-          <Group align="stretch" gap="md" wrap="wrap">
+          <div className="flex flex-wrap items-stretch gap-3">
             <ModeCard
               icon={<Radio size={24} />}
               title="Live Control"
@@ -63,8 +69,8 @@ export function AppModeSelector({ onSelectLiveControl, onSelectProjectDesign }: 
               description="Plan projects, amp assignments, and speaker configurations offline."
               onClick={onSelectProjectDesign}
             />
-          </Group>
-        </Stack>
+          </div>
+        </div>
       </div>
     </div>
   );

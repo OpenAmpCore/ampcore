@@ -1,4 +1,4 @@
-import { notifications } from "@mantine/notifications";
+import { notifications } from "./notify";
 
 type NotificationProps = Parameters<typeof notifications.show>[0];
 
@@ -11,23 +11,12 @@ let sequence = 0;
  * restarting its auto-close timer — a single rolling confirmation rather than
  * a stack.
  *
- * Passing a stable `id` to `notifications.show()` does NOT do this, which is
- * the bug this exists to fix. Two behaviours in `@mantine/notifications@9.4.1`
- * combine against it:
- *
- * 1. `notifications.show()` **ignores** a notification whose id is already
- *    displayed — `notifications.store.mjs` returns the list unchanged on
- *    `notifications.some((n) => n.id === notification.id)`. So a repeat call
- *    is a silent no-op: the stale message stays and the new one is dropped.
- * 2. `notifications.update()` fixes the text but not the timer. The auto-close
- *    effect in `NotificationContainer.mjs` depends on
- *    `[autoCloseDuration, active, dismissed]` — not on the message — so an
- *    updated toast still closes relative to when the *first* one appeared.
- *
- * The list is keyed by `notification.id`, so the only way to get a genuinely
- * fresh notification (new mount, restarted timer) is a new id. This hides the
- * previous one and shows a new uniquely-identified one, which also gives the
- * user a visible swap rather than a silently mutating toast.
+ * HeroUI's `toast()` (see `./notify.ts`) always queues a brand-new toast on
+ * every call — there's no caller-supplied id it dedupes or replaces by — so
+ * calling it again for, say, "preset recalled" while the previous one is
+ * still showing would stack two toasts instead of refreshing one. This
+ * closes the previous toast for `key` first, then opens a new one, which
+ * also reads as a visible swap rather than a silently mutating toast.
  *
  * `key` scopes the rolling behaviour: two different keys coexist and stack
  * normally. Only repeats of the same key replace each other.

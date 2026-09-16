@@ -1,24 +1,26 @@
-/* Preflight intentionally omitted — Mantine ships its own CSS reset. */
+@import "@heroui/react/styles";
+/* This app's own design tokens (colors, radius, spacing, font sizes) as
+   plain CSS custom properties — see that file's header comment for why
+   they're named `--amp-*` and frozen as static values. Every component
+   styles itself with these var(--amp-color-*)/var(--amp-radius-*)/etc.
+   names directly. */
+@import "./design-tokens.css";
 
-/* Layer order = priority order, lowest to highest. Mantine's stylesheet
-   ships unlayered by default, which — per the CSS cascade-layers spec —
-   would beat ALL layered CSS outright, including every Tailwind utility,
-   regardless of specificity or source order (e.g. Mantine's ActionIcon
-   sets `position: relative` in its own CSS; an unlayered rule like that
-   can't be overridden by a layered `.absolute` utility no matter what we
-   do). Pulling it into an explicit "mantine" layer ordered below
-   Tailwind's own layers restores normal, expected utility-class overrides
-   everywhere in the app. */
-@layer mantine, theme, utilities;
-@import "@mantine/core/styles.css" layer(mantine);
-@import "@mantine/notifications/styles.css" layer(mantine);
-@import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/utilities.css" layer(utilities);
+/* HeroUI's own `dark:` variant already keys off `.dark`/`[data-theme="dark"]`
+   (see @heroui/styles' variants/index.css) — the same attribute
+   `src/lib/colorScheme.ts` sets, so no override is needed here. */
 
-/* Key `dark:` off Mantine's resolved color scheme (light/dark/auto all end
-   up setting this attribute on <html>) instead of the `prefers-color-scheme`
-   media query, so it stays in sync with the in-app theme toggle. */
-@custom-variant dark (&:where([data-mantine-color-scheme="dark"], [data-mantine-color-scheme="dark"] *));
+/* Accent colour and corner radius are deliberately *not* set here: both are
+   single HeroUI knobs (`--accent`, `--radius`) that the user picks at runtime
+   from the title bar's appearance menu, so their defaults live in
+   `src/lib/appearance.ts` and are written onto `:root` at boot.
+
+   Do not reintroduce a `--color-accent-*` scale or `--radius-xs..xl` in a
+   `@theme` block. HeroUI declares `--color-accent` and derives the whole
+   `--radius-*` scale from `--radius` via `@theme inline`; hardcoding the
+   named steps overrides only some of them (`--radius-2xl/3xl/4xl` and
+   `--radius-field` still derive), which is what made modals and popovers
+   visibly rounder than the app's own tiles. */
 
 /* Link Amp modal match strip (AmpLinkModal.tsx). */
 @keyframes link-fill {
@@ -95,7 +97,7 @@
 
 @keyframes merge-pulse {
   from {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--mantine-color-green-filled) 55%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--amp-color-green-filled) 55%, transparent);
   }
   to {
     box-shadow: 0 0 0 16px transparent;

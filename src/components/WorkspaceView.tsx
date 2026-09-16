@@ -1,25 +1,9 @@
 import { useMemo, useState } from "react";
-import {
-  ActionIcon,
-  Badge,
-  Box,
-  Button,
-  Center,
-  Divider,
-  Group,
-  Loader,
-  Modal,
-  Select,
-  SimpleGrid,
-  Stack,
-  Text,
-  TextInput,
-  ThemeIcon,
-  Tooltip,
-} from "@mantine/core";
+import { Button, Chip, Input, Label, Modal, Spinner, TextField, Tooltip } from "@heroui/react";
 import { Link, Pencil, Server, X } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { AmpLinkModal } from "./AmpLinkModal";
+import { SimpleSelect } from "./SimpleSelect";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { useIsCompact } from "../lib/breakpoints";
@@ -28,10 +12,10 @@ import { useLiveDevices } from "../hooks/useLiveDevices";
 import { useLiveDriver } from "../hooks/useLiveDriver";
 
 /** Neutral amp-card controls (edit, link): gray with a white icon in dark mode,
- * light gray with a black icon in light mode. Delete keeps Mantine's red. */
+ * light gray with a black icon in light mode. Delete keeps the destructive red. */
 const CARD_CONTROL_CLASS =
-  "bg-[var(--mantine-color-gray-3)] text-black hover:bg-[var(--mantine-color-gray-4)] " +
-  "dark:bg-[var(--mantine-color-gray-7)] dark:text-white dark:hover:bg-[var(--mantine-color-gray-6)]";
+  "bg-[var(--amp-color-gray-3)] text-black hover:bg-[var(--amp-color-gray-4)] " +
+  "dark:bg-[var(--amp-color-gray-7)] dark:text-white dark:hover:bg-[var(--amp-color-gray-6)]";
 
 /** Card controls fade in on hover so the grid stays calm at rest. Hover is
  * not a thing on touch, though, and these are the *only* way to edit, delete
@@ -78,9 +62,9 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
 
   if (ampModels === null) {
     return (
-      <Center h="100%">
-        <Loader size="sm" />
-      </Center>
+      <div className="flex h-full items-center justify-center">
+        <Spinner size="sm" />
+      </div>
     );
   }
 
@@ -143,40 +127,40 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
       }`}
     >
       {/* Amplifiers pane */}
-      <Stack
-        w={compact ? "100%" : 340}
-        h={compact ? undefined : "100%"}
-        p="md"
-        gap="md"
-        className="min-w-0 shrink-0"
+      <div
+        className="flex min-w-0 shrink-0 flex-col gap-3 p-4"
+        style={{ width: compact ? "100%" : 340, height: compact ? undefined : "100%" }}
       >
-        <Group justify="space-between" wrap="wrap" gap="xs">
-          <Text fw={500} size="sm" c="dimmed">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
             Amplifiers
-          </Text>
-          <Group gap="xs">
+          </span>
+          <div className="flex items-center gap-2">
             <Button
-              size="xs"
-              variant="default"
-              disabled={!selectedAssignment}
-              onClick={() => selectedAssignment && onOpenDevice(selectedAssignment)}
+              size="sm"
+              variant="secondary"
+              isDisabled={!selectedAssignment}
+              onPress={() => selectedAssignment && onOpenDevice(selectedAssignment)}
             >
               Configure
             </Button>
-            <Button size="xs" onClick={() => setCatalogueOpen(true)}>
+            <Button size="sm" variant="primary" onPress={() => setCatalogueOpen(true)}>
               Add Amp
             </Button>
-          </Group>
-        </Group>
+          </div>
+        </div>
 
         {assignments.length === 0 ? (
-          <Center className="flex-1">
-            <Text c="dimmed" size="sm" ta="center">
+          <div className="flex flex-1 items-center justify-center">
+            <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)", textAlign: "center" }}>
               No amps assigned yet — add one to get started.
-            </Text>
-          </Center>
+            </span>
+          </div>
         ) : (
-          <SimpleGrid cols={compact ? { base: 3, xs: 5, sm: 6 } : 3} spacing="md" className="flex-1 content-start">
+          <div
+            className="grid flex-1 content-start gap-3"
+            style={{ gridTemplateColumns: `repeat(${compact ? 5 : 3}, minmax(0, 1fr))` }}
+          >
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
               const modelName = assignment.label ? modelNameFor(assignment) : null;
@@ -187,16 +171,18 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
 
               return (
                 <div key={assignment.id} className="group flex flex-col items-center gap-1.5">
-                  <Box className="relative">
-                    <Box
-                      w={90}
-                      h={90}
+                  <div className="relative">
+                    <div
                       onClick={() => setSelectedId(assignment.id)}
-                      className={`flex cursor-pointer items-center justify-center rounded-[var(--mantine-radius-sm)] border-solid transition-colors duration-150 group-hover:border-[var(--mantine-color-amber-filled)] group-hover:bg-[var(--mantine-color-amber-light)] ${
+                      className={`flex cursor-pointer items-center justify-center border-solid transition-colors duration-150 group-hover:border-[var(--accent)] group-hover:bg-[var(--accent-soft)] ${
                         isSelected
-                          ? "border-2 border-[var(--mantine-color-amber-filled)]"
-                          : "border border-[var(--mantine-color-default-border)]"
+                          ? "border-2 border-[var(--accent)]"
+                          : "border border-[var(--amp-color-default-border)]"
                       }`}
+                      // Same radius formula as HeroUI's own `Card`
+                      // (`min(32px, var(--radius-3xl))`), scaled down for this
+                      // 90px tile so it reads as the same shape-language.
+                      style={{ width: 90, height: 90, borderRadius: "min(24px, var(--radius-3xl))" }}
                     >
                       {isCvr ? (
                         <img
@@ -205,30 +191,34 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                           className="max-h-full max-w-full object-contain"
                         />
                       ) : (
-                        <ThemeIcon variant="light" color="gray" size={48}>
+                        <div
+                          className="flex items-center justify-center rounded-full"
+                          style={{
+                            width: 48,
+                            height: 48,
+                            background: "var(--amp-color-gray-light)",
+                            color: "var(--amp-color-gray-6)",
+                          }}
+                        >
                           <Server size={28} />
-                        </ThemeIcon>
+                        </div>
                       )}
-                    </Box>
+                    </div>
                     {assignment.firmwareVersion && (
-                      <Badge
-                        size="xs"
-                        radius="sm"
-                        variant="filled"
-                        color="dark"
+                      <Chip
+                        size="sm"
                         className="absolute bottom-1 left-1/2 -translate-x-1/2"
+                        style={{ background: "var(--amp-color-dark-6)", color: "white" }}
                       >
                         v{assignment.firmwareVersion}
-                      </Badge>
+                      </Chip>
                     )}
-                    <ActionIcon
-                      className={`absolute -top-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                    <Button
+                      isIconOnly
                       size="sm"
-                      radius="sm"
-                      color="gray"
-                      variant="filled"
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      className={`absolute -top-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                      style={{ width: 22, height: 22, minWidth: 22 }}
+                      onPress={() => {
                         setLabelError(null);
                         setEditLabel(assignment.label ?? "");
                         setEditFirmwareVersion(assignment.firmwareVersion ?? null);
@@ -237,74 +227,82 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       aria-label="Edit amp"
                     >
                       <Pencil size={12} />
-                    </ActionIcon>
-                    <ActionIcon
-                      className={`absolute -top-1.5 -right-1.5 ${CARD_CONTROL_REVEAL}`}
+                    </Button>
+                    <Button
+                      isIconOnly
                       size="sm"
-                      radius="sm"
-                      color="red"
-                      variant="filled"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteTarget(assignment);
-                      }}
+                      variant="danger"
+                      className={`absolute -top-1.5 -right-1.5 ${CARD_CONTROL_REVEAL}`}
+                      style={{ width: 22, height: 22, minWidth: 22 }}
+                      onPress={() => setDeleteTarget(assignment)}
                       aria-label="Remove amp"
                     >
                       <X size={12} />
-                    </ActionIcon>
-                    <ActionIcon
-                      className={`absolute -bottom-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                    </Button>
+                    <Button
+                      isIconOnly
                       size="sm"
-                      radius="sm"
-                      color="gray"
-                      variant="filled"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setLinkTargetId(assignment.id);
-                      }}
+                      className={`absolute -bottom-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                      style={{ width: 22, height: 22, minWidth: 22 }}
+                      onPress={() => setLinkTargetId(assignment.id)}
                       aria-label="Link amp"
                     >
                       <Link size={12} />
-                    </ActionIcon>
-                    <Tooltip label={linkStatus.label} withArrow openDelay={300}>
-                      <span
-                        role="img"
-                        aria-label={linkStatus.label}
-                        className="absolute -right-1 -bottom-1 size-3 rounded-full border-2 border-solid border-[var(--mantine-color-body)]"
-                        style={{ backgroundColor: `var(--mantine-color-${linkStatus.color}-filled)` }}
-                      />
+                    </Button>
+                    <Tooltip delay={300}>
+                      <Tooltip.Trigger>
+                        <span
+                          role="img"
+                          aria-label={linkStatus.label}
+                          className="absolute -right-1 -bottom-1 size-3 rounded-full border-2 border-solid border-[var(--amp-color-body)]"
+                          style={{ backgroundColor: `var(--amp-color-${linkStatus.color}-filled)` }}
+                        />
+                      </Tooltip.Trigger>
+                      <Tooltip.Content showArrow>{linkStatus.label}</Tooltip.Content>
                     </Tooltip>
-                  </Box>
+                  </div>
                   <div className="flex flex-col items-center gap-px">
-                    <Text size="xs" ta="center" lineClamp={2} className="max-w-[90px]">
+                    <span className="line-clamp-2 max-w-[90px] text-center" style={{ fontSize: "var(--amp-font-size-xs)" }}>
                       {displayName}
-                    </Text>
+                    </span>
                     {modelName && (
-                      <Text size="xs" c="dimmed" ta="center" lineClamp={1} fz={10} className="max-w-[90px]">
+                      <span
+                        className="line-clamp-1 max-w-[90px] text-center"
+                        style={{ fontSize: 10, color: "var(--amp-color-dimmed)" }}
+                      >
                         {modelName}
-                      </Text>
+                      </span>
                     )}
                   </div>
                 </div>
               );
             })}
-          </SimpleGrid>
+          </div>
         )}
-      </Stack>
+      </div>
 
-      <Divider orientation={compact ? "horizontal" : "vertical"} />
+      <hr
+        className={
+          compact
+            ? "m-0 w-full border-t border-[var(--amp-color-default-border)]"
+            : "m-0 h-full border-l border-t-0 border-[var(--amp-color-default-border)]"
+        }
+      />
 
       {/* Speakers pane — mock only, no real data/functionality yet */}
-      <Stack className="min-w-0 flex-1" h={compact ? undefined : "100%"} mih={compact ? 140 : undefined} p="md" gap="md">
-        <Text fw={500} size="sm" c="dimmed">
+      <div
+        className="flex min-w-0 flex-1 flex-col gap-3 p-4"
+        style={{ height: compact ? undefined : "100%", minHeight: compact ? 140 : undefined }}
+      >
+        <span style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
           Speakers
-        </Text>
-        <Center className="flex-1">
-          <Text c="dimmed" ta="center">
+        </span>
+        <div className="flex flex-1 items-center justify-center">
+          <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
             Speaker assignment — coming soon
-          </Text>
-        </Center>
-      </Stack>
+          </span>
+        </div>
+      </div>
 
       <AmpCatalogueModal
         opened={catalogueOpen}
@@ -325,62 +323,76 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         onClose={() => setLinkTargetId(null)}
       />
 
-      <Modal opened={editTarget !== null} onClose={() => setEditTarget(null)} title="Edit Amp" centered size="sm">
-        <Stack gap="md">
-          <TextInput
-            label="Label"
-            placeholder="Optional"
-            value={editLabel}
-            onChange={(e) => setEditLabel(e.currentTarget.value)}
-            data-autofocus
-          />
-          {editFirmwareOptions.length > 0 && (
-            <Select
-              label="Firmware Version"
-              description="Which parameter ranges/units to plan around — not detected, since there's no live device yet."
-              data={editFirmwareOptions}
-              value={editFirmwareVersion}
-              onChange={setEditFirmwareVersion}
-              allowDeselect={false}
-            />
-          )}
-          {labelError && (
-            <Text c="red" size="sm">
-              {labelError}
-            </Text>
-          )}
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setEditTarget(null)} disabled={savingLabel}>
-              Cancel
-            </Button>
-            <Button loading={savingLabel} onClick={handleSaveLabel}>
-              Save
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
+      <Modal.Backdrop isOpen={editTarget !== null} onOpenChange={(open) => !open && setEditTarget(null)}>
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog>
+            <Modal.Header>
+              <Modal.Heading>Edit Amp</Modal.Heading>
+              <Modal.CloseTrigger />
+            </Modal.Header>
+            <Modal.Body>
+              <div className="flex flex-col gap-3">
+                <TextField autoFocus>
+                  <Label>Label</Label>
+                  <Input
+                    placeholder="Optional"
+                    value={editLabel}
+                    onChange={(e) => setEditLabel(e.target.value)}
+                  />
+                </TextField>
+                {editFirmwareOptions.length > 0 && (
+                  <SimpleSelect
+                    label="Firmware Version"
+                    description="Which parameter ranges/units to plan around — not detected, since there's no live device yet."
+                    data={editFirmwareOptions.map((v) => ({ value: v, label: v }))}
+                    value={editFirmwareVersion}
+                    onChange={setEditFirmwareVersion}
+                  />
+                )}
+                {labelError && (
+                  <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-sm)" }}>
+                    {labelError}
+                  </span>
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button variant="secondary" onPress={() => setEditTarget(null)} isDisabled={savingLabel}>
+                    Cancel
+                  </Button>
+                  <Button variant="primary" onPress={handleSaveLabel} isDisabled={savingLabel}>
+                    {savingLabel ? <Spinner size="sm" /> : "Save"}
+                  </Button>
+                </div>
+              </div>
+            </Modal.Body>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
 
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Remove Amp"
-        centered
-        size="sm"
-      >
-        <Stack gap="md">
-          <Text size="sm">
-            Remove {deleteTarget ? nameFor(deleteTarget) : ""} from this project? This can't be undone.
-          </Text>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setDeleteTarget(null)} disabled={deleting}>
-              Cancel
-            </Button>
-            <Button color="red" loading={deleting} onClick={handleConfirmDelete}>
-              Remove
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
+      <Modal.Backdrop isOpen={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog>
+            <Modal.Header>
+              <Modal.Heading>Remove Amp</Modal.Heading>
+              <Modal.CloseTrigger />
+            </Modal.Header>
+            <Modal.Body>
+              <div className="flex flex-col gap-3">
+                <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
+                  Remove {deleteTarget ? nameFor(deleteTarget) : ""} from this project? This can't be undone.
+                </span>
+                <div className="flex justify-end gap-2">
+                  <Button variant="secondary" onPress={() => setDeleteTarget(null)} isDisabled={deleting}>
+                    Cancel
+                  </Button>
+                  <Button variant="danger" onPress={handleConfirmDelete} isDisabled={deleting}>
+                    {deleting ? <Spinner size="sm" /> : "Remove"}
+                  </Button>
+                </div>
+              </div>
+            </Modal.Body>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
     </div>
   );
 }

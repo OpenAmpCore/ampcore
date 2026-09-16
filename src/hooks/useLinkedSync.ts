@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { notifications } from "@mantine/notifications";
+import { notifications } from "../lib/notify";
 import { commands, type AmpEditLock, type Project } from "../lib/bindings";
 
 /** Keeps a matched project amp following its linked online amp.

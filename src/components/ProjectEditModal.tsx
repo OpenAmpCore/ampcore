@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Group, Modal, Stack, Text, TextInput } from "@mantine/core";
+import { Button, Input, Label, Modal, Spinner, TextField } from "@heroui/react";
 import { commands, type Project } from "../lib/bindings";
 
 interface ProjectEditModalProps {
@@ -56,29 +56,40 @@ export function ProjectEditModal({ project, onClose, onSaved, onDeleted }: Proje
   }
 
   return (
-    <Modal opened={!!project} onClose={onClose} title="Edit Project" centered>
-      <Stack gap="sm">
-        <TextInput
-          label="Name"
-          required
-          value={name}
-          onChange={(e) => setName(e.currentTarget.value)}
-          data-autofocus
-        />
-        {error && (
-          <Text c="red" size="sm">
-            {error}
-          </Text>
-        )}
-        <Group justify="space-between">
-          <Button color="red" variant={confirmingDelete ? "filled" : "light"} onClick={handleDelete} disabled={submitting}>
-            {confirmingDelete ? "Confirm Delete" : "Delete"}
-          </Button>
-          <Button loading={submitting} disabled={!name.trim()} onClick={handleSave}>
-            Save
-          </Button>
-        </Group>
-      </Stack>
-    </Modal>
+    <Modal.Backdrop isOpen={!!project} onOpenChange={(open) => !open && onClose()}>
+      <Modal.Container placement="center">
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Edit Project</Modal.Heading>
+            <Modal.CloseTrigger />
+          </Modal.Header>
+          <Modal.Body>
+            <div className="flex flex-col gap-3">
+              <TextField isRequired autoFocus>
+                <Label>Name</Label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} />
+              </TextField>
+              {error && (
+                <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-sm)" }}>
+                  {error}
+                </span>
+              )}
+              <div className="flex items-center justify-between">
+                <Button
+                  variant={confirmingDelete ? "danger" : "danger-soft"}
+                  onPress={handleDelete}
+                  isDisabled={submitting}
+                >
+                  {confirmingDelete ? "Confirm Delete" : "Delete"}
+                </Button>
+                <Button variant="primary" isDisabled={!name.trim() || submitting} onPress={handleSave}>
+                  {submitting ? <Spinner size="sm" /> : "Save"}
+                </Button>
+              </div>
+            </div>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }

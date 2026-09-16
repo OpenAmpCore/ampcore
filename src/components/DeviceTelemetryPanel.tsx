@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Badge, Divider, Group, ScrollArea, Stack, Table, Text } from "@mantine/core";
+import { Chip } from "@heroui/react";
 import type { ChannelConfig, ChannelConfigSnapshot, ChannelEq, DiscoveredDevice, Telemetry } from "../lib/bindings";
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { InputClipPill } from "./InputClipPill";
@@ -17,17 +17,19 @@ export interface DeviceTelemetryPanelProps {
 const TELEMETRY_FUNCTION_CODE = "6 (HEARTBEAT)";
 const CHANNEL_CONFIG_FUNCTION_CODE = "27 (SYNC_DATA)";
 
+const DIMMED = "var(--amp-color-dimmed)";
+
+function Divider() {
+  return <hr className="m-0 border-t border-[var(--amp-color-default-border)]" />;
+}
+
 /** Compact label/value pair for the summary sections — several per row via
- * the wrapping `Group` they sit in, not one row per field. */
+ * the wrapping flex row they sit in, not one row per field. */
 function InfoField({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
-      <Text size="10px" c="dimmed" tt="uppercase">
-        {label}
-      </Text>
-      <Text size="xs" ff="monospace">
-        {value}
-      </Text>
+      <div style={{ fontSize: 10, color: DIMMED, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: "var(--amp-font-size-xs)", fontFamily: "monospace" }}>{value}</div>
     </div>
   );
 }
@@ -56,37 +58,33 @@ function EqTable({ label, eq }: { label: string; eq: ChannelEq }) {
   ];
   return (
     <div>
-      <Text size="xs" c="dimmed" mb={4}>
-        {label}
-      </Text>
-      <Table.ScrollContainer minWidth={380}>
-        <Table withRowBorders={false} mb="sm">
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Band</Table.Th>
-            <Table.Th>Type</Table.Th>
-            <Table.Th>Freq</Table.Th>
-            <Table.Th>Gain</Table.Th>
-            <Table.Th>Q</Table.Th>
-            <Table.Th>Active</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {rows.map((r) => (
-            <Table.Tr key={r.pos} style={{ opacity: r.active ? 1 : 0.5 }}>
-              <Table.Td ff="monospace" fw={600}>
-                {r.pos}
-              </Table.Td>
-              <Table.Td>{formatEnum(r.filterType)}</Table.Td>
-              <Table.Td ff="monospace">{fmtNum(r.freqHz, "Hz", 0)}</Table.Td>
-              <Table.Td ff="monospace">{r.gainDb === null ? "—" : fmtNum(r.gainDb, "dB")}</Table.Td>
-              <Table.Td ff="monospace">{r.q === null ? "—" : r.q.toFixed(2)}</Table.Td>
-              <Table.Td>{r.active ? "yes" : "no"}</Table.Td>
-            </Table.Tr>
-          ))}
-        </Table.Tbody>
-        </Table>
-      </Table.ScrollContainer>
+      <div style={{ fontSize: "var(--amp-font-size-xs)", color: DIMMED, marginBottom: 4 }}>{label}</div>
+      <div className="overflow-x-auto" style={{ minWidth: 380 }}>
+        <table className="mb-3 w-full border-collapse text-xs">
+          <thead>
+            <tr>
+              <th className="p-1 text-left">Band</th>
+              <th className="p-1 text-left">Type</th>
+              <th className="p-1 text-left">Freq</th>
+              <th className="p-1 text-left">Gain</th>
+              <th className="p-1 text-left">Q</th>
+              <th className="p-1 text-left">Active</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.pos} style={{ opacity: r.active ? 1 : 0.5 }}>
+                <td className="p-1 font-mono font-semibold">{r.pos}</td>
+                <td className="p-1">{formatEnum(r.filterType)}</td>
+                <td className="p-1 font-mono">{fmtNum(r.freqHz, "Hz", 0)}</td>
+                <td className="p-1 font-mono">{r.gainDb === null ? "—" : fmtNum(r.gainDb, "dB")}</td>
+                <td className="p-1 font-mono">{r.q === null ? "—" : r.q.toFixed(2)}</td>
+                <td className="p-1">{r.active ? "yes" : "no"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -95,10 +93,10 @@ function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
   const label = String.fromCharCode(65 + channel.channelIndex);
   return (
     <div>
-      <Text fw={600} size="sm" mb="xs">
+      <div style={{ fontWeight: 600, fontSize: "var(--amp-font-size-sm)", marginBottom: 8 }}>
         Channel {label}
-      </Text>
-      <Group gap="lg" wrap="wrap" mb="sm">
+      </div>
+      <div className="mb-3 flex flex-wrap gap-4">
         <InfoField label="input name" value={channel.inputName ?? `In${channel.channelIndex + 1}`} />
         <InfoField label="output name" value={channel.outputName ?? `Out${label}`} />
         <InfoField label="load" value={fmtNum(channel.loadOhms, "Ω")} />
@@ -124,95 +122,93 @@ function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
           label="source"
           value={channel.source ? `${formatEnum(channel.source.kind)} ${channel.source.index}` : "—"}
         />
-      </Group>
+      </div>
 
-      <Text size="xs" c="dimmed" mb={4}>
+      <div style={{ fontSize: "var(--amp-font-size-xs)", color: DIMMED, marginBottom: 4 }}>
         Per-source trim/delay
-      </Text>
-      <Table withRowBorders={false} mb="sm">
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Source</Table.Th>
-            <Table.Th>Trim</Table.Th>
-            <Table.Th>Delay</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          <Table.Tr>
-            <Table.Td>Analog</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.analogTrimDb, "dB")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.analogDelayMs, "ms")}</Table.Td>
-          </Table.Tr>
-          <Table.Tr>
-            <Table.Td>Dante</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.danteTrimDb, "dB")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.danteDelayMs, "ms")}</Table.Td>
-          </Table.Tr>
-          <Table.Tr>
-            <Table.Td>AES3</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.aes3TrimDb, "dB")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.aes3DelayMs, "ms")}</Table.Td>
-          </Table.Tr>
-        </Table.Tbody>
-      </Table>
+      </div>
+      <table className="mb-3 w-full border-collapse text-xs">
+        <thead>
+          <tr>
+            <th className="p-1 text-left">Source</th>
+            <th className="p-1 text-left">Trim</th>
+            <th className="p-1 text-left">Delay</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="p-1">Analog</td>
+            <td className="p-1 font-mono">{fmtNum(channel.analogTrimDb, "dB")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.analogDelayMs, "ms")}</td>
+          </tr>
+          <tr>
+            <td className="p-1">Dante</td>
+            <td className="p-1 font-mono">{fmtNum(channel.danteTrimDb, "dB")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.danteDelayMs, "ms")}</td>
+          </tr>
+          <tr>
+            <td className="p-1">AES3</td>
+            <td className="p-1 font-mono">{fmtNum(channel.aes3TrimDb, "dB")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.aes3DelayMs, "ms")}</td>
+          </tr>
+        </tbody>
+      </table>
 
-      <Text size="xs" c="dimmed" mb={4}>
+      <div style={{ fontSize: "var(--amp-font-size-xs)", color: DIMMED, marginBottom: 4 }}>
         Matrix crosspoints
-      </Text>
-      <Table withRowBorders={false} mb="sm">
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Src</Table.Th>
-            <Table.Th>Gain</Table.Th>
-            <Table.Th>Active</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
+      </div>
+      <table className="mb-3 w-full border-collapse text-xs">
+        <thead>
+          <tr>
+            <th className="p-1 text-left">Src</th>
+            <th className="p-1 text-left">Gain</th>
+            <th className="p-1 text-left">Active</th>
+          </tr>
+        </thead>
+        <tbody>
           {channel.matrixCrosspoints.map((mx) => (
-            <Table.Tr key={mx.sourceIndex}>
-              <Table.Td ff="monospace">{mx.sourceIndex}</Table.Td>
-              <Table.Td ff="monospace">{fmtNum(mx.gainDb, "dB")}</Table.Td>
-              <Table.Td>{mx.active ? "yes" : "no"}</Table.Td>
-            </Table.Tr>
+            <tr key={mx.sourceIndex}>
+              <td className="p-1 font-mono">{mx.sourceIndex}</td>
+              <td className="p-1 font-mono">{fmtNum(mx.gainDb, "dB")}</td>
+              <td className="p-1">{mx.active ? "yes" : "no"}</td>
+            </tr>
           ))}
-        </Table.Tbody>
-      </Table>
+        </tbody>
+      </table>
 
       <EqTable label="Input EQ" eq={channel.inputEq} />
       <EqTable label="Output EQ" eq={channel.outputEq} />
 
-      <Text size="xs" c="dimmed" mb={4}>
-        Limiter
-      </Text>
-      <Table withRowBorders={false}>
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th></Table.Th>
-            <Table.Th>Enabled</Table.Th>
-            <Table.Th>Threshold</Table.Th>
-            <Table.Th>Attack/Hold</Table.Th>
-            <Table.Th>Release</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          <Table.Tr>
-            <Table.Td>RMS</Table.Td>
-            <Table.Td>{channel.limiter.rms.enabled ? "yes" : "no"}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.limiter.rms.thresholdVrms, "Vrms")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.limiter.rms.attackMs, "ms")}</Table.Td>
-            <Table.Td ff="monospace">
+      <div style={{ fontSize: "var(--amp-font-size-xs)", color: DIMMED, marginBottom: 4 }}>Limiter</div>
+      <table className="w-full border-collapse text-xs">
+        <thead>
+          <tr>
+            <th className="p-1 text-left"></th>
+            <th className="p-1 text-left">Enabled</th>
+            <th className="p-1 text-left">Threshold</th>
+            <th className="p-1 text-left">Attack/Hold</th>
+            <th className="p-1 text-left">Release</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="p-1">RMS</td>
+            <td className="p-1">{channel.limiter.rms.enabled ? "yes" : "no"}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.limiter.rms.thresholdVrms, "Vrms")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.limiter.rms.attackMs, "ms")}</td>
+            <td className="p-1 font-mono">
               {channel.limiter.rms.releaseMultiplier === null ? "—" : `${channel.limiter.rms.releaseMultiplier}×`}
-            </Table.Td>
-          </Table.Tr>
-          <Table.Tr>
-            <Table.Td>Peak</Table.Td>
-            <Table.Td>{channel.limiter.peak.enabled ? "yes" : "no"}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.limiter.peak.thresholdVp, "Vp")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.limiter.peak.holdMs, "ms")}</Table.Td>
-            <Table.Td ff="monospace">{fmtNum(channel.limiter.peak.releaseMs, "ms")}</Table.Td>
-          </Table.Tr>
-        </Table.Tbody>
-      </Table>
+            </td>
+          </tr>
+          <tr>
+            <td className="p-1">Peak</td>
+            <td className="p-1">{channel.limiter.peak.enabled ? "yes" : "no"}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.limiter.peak.thresholdVp, "Vp")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.limiter.peak.holdMs, "ms")}</td>
+            <td className="p-1 font-mono">{fmtNum(channel.limiter.peak.releaseMs, "ms")}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -220,7 +216,7 @@ function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
 function ChannelConfigSection({ snapshot }: { snapshot: ChannelConfigSnapshot }) {
   return (
     <div>
-      <Group gap="lg" wrap="wrap" mb="md">
+      <div className="mb-4 flex flex-wrap gap-4">
         <InfoField label="function code" value={CHANNEL_CONFIG_FUNCTION_CODE} />
         <InfoField label="received" value={msAgo(snapshot.receivedAt)} />
         <InfoField
@@ -240,12 +236,12 @@ function ChannelConfigSection({ snapshot }: { snapshot: ChannelConfigSnapshot })
           }
         />
         <InfoField label="preset" value={snapshot.presetName ?? "—"} />
-      </Group>
-      <Stack gap="xl">
+      </div>
+      <div className="flex flex-col gap-6">
         {snapshot.channels.map((ch) => (
           <ChannelConfigBlock key={ch.channelIndex} channel={ch} />
         ))}
-      </Stack>
+      </div>
     </div>
   );
 }
@@ -260,16 +256,14 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
   const firmwareSupported = device.firmwareFamily === "1.1.8" || device.firmwareFamily === "1.1.9";
 
   return (
-    <ScrollArea h="100%">
-      <Stack p="md" gap="lg" className="min-w-0">
-        <Group justify="space-between" align="flex-start">
-          <Text fw={600}>{device.name || device.mac}</Text>
-          <Badge color={device.online ? "green" : "gray"} variant="light">
-            {device.online ? "Online" : "Offline"}
-          </Badge>
-        </Group>
+    <div className="h-full overflow-y-auto">
+      <div className="flex min-w-0 flex-col gap-4 p-4">
+        <div className="flex items-start justify-between">
+          <span style={{ fontWeight: 600 }}>{device.name || device.mac}</span>
+          <Chip color={device.online ? "success" : "default"}>{device.online ? "Online" : "Offline"}</Chip>
+        </div>
 
-        <Group gap="lg" wrap="wrap">
+        <div className="flex flex-wrap gap-4">
           <InfoField label="id" value={device.id} />
           <InfoField label="driver" value={device.driverId} />
           <InfoField label="brand" value={device.brand} />
@@ -290,21 +284,19 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
             }
           />
           <InfoField label="last seen" value={msAgo(device.lastSeenAt)} />
-        </Group>
+        </div>
 
         <Divider />
 
-        <Text fw={500} size="sm" c="dimmed">
-          Telemetry
-        </Text>
+        <span style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: DIMMED }}>Telemetry</span>
 
         {!telemetry ? (
-          <Text c="dimmed" size="sm">
+          <span style={{ color: DIMMED, fontSize: "var(--amp-font-size-sm)" }}>
             {firmwareSupported ? "Waiting for telemetry…" : "Telemetry isn't supported on this device's firmware yet."}
-          </Text>
+          </span>
         ) : (
           <>
-            <Group gap="lg" wrap="wrap">
+            <div className="flex flex-wrap gap-4">
               <InfoField label="function code" value={TELEMETRY_FUNCTION_CODE} />
               <InfoField
                 label="machine mode"
@@ -319,105 +311,101 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                 label="rated RMS voltage"
                 value={telemetry.ratedRmsVoltage === null ? "unknown model" : `${telemetry.ratedRmsVoltage}V`}
               />
-            </Group>
+            </div>
 
             <div>
-              <Text fw={500} size="sm" c="dimmed" mb="xs">
+              <div style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: DIMMED, marginBottom: 8 }}>
                 Outputs
-              </Text>
+              </div>
               {/* Seven columns of monospace readings don't compress; below
                 * their natural width the table scrolls sideways in place
                 * instead of widening the whole panel. */}
-              <Table.ScrollContainer minWidth={420}>
-                <Table withRowBorders={false}>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Ch</Table.Th>
-                    <Table.Th>V</Table.Th>
-                    <Table.Th>A</Table.Th>
-                    <Table.Th>Ω</Table.Th>
-                    <Table.Th>Level</Table.Th>
-                    <Table.Th>Limiter</Table.Th>
-                    <Table.Th>State</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {Array.from({ length: outputCount }, (_, i) => {
-                    const voltage = telemetry.outputVoltages[i] ?? 0;
-                    const current = telemetry.outputCurrents[i] ?? 0;
-                    const impedance = telemetry.outputImpedance[i] ?? 0;
-                    const levelDb = telemetry.outputLevelDb[i] ?? null;
-                    const limiter = telemetry.limiters[i] ?? 0;
-                    const state = telemetry.outputChannelStates[i] ?? null;
-                    const stateRaw = telemetry.outputStates[i] ?? null;
-                    return (
-                      <Table.Tr key={i}>
-                        <Table.Td ff="monospace" fw={600}>
-                          {String.fromCharCode(65 + i)}
-                        </Table.Td>
-                        <Table.Td ff="monospace">{voltage.toFixed(1)}</Table.Td>
-                        <Table.Td ff="monospace">{current.toFixed(2)}</Table.Td>
-                        <Table.Td ff="monospace">{impedance.toFixed(0)}</Table.Td>
-                        <Table.Td ff="monospace">{levelDb === null ? "—" : levelDb.toFixed(1)}</Table.Td>
-                        <Table.Td ff="monospace">{limiter.toFixed(1)}</Table.Td>
-                        <Table.Td>
-                          <ChannelStateBadge state={state} raw={stateRaw} />
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-                </Table>
-              </Table.ScrollContainer>
+              <div className="overflow-x-auto" style={{ minWidth: 420 }}>
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr>
+                      <th className="p-1 text-left">Ch</th>
+                      <th className="p-1 text-left">V</th>
+                      <th className="p-1 text-left">A</th>
+                      <th className="p-1 text-left">Ω</th>
+                      <th className="p-1 text-left">Level</th>
+                      <th className="p-1 text-left">Limiter</th>
+                      <th className="p-1 text-left">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: outputCount }, (_, i) => {
+                      const voltage = telemetry.outputVoltages[i] ?? 0;
+                      const current = telemetry.outputCurrents[i] ?? 0;
+                      const impedance = telemetry.outputImpedance[i] ?? 0;
+                      const levelDb = telemetry.outputLevelDb[i] ?? null;
+                      const limiter = telemetry.limiters[i] ?? 0;
+                      const state = telemetry.outputChannelStates[i] ?? null;
+                      const stateRaw = telemetry.outputStates[i] ?? null;
+                      return (
+                        <tr key={i}>
+                          <td className="p-1 font-mono font-semibold">{String.fromCharCode(65 + i)}</td>
+                          <td className="p-1 font-mono">{voltage.toFixed(1)}</td>
+                          <td className="p-1 font-mono">{current.toFixed(2)}</td>
+                          <td className="p-1 font-mono">{impedance.toFixed(0)}</td>
+                          <td className="p-1 font-mono">{levelDb === null ? "—" : levelDb.toFixed(1)}</td>
+                          <td className="p-1 font-mono">{limiter.toFixed(1)}</td>
+                          <td className="p-1">
+                            <ChannelStateBadge state={state} raw={stateRaw} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             <div>
-              <Text fw={500} size="sm" c="dimmed" mb="xs">
+              <div style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: DIMMED, marginBottom: 8 }}>
                 Inputs
-              </Text>
-              <Table.ScrollContainer minWidth={320}>
-                <Table withRowBorders={false}>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Ch</Table.Th>
-                    <Table.Th>Level</Table.Th>
-                    <Table.Th>V</Table.Th>
-                    {/* Not "State": inputs have no operating state, only the
-                        vendor's two-value `InStates` clip flag. */}
-                    <Table.Th>Clip</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {Array.from({ length: inputCount }, (_, i) => {
-                    const dbfs = telemetry.inputDbfs[i] ?? null;
-                    const voltage = telemetry.inputVoltages[i] ?? 0;
-                    const clipping = telemetry.inputClipping[i] ?? null;
-                    const clipRaw = telemetry.inputStates[i] ?? null;
-                    return (
-                      <Table.Tr key={i}>
-                        <Table.Td ff="monospace" fw={600}>
-                          {i + 1}
-                        </Table.Td>
-                        <Table.Td ff="monospace">{dbfs === null ? "—" : `${dbfs.toFixed(1)}dB`}</Table.Td>
-                        <Table.Td ff="monospace">{voltage.toFixed(3)}</Table.Td>
-                        <Table.Td>
-                          {clipping === true ? (
-                            <InputClipPill clipping raw={clipRaw} />
-                          ) : (
-                            <Text size="xs" c="dimmed">
-                              {clipping === false ? "no" : clipRaw === null ? "—" : `— (raw ${clipRaw})`}
-                            </Text>
-                          )}
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-                </Table>
-              </Table.ScrollContainer>
+              </div>
+              <div className="overflow-x-auto" style={{ minWidth: 320 }}>
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr>
+                      <th className="p-1 text-left">Ch</th>
+                      <th className="p-1 text-left">Level</th>
+                      <th className="p-1 text-left">V</th>
+                      {/* Not "State": inputs have no operating state, only the
+                          vendor's two-value `InStates` clip flag. */}
+                      <th className="p-1 text-left">Clip</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: inputCount }, (_, i) => {
+                      const dbfs = telemetry.inputDbfs[i] ?? null;
+                      const voltage = telemetry.inputVoltages[i] ?? 0;
+                      const clipping = telemetry.inputClipping[i] ?? null;
+                      const clipRaw = telemetry.inputStates[i] ?? null;
+                      return (
+                        <tr key={i}>
+                          <td className="p-1 font-mono font-semibold">{i + 1}</td>
+                          <td className="p-1 font-mono">{dbfs === null ? "—" : `${dbfs.toFixed(1)}dB`}</td>
+                          <td className="p-1 font-mono">{voltage.toFixed(3)}</td>
+                          <td className="p-1">
+                            {clipping === true ? (
+                              <InputClipPill clipping raw={clipRaw} />
+                            ) : (
+                              <span style={{ fontSize: "var(--amp-font-size-xs)", color: DIMMED }}>
+                                {clipping === false ? "no" : clipRaw === null ? "—" : `— (raw ${clipRaw})`}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
-            <Group gap="lg" wrap="wrap">
+            <div className="flex flex-wrap gap-4">
               {telemetry.temperatures.map((t, i) => (
                 <InfoField key={i} label={i < 4 ? `ch ${i + 1} temp` : "psu temp"} value={`${(t ?? 0).toFixed(1)}°C`} />
               ))}
@@ -425,24 +413,26 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                 label="fan"
                 value={telemetry.fanVoltage === null ? "— (not in this packet size)" : `${telemetry.fanVoltage.toFixed(1)}V`}
               />
-            </Group>
+            </div>
           </>
         )}
 
         <Divider />
 
-        <Text fw={500} size="sm" c="dimmed">
+        <span style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: DIMMED }}>
           Channel Config
-        </Text>
+        </span>
 
         {!channelConfig ? (
-          <Text c="dimmed" size="sm">
-            {firmwareSupported ? "Waiting for channel config…" : "Channel config isn't supported on this device's firmware yet."}
-          </Text>
+          <span style={{ color: DIMMED, fontSize: "var(--amp-font-size-sm)" }}>
+            {firmwareSupported
+              ? "Waiting for channel config…"
+              : "Channel config isn't supported on this device's firmware yet."}
+          </span>
         ) : (
           <ChannelConfigSection snapshot={channelConfig} />
         )}
-      </Stack>
-    </ScrollArea>
+      </div>
+    </div>
   );
 }

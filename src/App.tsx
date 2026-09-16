@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Tabs } from "@mantine/core";
+import { Button, ButtonGroup } from "@heroui/react";
 import { AppModeSelector } from "./components/AppModeSelector";
 import { LiveControlView } from "./components/LiveControlView";
 import { ProjectSelector } from "./components/ProjectSelector";
@@ -89,12 +89,20 @@ function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         centerContent={
           mode === "projectDesign" && selectedProject ? (
-            <Tabs value={workspaceTab} onChange={setWorkspaceTab} variant="pills" radius="sm">
-              <Tabs.List>
-                <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
-                <Tabs.Tab value="operator">Operator View</Tabs.Tab>
-              </Tabs.List>
-            </Tabs>
+            <ButtonGroup size="sm">
+              <Button
+                variant={workspaceTab === "workspace" ? "primary" : "ghost"}
+                onPress={() => setWorkspaceTab("workspace")}
+              >
+                Workspace
+              </Button>
+              <Button
+                variant={workspaceTab === "operator" ? "primary" : "ghost"}
+                onPress={() => setWorkspaceTab("operator")}
+              >
+                Operator View
+              </Button>
+            </ButtonGroup>
           ) : undefined
         }
       />

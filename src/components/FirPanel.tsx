@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ActionIcon, Alert, Button, Code, Group, Loader, Stack, Text, Tooltip } from "@mantine/core";
+import { Alert, Button, Spinner, Tooltip } from "@heroui/react";
 import { Copy, RefreshCw } from "lucide-react";
 
 import { commands, type AmpCapability, type ChannelFirSnapshot } from "../lib/bindings";
@@ -103,73 +103,77 @@ export function FirPanel({
   }
 
   return (
-    <Stack gap="xs" className="h-full min-h-0 min-w-0 p-4">
-      <Group gap="xs" wrap="wrap">
-        <Text fw={600} size="sm">
-          Out{label} FIR
-        </Text>
+    <div className="flex h-full min-h-0 min-w-0 flex-col gap-2 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span style={{ fontWeight: 600, fontSize: "var(--amp-font-size-sm)" }}>Out{label} FIR</span>
         {fir && (
-          <Text c="dimmed" size="xs">
+          <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-xs)" }}>
             {fir.order} of {fir.maxTaps} taps · {fir.sampleRateHz / 1000} kHz · zero-time{" "}
             {fir.timeZeroMs ?? 0} ms · {fir.bodyLen}-byte reply
-          </Text>
+          </span>
         )}
         <div className="flex-1" />
-        <Tooltip label="Re-read from the amp" withArrow openDelay={300}>
-          <ActionIcon
-            variant="subtle"
-            aria-label="Refresh FIR data"
-            loading={loading}
-            onClick={() => void fetchFir({ cancelled: false })}
-          >
-            <RefreshCw size={16} />
-          </ActionIcon>
+        <Tooltip delay={300}>
+          <Tooltip.Trigger>
+            <Button
+              isIconOnly
+              variant="ghost"
+              aria-label="Refresh FIR data"
+              onPress={() => void fetchFir({ cancelled: false })}
+            >
+              {loading ? <Spinner size="sm" /> : <RefreshCw size={16} />}
+            </Button>
+          </Tooltip.Trigger>
+          <Tooltip.Content showArrow>Re-read from the amp</Tooltip.Content>
         </Tooltip>
-        <Button
-          size="xs"
-          variant="default"
-          leftSection={<Copy size={14} />}
-          disabled={!fir}
-          onClick={() => void handleCopy()}
-        >
-          {copied ? "Copied" : "Copy JSON"}
+        <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleCopy()}>
+          <Copy size={14} /> {copied ? "Copied" : "Copy JSON"}
         </Button>
-      </Group>
+      </div>
 
       {error && (
-        <Alert color="red" variant="light" title="Could not read FIR data">
-          {error}
+        <Alert status="danger">
+          <Alert.Content>
+            <Alert.Title>Could not read FIR data</Alert.Title>
+            <Alert.Description>{error}</Alert.Description>
+          </Alert.Content>
         </Alert>
       )}
 
       {loading && !fir && (
-        <Group justify="center" py="xl">
-          <Loader size="sm" />
-        </Group>
+        <div className="flex justify-center py-6">
+          <Spinner size="sm" />
+        </div>
       )}
 
       {fir && (
         /* Its own scroll container: 512 coefficients are far wider and taller
            than the pane, and per CLAUDE.md a grid with an irreducible width
            scrolls inside itself rather than pushing the window sideways. */
-        <Code
-          block
-          className="min-h-0 min-w-0 flex-1 overflow-auto"
+        <pre
+          className="min-h-0 min-w-0 flex-1 overflow-auto rounded-[var(--amp-radius-sm)] bg-[var(--amp-color-default)] p-2 font-mono"
           style={{ whiteSpace: "pre", fontSize: 11 }}
         >
           {JSON.stringify(fir, null, 2)}
-        </Code>
+        </pre>
       )}
-    </Stack>
+    </div>
   );
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center p-4">
-      <Text c="dimmed" size="sm" ta="center" maw={420}>
+      <span
+        style={{
+          color: "var(--amp-color-dimmed)",
+          fontSize: "var(--amp-font-size-sm)",
+          textAlign: "center",
+          maxWidth: 420,
+        }}
+      >
         {children}
-      </Text>
+      </span>
     </div>
   );
 }

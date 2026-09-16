@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { Text } from "@mantine/core";
 import { usePeakHold } from "../hooks/usePeakHold";
 import { parseGradientStops, sampleGradient, vibrantColor } from "../lib/gradientColor";
 
@@ -127,8 +126,8 @@ export function VuMeter({
   marks = [],
   zones = [],
   gradient,
-  trackColor = "var(--mantine-color-dark-6)",
-  fillColor = "var(--mantine-color-teal-5)",
+  trackColor = "var(--amp-color-dark-6)",
+  fillColor = "var(--amp-color-teal-5)",
   backdropOpacity = 1,
   thickness = 8,
   size,
@@ -156,7 +155,7 @@ export function VuMeter({
   const gradientStops = useMemo(() => (gradient ? parseGradientStops(gradient) : []), [gradient]);
   const sampledPeak = peakFraction === null ? null : sampleGradient(gradientStops, peakFraction);
   const resolvedPeakColor =
-    peakColor ?? (sampledPeak ? vibrantColor(sampledPeak) : "var(--mantine-color-text)");
+    peakColor ?? (sampledPeak ? vibrantColor(sampledPeak) : "var(--amp-color-text)");
   /** Gradient stops are laid out across the *whole* track and then clipped
    * to the lit width (see `backgroundSize` below), so a given color always
    * sits at the same scale position regardless of the current level —
@@ -181,7 +180,7 @@ export function VuMeter({
       }}
     >
       <div
-        className="rounded-[var(--mantine-radius-sm)]"
+        className="rounded-[var(--amp-radius-sm)]"
         style={{
           position: "relative",
           width: horizontal ? trackSize : thickness,
@@ -309,23 +308,31 @@ export function VuMeter({
           {marks.map((mark, i) => {
             const t = clampFraction(mark.value, min, max);
             return (
-              <Text
+              <span
                 key={i}
-                fz={horizontal ? 8 : 9}
-                c={mark.color ?? "dimmed"}
                 style={{
+                  fontSize: horizontal ? 8 : 9,
+                  color: mark.color ?? "var(--amp-color-dimmed)",
                   position: "absolute",
                   whiteSpace: "nowrap",
+                  // The shift scales with the mark's own position instead of
+                  // being a flat 50%, so a label is centred on its tick in the
+                  // middle of the scale but tucks fully inside the box at
+                  // either end. A flat 50% left the end labels overhanging by
+                  // half their width, and an absolutely positioned overhang
+                  // still counts toward an ancestor's scrollable overflow —
+                  // that was enough to raise a scrollbar on the whole Routing
+                  // matrix and clip the "0" off the end of every meter.
                   ...(horizontal
-                    ? { left: `${t * 100}%`, transform: "translateX(-50%)" }
+                    ? { left: `${t * 100}%`, transform: `translateX(-${t * 100}%)` }
                     // Anchored right, since the column now sits to the left
                     // of the track — labels hug the scale they belong to
                     // rather than drifting away from it.
-                    : { bottom: `${t * 100}%`, transform: "translateY(50%)", right: 0 }),
+                    : { bottom: `${t * 100}%`, transform: `translateY(${t * 100}%)`, right: 0 }),
                 }}
               >
                 {mark.label}
-              </Text>
+              </span>
             );
           })}
         </div>

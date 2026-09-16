@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Badge, Card, Center, Divider, Group, Loader, ScrollArea, SegmentedControl, Select, Stack, Text } from "@mantine/core";
+import { Button, ButtonGroup, Card, Chip, Spinner } from "@heroui/react";
 import { AmpConfigureView } from "./AmpConfigureView";
+import { SimpleSelect } from "./SimpleSelect";
 import { DeviceTelemetryPanel } from "./DeviceTelemetryPanel";
 import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
 import { useLiveDevices } from "../hooks/useLiveDevices";
@@ -88,15 +89,14 @@ export function LiveControlView() {
 
   if (!ready) {
     return (
-      <Center h="100%">
-        <Loader size="sm" />
-      </Center>
+      <div className="flex h-full items-center justify-center">
+        <Spinner size="sm" />
+      </div>
     );
   }
 
   const modelSelect = (
-    <Select
-      size="xs"
+    <SimpleSelect
       placeholder="Assign amp model…"
       className="min-w-0"
       style={{ flex: compact ? "1 1 160px" : "0 0 240px" }}
@@ -104,20 +104,18 @@ export function LiveControlView() {
       value={ampModel?.id ?? null}
       onChange={setManualModel}
       clearable
-      searchable
     />
   );
 
   const viewSwitch = (
-    <SegmentedControl
-      size="xs"
-      value={view}
-      onChange={setView}
-      data={[
-        { label: "Configure", value: "configure" },
-        { label: "Raw Telemetry", value: "telemetry" },
-      ]}
-    />
+    <ButtonGroup size="sm">
+      <Button variant={view === "configure" ? "primary" : "ghost"} onPress={() => setView("configure")}>
+        Configure
+      </Button>
+      <Button variant={view === "telemetry" ? "primary" : "ghost"} onPress={() => setView("telemetry")}>
+        Raw Telemetry
+      </Button>
+    </ButtonGroup>
   );
 
   const deviceContent = selectedDevice ? (
@@ -141,11 +139,11 @@ export function LiveControlView() {
       />
     )
   ) : (
-    <Center h="100%" p="md">
-      <Text c="dimmed" ta="center">
+    <div className="flex h-full items-center justify-center p-4">
+      <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
         {devices.length === 0 ? "Scanning for amplifiers on the network…" : "Select an amp from the list"}
-      </Text>
-    </Center>
+      </span>
+    </div>
   );
 
   // One tree for both layouts, branching only on props/classNames. Returning
@@ -162,51 +160,49 @@ export function LiveControlView() {
           data, same selection state, only the affordance changes. */}
       {!compact && (
         <>
-          <Stack w={260} h="100%" p="md" gap="md" className="shrink-0">
-            <Text fw={500} size="sm" c="dimmed">
+          <div className="flex h-full w-[260px] shrink-0 flex-col gap-3 p-4">
+            <span style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
               Discovered Amps
-            </Text>
+            </span>
 
             {devices.length === 0 ? (
-              <Center className="flex-1">
-                <Text c="dimmed" size="sm" ta="center">
+              <div className="flex flex-1 items-center justify-center">
+                <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)", textAlign: "center" }}>
                   Scanning for amplifiers on the network…
-                </Text>
-              </Center>
+                </span>
+              </div>
             ) : (
-              <ScrollArea className="min-h-0 flex-1">
-                <Stack gap="xs">
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <div className="flex flex-col gap-2">
                   {devices.map((d) => {
                     const isSelected = d.id === selectedId;
                     return (
                       <Card
                         key={d.id}
-                        withBorder
-                        padding="sm"
                         onClick={() => setSelectedId(d.id)}
-                        className={`cursor-pointer${isSelected ? " border-2 border-[var(--mantine-color-amber-filled)]" : ""}`}
+                        className={`cursor-pointer p-[var(--amp-spacing-sm)]${isSelected ? " border-2 border-[var(--accent)]" : ""}`}
                       >
-                        <Group justify="space-between" wrap="nowrap" gap="xs">
+                        <div className="flex flex-nowrap items-center justify-between gap-2">
                           <div className="min-w-0">
-                            <Text fw={500} size="sm" truncate>
+                            <div className="truncate" style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)" }}>
                               {d.name || d.mac}
-                            </Text>
-                            <Text size="xs" c="dimmed">
+                            </div>
+                            <div style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
                               {d.ip}
-                            </Text>
+                            </div>
                           </div>
-                          <Badge color={d.online ? "green" : "gray"} variant="light" size="xs">
+                          <Chip size="sm" color={d.online ? "success" : "default"}>
                             {d.online ? "Online" : "Offline"}
-                          </Badge>
-                        </Group>
+                          </Chip>
+                        </div>
                       </Card>
                     );
                   })}
-                </Stack>
-              </ScrollArea>
+                </div>
+              </div>
             )}
-          </Stack>
-          <Divider orientation="vertical" />
+          </div>
+          <hr className="m-0 h-full border-l border-t-0 border-[var(--amp-color-default-border)]" />
         </>
       )}
 
@@ -215,17 +211,13 @@ export function LiveControlView() {
             compact, the view/model controls once an amp is selected. */}
         {(compact || selectedDevice) && (
           <>
-            <Group
-              px={compact ? "sm" : "md"}
-              py="xs"
-              gap="xs"
-              wrap="wrap"
-              align="center"
-              justify={compact ? undefined : "space-between"}
+            <div
+              className={`flex flex-wrap items-center gap-2 py-2 ${compact ? "px-3" : "px-4"} ${
+                compact ? "" : "justify-between"
+              }`}
             >
               {compact && (
-                <Select
-                  size="xs"
+                <SimpleSelect
                   className="min-w-0"
                   style={{ flex: "1 1 160px" }}
                   placeholder={devices.length === 0 ? "Scanning…" : "Discovered amps…"}
@@ -235,13 +227,12 @@ export function LiveControlView() {
                   }))}
                   value={selectedId}
                   onChange={setSelectedId}
-                  searchable
                 />
               )}
               {selectedDevice && showRawTelemetry && viewSwitch}
               {selectedDevice && modelSelect}
-            </Group>
-            <Divider />
+            </div>
+            <hr className="m-0 border-t border-[var(--amp-color-default-border)]" />
           </>
         )}
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>

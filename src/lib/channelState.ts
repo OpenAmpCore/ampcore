@@ -34,7 +34,8 @@ export function isNominalChannelState(state: AmpChannelState): boolean {
   return NOMINAL_STATES.has(state);
 }
 
-/** Colour per state, as a Mantine palette name.
+/** Colour per state, as a palette name (see `--amp-color-*` in
+ * design-tokens.css).
  *
  * The five the prior web implementation actually renders come straight from
  * its `FLAG_DEFS` (`heartbeat-controls.tsx`): fault red, open orange, temp

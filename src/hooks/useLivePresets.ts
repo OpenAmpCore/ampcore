@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { notifications } from "@mantine/notifications";
+import { notifications } from "../lib/notify";
 import { ACTION_OK, ACTION_UNAVAILABLE, actionFailed } from "../lib/actionResult";
 import { commands, type DevicePresets, type DevicePresetsSnapshot } from "../lib/bindings";
 import { showRollingNotification } from "../lib/rollingNotification";
@@ -11,7 +11,7 @@ import { showRollingNotification } from "../lib/rollingNotification";
  * manual button), but the store/listen half mirrors those hooks exactly so
  * every mounted view stays in sync via `live_presets:updated`.
  *
- * Errors surface as Mantine toasts rather than inline state — `refresh()`
+ * Errors surface as toasts rather than inline state — `refresh()`
  * failures are otherwise easy to miss (e.g. the on-mount fetch failing
  * silently before the user has looked at the tab), and `recall()` is a
  * fire-and-forget device write with no other feedback at all, so a toast is

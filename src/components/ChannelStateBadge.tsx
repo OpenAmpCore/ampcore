@@ -1,4 +1,4 @@
-import { Tooltip } from "@mantine/core";
+import { Tooltip } from "@heroui/react";
 import type { AmpChannelState } from "../lib/bindings";
 import { CHANNEL_STATE_LABEL, channelStateTone, isNominalChannelState } from "../lib/channelState";
 
@@ -39,7 +39,7 @@ export function ChannelStateBadge({
 
   const label = state === null ? "—" : CHANNEL_STATE_LABEL[state];
   const tone = state === null ? "gray" : channelStateTone(state);
-  const color = `var(--mantine-color-${tone}-5)`;
+  const color = `var(--amp-color-${tone}-5)`;
   const tooltip =
     state === null
       ? "No state reading from this amp"
@@ -48,18 +48,21 @@ export function ChannelStateBadge({
         : `${label} (wire value ${raw})`;
 
   return (
-    <Tooltip label={tooltip} withArrow openDelay={300}>
-      <span
-        className="inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[9px] font-semibold leading-tight"
-        style={{
-          borderColor: wash(color, 60),
-          background: wash(color, 15),
-          color,
-          opacity: state === null ? 0.5 : undefined,
-        }}
-      >
-        {label}
-      </span>
+    <Tooltip delay={300}>
+      <Tooltip.Trigger>
+        <span
+          className="inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[9px] font-semibold leading-tight"
+          style={{
+            borderColor: wash(color, 60),
+            background: wash(color, 15),
+            color,
+            opacity: state === null ? 0.5 : undefined,
+          }}
+        >
+          {label}
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Content showArrow>{tooltip}</Tooltip.Content>
     </Tooltip>
   );
 }

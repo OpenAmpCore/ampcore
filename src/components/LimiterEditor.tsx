@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Button, Divider, Group, NumberInput, Slider, Stack, Text } from "@mantine/core";
+import { Button, Slider } from "@heroui/react";
 import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type Limiter } from "../lib/bindings";
 import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } from "./VuMeter";
 import { limiterThresholdToDb, type ChannelTelemetry } from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
+import { FIELD_INPUT } from "./fieldClasses";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
@@ -306,11 +307,21 @@ export function LimiterEditor({
   }
 
   return (
-    <Stack gap="md" p="md" align="center" className="min-w-0" style={{ maxWidth: EDITOR_MAX_WIDTH, margin: "0 auto" }}>
+    <div
+      className="flex min-w-0 flex-col items-center gap-4 p-4"
+      style={{ maxWidth: EDITOR_MAX_WIDTH, margin: "0 auto" }}
+    >
       {isBridged && (
-        <Text size="xs" fw={700} c="green" ta="center">
+        <span
+          style={{
+            fontSize: "var(--amp-font-size-xs)",
+            fontWeight: 700,
+            color: "var(--amp-color-green-6)",
+            textAlign: "center",
+          }}
+        >
           Bridged with Out{partnerLetter} — showing combined values
-        </Text>
+        </span>
       )}
       {/* `1fr` is `minmax(auto, 1fr)`, so four columns can't shrink below
        * their content and would push the window into a horizontal scroll.
@@ -383,21 +394,19 @@ export function LimiterEditor({
       >
         <OnOffButton enabled={limiter.rms.enabled} onClick={() => patch({ rmsEnabled: !limiter.rms.enabled })} />
         <div style={{ gridColumn: tight ? "span 1" : "span 2" }}>
-          <NumberInput
-            size="sm"
+          <LiveNumberField
             label="Load"
             suffix=" Ω"
             min={isBridged ? 4 : 0.5}
-            step={0.5}
             value={effectiveOhms}
             disabled={!capabilities.ohmsEditable}
-            onChange={(value) => typeof value === "number" && handleOhmsChange(value)}
+            onChange={(value) => handleOhmsChange(value)}
           />
         </div>
         <OnOffButton enabled={limiter.peak.enabled} onClick={() => patch({ peakEnabled: !limiter.peak.enabled })} />
       </div>
 
-      <Divider w="100%" />
+      <hr className="m-0 w-full border-t border-[var(--amp-color-default-border)]" />
 
       {/* RMS and Peak field columns sit side by side while both fit; below
        * `useIsTight` a label + 140px input pair per column no longer does,
@@ -410,7 +419,7 @@ export function LimiterEditor({
           width: "100%",
         }}
       >
-        <Stack gap="xs">
+        <div className="flex flex-col gap-2">
           <LimiterFieldRow
             label="Threshold"
             unit="Vrms"
@@ -452,8 +461,8 @@ export function LimiterEditor({
             disabled={!limiter.rms.enabled}
             onChange={(value) => patch({ rmsReleaseMultiplier: value })}
           />
-        </Stack>
-        <Stack gap="xs">
+        </div>
+        <div className="flex flex-col gap-2">
           <LimiterFieldRow
             label="Threshold"
             unit="Vpeak"
@@ -494,9 +503,9 @@ export function LimiterEditor({
             disabled={!limiter.peak.enabled}
             onChange={(value) => patch({ peakReleaseMs: value })}
           />
-        </Stack>
+        </div>
       </div>
-    </Stack>
+    </div>
   );
 }
 
@@ -546,25 +555,33 @@ function ThresholdSliderColumn({
   useEffect(() => {
     setDragValue(value);
   }, [value]);
+  const clamped = Math.min(Math.max(dragValue, effectiveFloor), max);
 
   return (
-    <Stack gap={8} align="center" style={{ opacity: disabled ? 0.45 : 1 }}>
-      <Text size="sm" fw={700} c="dimmed" tt="uppercase">
+    <div className="flex flex-col items-center gap-2" style={{ opacity: disabled ? 0.45 : 1 }}>
+      <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, color: "var(--amp-color-dimmed)", textTransform: "uppercase" }}>
         {label}
-      </Text>
+      </span>
       <Slider
         orientation="vertical"
-        h={SLIDER_HEIGHT}
-        min={min}
-        max={max}
+        style={{ height: SLIDER_HEIGHT }}
+        minValue={min}
+        maxValue={max}
         step={step}
-        value={Math.min(Math.max(dragValue, effectiveFloor), max)}
-        disabled={disabled}
-        onChange={(v) => setDragValue(Math.max(v, effectiveFloor))}
-        onChangeEnd={(v) => onChangeEnd(Math.max(v, effectiveFloor))}
-        label={(v) => `${Math.round(v)} W`}
-      />
-    </Stack>
+        value={clamped}
+        isDisabled={disabled}
+        onChange={(v) => setDragValue(Math.max(v as number, effectiveFloor))}
+        onChangeEnd={(v) => onChangeEnd(Math.max(v as number, effectiveFloor))}
+      >
+        <Slider.Track>
+          <Slider.Fill />
+          <Slider.Thumb />
+        </Slider.Track>
+      </Slider>
+      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
+        {Math.round(clamped)} W
+      </span>
+    </div>
   );
 }
 
@@ -599,10 +616,10 @@ function LimiterMeterColumn({
   zones?: VuMeterZone[];
 }) {
   return (
-    <Stack gap={8} align="center">
-      <Text size="sm" fw={700} c="dimmed" tt="uppercase">
+    <div className="flex flex-col items-center gap-2">
+      <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, color: "var(--amp-color-dimmed)", textTransform: "uppercase" }}>
         {label}
-      </Text>
+      </span>
       <VuMeter
         orientation="vertical"
         min={LIMITER_METER_FLOOR}
@@ -616,10 +633,8 @@ function LimiterMeterColumn({
         fillFrom={fillFrom}
         peakHold={peakHold}
       />
-      <Text size="xs" c="dimmed">
-        {valueText}
-      </Text>
-    </Stack>
+      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{valueText}</span>
+    </div>
   );
 }
 
@@ -631,16 +646,14 @@ function OnOffButton({ enabled, onClick }: { enabled: boolean; onClick: () => vo
     <Button
       size="sm"
       fullWidth
-      variant="default"
-      onClick={onClick}
-      styles={
+      variant="secondary"
+      onPress={onClick}
+      style={
         enabled
           ? {
-              root: {
-                backgroundColor: "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)",
-                color: "var(--mantine-color-green-6)",
-                border: "1px solid color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)",
-              },
+              backgroundColor: "color-mix(in srgb, var(--amp-color-green-light) 50%, transparent)",
+              color: "var(--amp-color-green-6)",
+              border: "1px solid color-mix(in srgb, var(--amp-color-green-light) 50%, transparent)",
             }
           : undefined
       }
@@ -650,13 +663,76 @@ function OnOffButton({ enabled, onClick }: { enabled: boolean; onClick: () => vo
   );
 }
 
+/** Plain controlled number input matching Mantine `NumberInput`'s
+ * instant-`onChange` behavior (fires on every keystroke/arrow-key change,
+ * unlike `CommitNumberInput`'s blur/Enter commit) — kept as-is rather than
+ * switched to the commit pattern, since that would be a behavior change
+ * beyond this Mantine→HeroUI migration's scope. */
+function LiveNumberField({
+  label,
+  suffix,
+  value,
+  min,
+  max,
+  disabled,
+  integer,
+  onChange,
+}: {
+  label?: string;
+  suffix?: string;
+  value: number;
+  min?: number;
+  max?: number;
+  disabled?: boolean;
+  integer?: boolean;
+  onChange?: (value: number) => void;
+}) {
+  const displayValue = integer ? Math.round(value) : Number(value.toFixed(2));
+  return (
+    <div className="flex flex-col gap-1" style={{ flex: "0 1 140px", minWidth: 92 }}>
+      {label && <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 500 }}>{label}</span>}
+      <div className="relative">
+        <input
+          type="text"
+          inputMode={integer ? "numeric" : "decimal"}
+          className={FIELD_INPUT}
+          style={{ paddingRight: suffix ? `${suffix.length * 7 + 12}px` : undefined }}
+          value={displayValue}
+          disabled={disabled || !onChange}
+          onChange={(e) => {
+            if (!onChange) return;
+            const next = Number.parseFloat(e.currentTarget.value);
+            if (!Number.isFinite(next)) return;
+            const clamped = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, next));
+            onChange(clamped);
+          }}
+        />
+        {suffix && (
+          <span
+            style={{
+              position: "absolute",
+              right: 8,
+              top: "50%",
+              transform: "translateY(-50%)",
+              color: "var(--amp-color-dimmed)",
+              fontSize: "var(--amp-font-size-sm)",
+              pointerEvents: "none",
+            }}
+          >
+            {suffix}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LimiterFieldRow({
   label,
   unit,
   value,
   min,
   max,
-  step,
   disabled,
   integer,
   onChange,
@@ -676,22 +752,17 @@ function LimiterFieldRow({
   onChange?: (value: number) => void;
 }) {
   return (
-    <Group justify="space-between" wrap="nowrap" gap="xs" style={{ opacity: disabled ? 0.45 : 1 }}>
-      <Text size="sm" c="dimmed">
-        {label}
-      </Text>
-      <NumberInput
-        size="sm"
-        style={{ flex: "0 1 140px", minWidth: 92 }}
+    <div className="flex flex-nowrap items-center justify-between gap-2" style={{ opacity: disabled ? 0.45 : 1 }}>
+      <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>{label}</span>
+      <LiveNumberField
         suffix={` ${unit}`}
         min={min}
         max={max}
-        step={step}
-        allowDecimal={!integer}
-        value={integer ? Math.round(value) : Number(value.toFixed(2))}
+        integer={integer}
+        value={value}
         disabled={disabled || !onChange}
-        onChange={(v) => onChange && typeof v === "number" && onChange(v)}
+        onChange={onChange}
       />
-    </Group>
+    </div>
   );
 }

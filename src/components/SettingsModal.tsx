@@ -2,19 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import {
-  Badge,
-  Button,
-  Divider,
-  Group,
-  Modal,
-  SegmentedControl,
-  Stack,
-  Switch,
-  Text,
-  useMantineColorScheme,
-} from "@mantine/core";
+import { Button, Chip, Modal, Spinner, Switch } from "@heroui/react";
 import { setPreference, usePreference } from "../lib/preferences";
+import { AppearanceControls } from "./AppearanceControls";
 
 interface SettingsModalProps {
   opened: boolean;
@@ -25,17 +15,22 @@ interface SettingsModalProps {
  * the section-header treatment used throughout the amp editor. */
 function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Stack gap="xs">
-      <Divider
-        label={
-          <Text size="xs" fw={700} c="dimmed" tt="uppercase">
-            {title}
-          </Text>
-        }
-        labelPosition="left"
-      />
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <span
+          style={{
+            fontSize: "var(--amp-font-size-xs)",
+            fontWeight: 700,
+            color: "var(--amp-color-dimmed)",
+            textTransform: "uppercase",
+          }}
+        >
+          {title}
+        </span>
+        <hr className="m-0 flex-1 border-t border-[var(--amp-color-default-border)]" />
+      </div>
       {children}
-    </Stack>
+    </div>
   );
 }
 
@@ -43,25 +38,24 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
  * the wrapping/spacing is decided once here rather than per row. */
 function SettingRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Group justify="space-between" wrap="wrap" gap="xs">
-      <Text size="sm">{label}</Text>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <span style={{ fontSize: "var(--amp-font-size-sm)" }}>{label}</span>
       {children}
-    </Group>
+    </div>
   );
 }
 
 type VersionStatus = "dev" | "checking" | "update-available" | "up-to-date" | "check-failed";
 
-const STATUS_COLOR: Record<VersionStatus, string> = {
-  dev: "red",
-  checking: "gray",
-  "update-available": "orange",
-  "up-to-date": "green",
-  "check-failed": "gray",
+const STATUS_COLOR: Record<VersionStatus, "danger" | "default" | "warning" | "success"> = {
+  dev: "danger",
+  checking: "default",
+  "update-available": "warning",
+  "up-to-date": "success",
+  "check-failed": "default",
 };
 
 export function SettingsModal({ opened, onClose }: SettingsModalProps) {
-  const { colorScheme, setColorScheme } = useMantineColorScheme();
   const [version, setVersion] = useState("");
   const [status, setStatus] = useState<VersionStatus>("checking");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
@@ -121,70 +115,83 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
             : "check failed";
 
   return (
-    <Modal opened={opened} onClose={onClose} title="App Settings" centered>
-      <Stack gap="lg">
-        <SettingsSection title="Appearance">
-          <SettingRow label="Color mode">
-            <SegmentedControl
-              size="xs"
-              value={colorScheme}
-              onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")}
-              data={[
-                { label: "Light", value: "light" },
-                { label: "Dark", value: "dark" },
-                { label: "Auto", value: "auto" },
-              ]}
-            />
-          </SettingRow>
-        </SettingsSection>
+    <Modal.Backdrop isOpen={opened} onOpenChange={(open) => !open && onClose()}>
+      <Modal.Container placement="center">
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>App Settings</Modal.Heading>
+            <Modal.CloseTrigger />
+          </Modal.Header>
+          <Modal.Body>
+            <div className="flex flex-col gap-4">
+              <SettingsSection title="Appearance">
+                {/* Same controls as the title bar's appearance menu — one
+                 * component, so the two never drift apart. */}
+                <AppearanceControls />
+              </SettingsSection>
 
-        {/* Two developer-facing surfaces in the amp editor, off by default so
-         * an ordinary operator never meets them. Both read live: toggling one
-         * updates an editor that is already open. */}
-        <SettingsSection title="Amp Edit">
-          <SettingRow label="Show Fingerprint Menu">
-            <Switch
-              checked={showFingerprintMenu}
-              onChange={(e) =>
-                setPreference("showFingerprintMenu", e.currentTarget.checked)
-              }
-            />
-          </SettingRow>
+              {/* Two developer-facing surfaces in the amp editor, off by default so
+               * an ordinary operator never meets them. Both read live: toggling one
+               * updates an editor that is already open. */}
+              <SettingsSection title="Amp Edit">
+                <SettingRow label="Show Fingerprint Menu">
+                  <Switch
+                    isSelected={showFingerprintMenu}
+                    onChange={(isSelected) => setPreference("showFingerprintMenu", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
+                </SettingRow>
 
-          <SettingRow label="Show Raw Telemetry">
-            <Switch
-              checked={showRawTelemetry}
-              onChange={(e) =>
-                setPreference("showRawTelemetry", e.currentTarget.checked)
-              }
-            />
-          </SettingRow>
-        </SettingsSection>
+                <SettingRow label="Show Raw Telemetry">
+                  <Switch
+                    isSelected={showRawTelemetry}
+                    onChange={(isSelected) => setPreference("showRawTelemetry", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
+                </SettingRow>
+              </SettingsSection>
 
-        <SettingsSection title="Updates">
-          <SettingRow label="Check for updates on startup">
-            <Switch
-              checked={autoUpdateChecks}
-              onChange={(e) =>
-                setPreference("autoUpdateChecks", e.currentTarget.checked)
-              }
-            />
-          </SettingRow>
+              <SettingsSection title="Updates">
+                <SettingRow label="Check for updates on startup">
+                  <Switch
+                    isSelected={autoUpdateChecks}
+                    onChange={(isSelected) => setPreference("autoUpdateChecks", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
+                </SettingRow>
 
-          <SettingRow label="Version">
-            <Group gap="xs" wrap="wrap">
-              <Badge color={STATUS_COLOR[status]} variant="light">
-                {version ? `${version} — ${statusLabel}` : statusLabel}
-              </Badge>
-              {status === "update-available" && (
-                <Button size="xs" loading={installing} onClick={handleInstallUpdate}>
-                  Update now
-                </Button>
-              )}
-            </Group>
-          </SettingRow>
-        </SettingsSection>
-      </Stack>
-    </Modal>
+                <SettingRow label="Version">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Chip color={STATUS_COLOR[status]}>
+                      {version ? `${version} — ${statusLabel}` : statusLabel}
+                    </Chip>
+                    {status === "update-available" && (
+                      <Button size="sm" variant="primary" onPress={handleInstallUpdate} isDisabled={installing}>
+                        {installing ? <Spinner size="sm" /> : "Update now"}
+                      </Button>
+                    )}
+                  </div>
+                </SettingRow>
+              </SettingsSection>
+            </div>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }

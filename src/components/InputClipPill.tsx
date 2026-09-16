@@ -1,4 +1,4 @@
-import { Tooltip } from "@mantine/core";
+import { Tooltip } from "@heroui/react";
 
 /** Input clip indicator — the heartbeat's `InStates` byte, whose vendor enum
  * is `InputChState { Clip = 0, None = 1 }`. Deliberately not a
@@ -16,23 +16,24 @@ import { Tooltip } from "@mantine/core";
 export function InputClipPill({ clipping, raw }: { clipping: boolean | null; raw?: number | null }) {
   if (clipping !== true) return null;
 
-  const color = "var(--mantine-color-red-5)";
+  const color = "var(--amp-color-red-5)";
   return (
-    <Tooltip
-      label={raw === null || raw === undefined ? "Input clipping" : `Input clipping (wire value ${raw})`}
-      withArrow
-      openDelay={300}
-    >
-      <span
-        className="inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[9px] font-semibold leading-tight"
-        style={{
-          borderColor: `color-mix(in srgb, ${color} 60%, transparent)`,
-          background: `color-mix(in srgb, ${color} 15%, transparent)`,
-          color,
-        }}
-      >
-        Clip
-      </span>
+    <Tooltip delay={300}>
+      <Tooltip.Trigger>
+        <span
+          className="inline-flex shrink-0 items-center rounded-full border px-1.5 py-px text-[9px] font-semibold leading-tight"
+          style={{
+            borderColor: `color-mix(in srgb, ${color} 60%, transparent)`,
+            background: `color-mix(in srgb, ${color} 15%, transparent)`,
+            color,
+          }}
+        >
+          Clip
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Content showArrow>
+        {raw === null || raw === undefined ? "Input clipping" : `Input clipping (wire value ${raw})`}
+      </Tooltip.Content>
     </Tooltip>
   );
 }
