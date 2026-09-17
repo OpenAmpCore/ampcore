@@ -26,11 +26,11 @@ use commands::live_control::{
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
     live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop, live_control_set_poll_subscription,
-    live_control_set_rotary_lock, live_control_set_standby,
+    live_control_set_rotary_lock, live_control_set_standby, live_control_set_device_name,
 };
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
-    projects_remove_amp_assignment, projects_set_amp_model, projects_set_channel_delay_in,
+    projects_remove_amp_assignment, projects_set_amp_device_name, projects_set_amp_model, projects_set_channel_delay_in,
     projects_set_channel_input_mute, projects_set_channel_limiter, projects_set_channel_name,
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
@@ -60,6 +60,7 @@ pub fn run() {
             projects_add_amp_assignment,
             projects_remove_amp_assignment,
             projects_set_amp_model,
+            projects_set_amp_device_name,
             projects_set_channel_ohms,
             projects_set_channel_source,
             projects_set_matrix_crosspoint,
@@ -125,6 +126,7 @@ pub fn run() {
             projects_push_amp_to_live,
             live_control_set_rotary_lock,
             live_control_set_standby,
+            live_control_set_device_name,
         ]);
 
     #[cfg(debug_assertions)]

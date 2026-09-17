@@ -457,7 +457,7 @@ pub fn fingerprint_project_amp(
         assignment_id: Some(assignment.id.clone()),
         device_id: None,
         mac: assignment.mac.clone(),
-        label: assignment.label.clone(),
+        label: assignment.device_name.clone(),
     };
     let inputs = channels.into_iter().map(ChannelInput::from_project).collect();
     let amp_input = AmpInput {

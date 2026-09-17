@@ -71,6 +71,7 @@ export interface ConfigureActions {
   setChannelLimiter?(channelIndex: number, patch: LimiterPatch): Promise<ActionResult>;
   setChannelNoiseGate?(channelIndex: number, enabled: boolean, thresholdDbu: number): Promise<ActionResult>;
   setChannelOhms?(channelIndex: number, ohms: number): Promise<ActionResult>;
+  setDeviceName?(name: string | null): Promise<ActionResult>;
 }
 
 /** Affordances that are conceptually Project-only (no live-device
@@ -161,5 +162,7 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetChannelNoiseGate(projectId, assignmentId, channelIndex, enabled, thresholdDbu)),
     setChannelOhms: (channelIndex, ohms) =>
       apply(commands.projectsSetChannelOhms(projectId, assignmentId, channelIndex, ohms)),
+    setDeviceName: (name) =>
+      apply(commands.projectsSetAmpDeviceName(projectId, assignmentId, name)),
   };
 }

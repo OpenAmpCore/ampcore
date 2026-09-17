@@ -6,6 +6,7 @@ import {
   ButtonGroup,
   Chip,
   Dropdown,
+  Modal,
   Spinner,
   Switch,
   Tabs,
@@ -15,11 +16,11 @@ import {
 } from "@heroui/react";
 import {
   Activity,
-  ArrowDownToLine,
   ArrowUpFromLine,
   Eye,
   FlipVertical2,
   GitCompare,
+  MoreHorizontal,
   Plug,
   RefreshCw,
   Route,
@@ -50,12 +51,12 @@ import { StandbyToggle } from "./StandbyToggle";
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { InputClipPill } from "./InputClipPill";
 import {
-  PresetActionTile,
   STAT_TILE_FOCUS,
   StatEditorTile,
   StatReadout,
   StatToggle,
 } from "./StatTiles";
+import { ActionFeedbackContent } from "./ActionFeedback";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { useActionFeedback } from "../hooks/useActionFeedback";
 import { useLiveBridge } from "../hooks/useLiveBridge";
@@ -150,6 +151,11 @@ interface AmpConfigureViewProps {
 type SkeletonVariant = "list" | "grid";
 
 const DEFAULT_CHANNEL_COUNT = 4;
+
+/** FC=60 CUSTOMER_NAME_MODIFY's wire field width (`DEVICE_NAME_FIELD_LEN` in
+ * `write_v118.rs`) — fixed by the protocol, not model/firmware-dependent, so
+ * unlike channel name length it isn't part of `AmpCapability`. */
+const DEVICE_NAME_MAX_LENGTH = 32;
 
 const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
@@ -501,7 +507,14 @@ function ChannelLevelMeter({
     <div
       className="min-w-0"
       style={{
-        flex: "1 1 200px",
+        // Basis `0`, not a width: the meter claims only what is left after
+        // its row's fixed-width tiles, so a tight row narrows the meter
+        // instead of wrapping a tile off the end. It renders identically
+        // whenever the row fits (a lone growing item absorbs all free space
+        // regardless of its basis) — the difference only shows under
+        // pressure, which is exactly where a 200px basis used to push the
+        // last tile onto a line of its own.
+        flex: "1 1 0%",
         minWidth: 120,
         maxWidth: wide ? undefined : 260,
       }}
@@ -691,72 +704,76 @@ function InputChannelRow({
         onRename={onRename}
         trailing={<InputClipPill clipping={telemetry.inputClipping} raw={telemetry.inputStateRaw} />}
       />
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex items-center gap-2">
         <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
-        <StatReadout
-          value={
-            telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)
-          }
-          label="dBV"
-        />
-        {/* Mute is the first control after the meter and its live readouts on
-         * both the input and the output strip, so the one control that
-         * silences a channel is always in the same place rather than at the
-         * end of a queue of editors. */}
-        <StatToggle
-          label="Mute"
-          engaged={muted}
-          visualValidation
-          onClick={onMuteToggle}
-          icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-        />
-        <TilePopover
-          opened={delayOpened}
-          onOpenChange={setDelayOpened}
-          width={200}
-          trigger={
-            <StatEditorTile
-              value={delayInMs.toFixed(1)}
-              label="Delay ms"
-              modified={delayInMs !== 0}
-              visualValidation={delayFeedback}
-              onClick={() => setDelayOpened((o) => !o)}
-            />
-          }
-        >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
-            >
-              Input Delay
-            </span>
-            <CommitNumberInput
-              value={delayInMs}
-              min={delayMin ?? undefined}
-              max={delayMax ?? undefined}
-              step={0.5}
-              suffix=" ms"
-              onCommit={(value) => void delayFeedback.track(onDelayChange(value))}
-            />
-          </div>
-        </TilePopover>
-        {/* Accented when the chain is doing anything at all. Deliberately
-         * binary rather than a band count: a count says how many boxes are
-         * ticked, not whether the channel is shaped — one band at +12 dB and
-         * one at -0.5 dB both read as "2". */}
-        <StatEditorTile
-          label="EQ In"
-          opens="view"
-          modified={eqActive > 0}
-          icon={<Activity size={16} />}
-          onClick={onOpenEq}
-        />
+        {/* Own wrapping cluster, same as the output strip — see the note
+         * there on why the tiles don't share the meter's row. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <StatReadout
+            value={
+              telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)
+            }
+            label="dBV"
+          />
+          {/* Mute is the first control after the meter and its live readouts on
+           * both the input and the output strip, so the one control that
+           * silences a channel is always in the same place rather than at the
+           * end of a queue of editors. */}
+          <StatToggle
+            label="Mute"
+            engaged={muted}
+            visualValidation
+            onClick={onMuteToggle}
+            icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          />
+          <TilePopover
+            opened={delayOpened}
+            onOpenChange={setDelayOpened}
+            width={200}
+            trigger={
+              <StatEditorTile
+                value={delayInMs.toFixed(1)}
+                label="Delay ms"
+                modified={delayInMs !== 0}
+                visualValidation={delayFeedback}
+                onClick={() => setDelayOpened((o) => !o)}
+              />
+            }
+          >
+            <div className="flex flex-col gap-2">
+              <span
+                style={{
+                  fontSize: "var(--amp-font-size-xs)",
+                  fontWeight: 700,
+                  color: "var(--amp-color-dimmed)",
+                  textTransform: "uppercase",
+                  textAlign: "center",
+                }}
+              >
+                Input Delay
+              </span>
+              <CommitNumberInput
+                value={delayInMs}
+                min={delayMin ?? undefined}
+                max={delayMax ?? undefined}
+                step={0.5}
+                suffix=" ms"
+                onCommit={(value) => void delayFeedback.track(onDelayChange(value))}
+              />
+            </div>
+          </TilePopover>
+          {/* Accented when the chain is doing anything at all. Deliberately
+           * binary rather than a band count: a count says how many boxes are
+           * ticked, not whether the channel is shaped — one band at +12 dB and
+           * one at -0.5 dB both read as "2". */}
+          <StatEditorTile
+            label="EQ In"
+            opens="view"
+            modified={eqActive > 0}
+            icon={<Activity size={16} />}
+            onClick={onOpenEq}
+          />
+        </div>
       </div>
     </div>
   );
@@ -1014,215 +1031,63 @@ function OutputChannelRow({
           />
         }
       />
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Grouped by role, left to right in rough order of how often each is
-         * touched: live readouts beside the meter, then level (Mute/Vol/Trim),
-         * speaker tuning (EQ/FIR/Delay/Pol), dynamics (LIM/Gate), and the amp
-         * hardware setting (Mode) last. Deliberately not a signal-flow order —
-         * the CVR DSP chain order is not confirmed. */}
+      <div className="flex items-center gap-2">
         <ChannelLevelMeter
           levelDb={telemetry.outputLevelDb}
           disabled={muted}
           wide
         />
-        <StatReadout
-          value={
-            telemetry.outputVoltage === null
-              ? "—"
-              : telemetry.outputVoltage.toFixed(1)
-          }
-          label="V"
-        />
-        <StatReadout
-          value={
-            telemetry.temperatureC === null
-              ? "—"
-              : telemetry.temperatureC.toFixed(1)
-          }
-          label="°C"
-        />
-        {/* Same slot as on the input strip — see the note in InputChannelRow. */}
-        <StatToggle
-          label="Mute"
-          engaged={muted}
-          visualValidation
-          onClick={onMuteToggle}
-          icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-        />
-        <TilePopover
-          opened={openPopover === "volume"}
-          onOpenChange={(o) => setOpenPopover(o ? "volume" : null)}
-          width={200}
-          trigger={
-            <StatEditorTile
-              value={volumeDb.toFixed(1)}
-              label="Vol dB"
-              modified={volumeDb !== 0}
-              visualValidation={volumeFeedback}
-              onClick={() =>
-                setOpenPopover((o) => (o === "volume" ? null : "volume"))
-              }
-            />
-          }
-        >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
-            >
-              Output Volume
-            </span>
-            <CommitNumberInput
-              value={volumeDb}
-              min={volumeMin ?? undefined}
-              max={volumeMax ?? undefined}
-              step={0.5}
-              suffix=" dB"
-              onCommit={(value) => void volumeFeedback.track(onChange("volume", value))}
-            />
-          </div>
-        </TilePopover>
-        <TilePopover
-          opened={openPopover === "trim"}
-          onOpenChange={(o) => setOpenPopover(o ? "trim" : null)}
-          width={200}
-          trigger={
-            <StatEditorTile
-              value={trimDb.toFixed(1)}
-              label="Trim dB"
-              modified={trimDb !== 0}
-              visualValidation={trimFeedback}
-              onClick={() =>
-                setOpenPopover((o) => (o === "trim" ? null : "trim"))
-              }
-            />
-          }
-        >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
-            >
-              Output Trim
-            </span>
-            <CommitNumberInput
-              value={trimDb}
-              min={trimMin ?? undefined}
-              max={trimMax ?? undefined}
-              step={0.5}
-              suffix=" dB"
-              onCommit={(value) => void trimFeedback.track(onChange("trim", value))}
-            />
-          </div>
-        </TilePopover>
-        <StatEditorTile
-          label="EQ Out"
-          opens="view"
-          modified={eqActive > 0}
-          icon={<Activity size={16} />}
-          onClick={onOpenEq}
-        />
-        <StatEditorTile
-          label="FIR"
-          opens="view"
-          icon={<Waves size={16} />}
-          onClick={onOpenFir}
-        />
-        <TilePopover
-          opened={openPopover === "delay"}
-          onOpenChange={(o) => setOpenPopover(o ? "delay" : null)}
-          width={200}
-          trigger={
-            <StatEditorTile
-              value={delayMs.toFixed(1)}
-              label="Delay ms"
-              modified={delayMs !== 0}
-              visualValidation={delayFeedback}
-              onClick={() =>
-                setOpenPopover((o) => (o === "delay" ? null : "delay"))
-              }
-            />
-          }
-        >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
-            >
-              Output Delay
-            </span>
-            <CommitNumberInput
-              value={delayMs}
-              min={delayMin ?? undefined}
-              max={delayMax ?? undefined}
-              step={0.5}
-              suffix=" ms"
-              onCommit={(value) => void delayFeedback.track(onChange("delay", value))}
-            />
-          </div>
-        </TilePopover>
-        {/* Amber, not red: an inverted polarity is a deliberate setting, and
-         * red is reserved for "this channel's audio is cut". */}
-        <StatToggle
-          label="Pol"
-          engaged={phaseInverted}
-          accent="var(--accent)"
-          visualValidation
-          onClick={onPhaseInvertToggle}
-          icon={<FlipVertical2 size={16} />}
-        />
-        <StatEditorTile
-          label="LIM"
-          opens="view"
-          onClick={onOpenLimiter}
-          // Accented only while the limiter is actually pulling gain down, so
-          // the tile doubles as a live "limiting now" indicator instead of a
-          // permanently-highlighted button. Icon-only now — the live gain
-          // reduction dB reads as a precise measurement when it's really a
-          // momentary number that stops mattering the instant you look away;
-          // the accent alone answers "is it limiting right now."
-          modified={
-            telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0
-          }
-          accent="var(--amp-color-red-6)"
-          icon={<ListPlus size={16} />}
-        />
-        {/* Firmware without an adjustable threshold (1.1.8) has nothing to
-         * put in a dropdown but the same on/off state the pill already
-         * shows — a popover there was a second click to reach a switch that
-         * duplicates the pill itself. That firmware gets a direct toggle;
-         * only firmware with a real threshold field (`noiseGateThresholdAdjustable`)
-         * gets the popover. */}
-        {noiseGateThresholdAdjustable ? (
+        {/* The tiles wrap as their own cluster, never mixed in with the meter.
+         * Every tile is exactly `STAT_TILE_W`, so a wrapped line starts a new
+         * row of the same columns — a grid, rather than the single orphan tile
+         * stranded under the meter that one shared `flex-wrap` row produced.
+         * (`flex-wrap` and not `grid` + `repeat(auto-fit, …)`: auto-fit
+         * resolves to one column inside a shrink-to-fit flex item, which
+         * would stack all twelve tiles vertically.)
+         *
+         * Grouped by role, left to right in rough order of how often each is
+         * touched: live readouts beside the meter, then level (Mute/Vol/Trim),
+         * speaker tuning (EQ/FIR/Delay/Pol), dynamics (LIM/Gate), and the amp
+         * hardware setting (Mode) last. Deliberately not a signal-flow order —
+         * the CVR DSP chain order is not confirmed. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <StatReadout
+            value={
+              telemetry.outputVoltage === null
+                ? "—"
+                : telemetry.outputVoltage.toFixed(1)
+            }
+            label="V"
+          />
+          <StatReadout
+            value={
+              telemetry.temperatureC === null
+                ? "—"
+                : telemetry.temperatureC.toFixed(1)
+            }
+            label="°C"
+          />
+          {/* Same slot as on the input strip — see the note in InputChannelRow. */}
+          <StatToggle
+            label="Mute"
+            engaged={muted}
+            visualValidation
+            onClick={onMuteToggle}
+            icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          />
           <TilePopover
-            opened={openPopover === "gate"}
-            onOpenChange={(o) => setOpenPopover(o ? "gate" : null)}
+            opened={openPopover === "volume"}
+            onOpenChange={(o) => setOpenPopover(o ? "volume" : null)}
             width={200}
             trigger={
-              <StatToggle
-                label="Gate"
-                engaged={noiseGateEnabled}
-                accent="var(--accent)"
-                visualValidation={gateFeedback}
+              <StatEditorTile
+                value={volumeDb.toFixed(1)}
+                label="Vol dB"
+                modified={volumeDb !== 0}
+                visualValidation={volumeFeedback}
                 onClick={() =>
-                  setOpenPopover((o) => (o === "gate" ? null : "gate"))
+                  setOpenPopover((o) => (o === "volume" ? null : "volume"))
                 }
-                icon={<ShieldAlert size={16} />}
               />
             }
           >
@@ -1236,89 +1101,251 @@ function OutputChannelRow({
                   textAlign: "center",
                 }}
               >
-                Noise Gate
+                Output Volume
               </span>
-              <Switch
-                isSelected={noiseGateEnabled}
-                onChange={(isSelected) =>
-                  void gateFeedback.track(onNoiseGateChange(isSelected, noiseGateThresholdDbu))
-                }
-              >
-                {/* `Switch.Content` (React Aria's `SwitchButton`) is the actual
-                    clickable/checked element — `Switch` itself is just the
-                    field wrapper, so a control rendered as its direct child
-                    (as this was) has nothing to click. */}
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <span style={{ fontSize: "var(--amp-font-size-sm)" }}>Enabled</span>
-                </Switch.Content>
-              </Switch>
               <CommitNumberInput
-                value={noiseGateThresholdDbu}
-                min={noiseGateThresholdMin ?? undefined}
-                max={noiseGateThresholdMax ?? undefined}
+                value={volumeDb}
+                min={volumeMin ?? undefined}
+                max={volumeMax ?? undefined}
                 step={0.5}
-                suffix=" dBu"
-                onCommit={(value) => void gateFeedback.track(onNoiseGateChange(noiseGateEnabled, value))}
+                suffix=" dB"
+                onCommit={(value) => void volumeFeedback.track(onChange("volume", value))}
               />
             </div>
           </TilePopover>
-        ) : (
+          <TilePopover
+            opened={openPopover === "trim"}
+            onOpenChange={(o) => setOpenPopover(o ? "trim" : null)}
+            width={200}
+            trigger={
+              <StatEditorTile
+                value={trimDb.toFixed(1)}
+                label="Trim dB"
+                modified={trimDb !== 0}
+                visualValidation={trimFeedback}
+                onClick={() =>
+                  setOpenPopover((o) => (o === "trim" ? null : "trim"))
+                }
+              />
+            }
+          >
+            <div className="flex flex-col gap-2">
+              <span
+                style={{
+                  fontSize: "var(--amp-font-size-xs)",
+                  fontWeight: 700,
+                  color: "var(--amp-color-dimmed)",
+                  textTransform: "uppercase",
+                  textAlign: "center",
+                }}
+              >
+                Output Trim
+              </span>
+              <CommitNumberInput
+                value={trimDb}
+                min={trimMin ?? undefined}
+                max={trimMax ?? undefined}
+                step={0.5}
+                suffix=" dB"
+                onCommit={(value) => void trimFeedback.track(onChange("trim", value))}
+              />
+            </div>
+          </TilePopover>
+          <StatEditorTile
+            label="EQ Out"
+            opens="view"
+            modified={eqActive > 0}
+            icon={<Activity size={16} />}
+            onClick={onOpenEq}
+          />
+          <StatEditorTile
+            label="FIR"
+            opens="view"
+            icon={<Waves size={16} />}
+            onClick={onOpenFir}
+          />
+          <TilePopover
+            opened={openPopover === "delay"}
+            onOpenChange={(o) => setOpenPopover(o ? "delay" : null)}
+            width={200}
+            trigger={
+              <StatEditorTile
+                value={delayMs.toFixed(1)}
+                label="Delay ms"
+                modified={delayMs !== 0}
+                visualValidation={delayFeedback}
+                onClick={() =>
+                  setOpenPopover((o) => (o === "delay" ? null : "delay"))
+                }
+              />
+            }
+          >
+            <div className="flex flex-col gap-2">
+              <span
+                style={{
+                  fontSize: "var(--amp-font-size-xs)",
+                  fontWeight: 700,
+                  color: "var(--amp-color-dimmed)",
+                  textTransform: "uppercase",
+                  textAlign: "center",
+                }}
+              >
+                Output Delay
+              </span>
+              <CommitNumberInput
+                value={delayMs}
+                min={delayMin ?? undefined}
+                max={delayMax ?? undefined}
+                step={0.5}
+                suffix=" ms"
+                onCommit={(value) => void delayFeedback.track(onChange("delay", value))}
+              />
+            </div>
+          </TilePopover>
+          {/* Amber, not red: an inverted polarity is a deliberate setting, and
+           * red is reserved for "this channel's audio is cut". */}
           <StatToggle
-            label="Gate"
-            engaged={noiseGateEnabled}
+            label="Pol"
+            engaged={phaseInverted}
             accent="var(--accent)"
             visualValidation
-            onClick={() =>
-              onNoiseGateChange(!noiseGateEnabled, noiseGateThresholdDbu)
-            }
-            icon={<ShieldAlert size={16} />}
+            onClick={onPhaseInvertToggle}
+            icon={<FlipVertical2 size={16} />}
           />
-        )}
-        {/* Last, and as far from Mute as the row allows: power mode is rarely
-         * changed, and switching Low-Ω/70V/100V on a live system is not a
-         * click that should sit next to one people make quickly. */}
-        <TilePopover
-          opened={openPopover === "mode"}
-          onOpenChange={(o) => setOpenPopover(o ? "mode" : null)}
-          width={180}
-          trigger={
-            <StatEditorTile
-              value={POWER_MODE_LABELS[powerMode]}
-              label="Mode"
-              visualValidation={modeFeedback}
-              onClick={() =>
-                setOpenPopover((o) => (o === "mode" ? null : "mode"))
+          <StatEditorTile
+            label="LIM"
+            opens="view"
+            onClick={onOpenLimiter}
+            // Accented only while the limiter is actually pulling gain down, so
+            // the tile doubles as a live "limiting now" indicator instead of a
+            // permanently-highlighted button. Icon-only now — the live gain
+            // reduction dB reads as a precise measurement when it's really a
+            // momentary number that stops mattering the instant you look away;
+            // the accent alone answers "is it limiting right now."
+            modified={
+              telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0
+            }
+            accent="var(--amp-color-red-6)"
+            icon={<ListPlus size={16} />}
+          />
+          {/* Firmware without an adjustable threshold (1.1.8) has nothing to
+           * put in a dropdown but the same on/off state the pill already
+           * shows — a popover there was a second click to reach a switch that
+           * duplicates the pill itself. That firmware gets a direct toggle;
+           * only firmware with a real threshold field (`noiseGateThresholdAdjustable`)
+           * gets the popover. */}
+          {noiseGateThresholdAdjustable ? (
+            <TilePopover
+              opened={openPopover === "gate"}
+              onOpenChange={(o) => setOpenPopover(o ? "gate" : null)}
+              width={200}
+              trigger={
+                <StatToggle
+                  label="Gate"
+                  engaged={noiseGateEnabled}
+                  accent="var(--accent)"
+                  visualValidation={gateFeedback}
+                  onClick={() =>
+                    setOpenPopover((o) => (o === "gate" ? null : "gate"))
+                  }
+                  icon={<ShieldAlert size={16} />}
+                />
               }
-            />
-          }
-        >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
             >
-              Power Mode
-            </span>
-            <SimpleSelect
-              data={powerModes.map((mode) => ({
-                value: mode,
-                label: POWER_MODE_LABELS[mode],
-              }))}
-              value={powerMode}
-              onChange={(value) => {
-                if (value) void modeFeedback.track(onPowerModeChange(value as PowerMode));
-              }}
+              <div className="flex flex-col gap-2">
+                <span
+                  style={{
+                    fontSize: "var(--amp-font-size-xs)",
+                    fontWeight: 700,
+                    color: "var(--amp-color-dimmed)",
+                    textTransform: "uppercase",
+                    textAlign: "center",
+                  }}
+                >
+                  Noise Gate
+                </span>
+                <Switch
+                  isSelected={noiseGateEnabled}
+                  onChange={(isSelected) =>
+                    void gateFeedback.track(onNoiseGateChange(isSelected, noiseGateThresholdDbu))
+                  }
+                >
+                  {/* `Switch.Content` (React Aria's `SwitchButton`) is the actual
+                      clickable/checked element — `Switch` itself is just the
+                      field wrapper, so a control rendered as its direct child
+                      (as this was) has nothing to click. */}
+                  <Switch.Content>
+                    <Switch.Control>
+                      <Switch.Thumb />
+                    </Switch.Control>
+                    <span style={{ fontSize: "var(--amp-font-size-sm)" }}>Enabled</span>
+                  </Switch.Content>
+                </Switch>
+                <CommitNumberInput
+                  value={noiseGateThresholdDbu}
+                  min={noiseGateThresholdMin ?? undefined}
+                  max={noiseGateThresholdMax ?? undefined}
+                  step={0.5}
+                  suffix=" dBu"
+                  onCommit={(value) => void gateFeedback.track(onNoiseGateChange(noiseGateEnabled, value))}
+                />
+              </div>
+            </TilePopover>
+          ) : (
+            <StatToggle
+              label="Gate"
+              engaged={noiseGateEnabled}
+              accent="var(--accent)"
+              visualValidation
+              onClick={() =>
+                onNoiseGateChange(!noiseGateEnabled, noiseGateThresholdDbu)
+              }
+              icon={<ShieldAlert size={16} />}
             />
-          </div>
-        </TilePopover>
+          )}
+          {/* Last, and as far from Mute as the row allows: power mode is rarely
+           * changed, and switching Low-Ω/70V/100V on a live system is not a
+           * click that should sit next to one people make quickly. */}
+          <TilePopover
+            opened={openPopover === "mode"}
+            onOpenChange={(o) => setOpenPopover(o ? "mode" : null)}
+            width={180}
+            trigger={
+              <StatEditorTile
+                value={POWER_MODE_LABELS[powerMode]}
+                label="Mode"
+                visualValidation={modeFeedback}
+                onClick={() =>
+                  setOpenPopover((o) => (o === "mode" ? null : "mode"))
+                }
+              />
+            }
+          >
+            <div className="flex flex-col gap-2">
+              <span
+                style={{
+                  fontSize: "var(--amp-font-size-xs)",
+                  fontWeight: 700,
+                  color: "var(--amp-color-dimmed)",
+                  textTransform: "uppercase",
+                  textAlign: "center",
+                }}
+              >
+                Power Mode
+              </span>
+              <SimpleSelect
+                data={powerModes.map((mode) => ({
+                  value: mode,
+                  label: POWER_MODE_LABELS[mode],
+                }))}
+                value={powerMode}
+                onChange={(value) => {
+                  if (value) void modeFeedback.track(onPowerModeChange(value as PowerMode));
+                }}
+              />
+            </div>
+          </TilePopover>
+        </div>
       </div>
     </div>
   );
@@ -2009,47 +2036,56 @@ function isEmptySlot(name: string): boolean {
   return trimmed.length === 0 || trimmed.toLowerCase() === "null";
 }
 
+/** The two controls a preset row carries — Recall, and the ⋯ menu that holds
+ * Store — share one look and one box. They are hand-dressed plain buttons
+ * rather than a HeroUI `Button` beside a `Dropdown.Trigger`: those two size
+ * and style themselves differently, and a pair of controls repeated down
+ * every row has to match exactly. */
+const PRESET_ACTION_SIZE = 28;
+const PRESET_ACTION_CLASS =
+  "flex shrink-0 cursor-pointer appearance-none items-center justify-center rounded-md border-0 " +
+  "bg-transparent p-0 text-[var(--amp-color-text)] transition-colors duration-150 " +
+  `hover:bg-[var(--amp-color-gray-light)] ${STAT_TILE_FOCUS}`;
+
+/** The dimmed caption every secondary line in this tab uses. */
+const PRESET_MUTED =
+  "text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]";
+
 /** One row of the preset list. Kept deliberately thin: with 40 slots, a
  * card per preset put ~80 labelled buttons on screen at once, which read as
- * a wall rather than a list you scan. Actions are icon-only with tooltips,
- * and an empty slot renders no Recall control at all rather than a greyed
- * one — on a mostly-empty device that alone removes most of the clutter.
+ * a wall rather than a list you scan. Both controls are icon-only, and an
+ * empty slot renders no Recall control at all rather than a greyed one — on
+ * a mostly-empty device that alone removes most of the clutter.
  *
  * Store is the destructive half (it overwrites the slot with the amp's
  * current DSP state, and the wire protocol offers no undo), so it never
- * fires straight from the row — it opens a popover that names the slot,
- * warns when it is about to overwrite, and requires a second click. */
+ * fires from the row at all: it sits behind the ⋯ menu and opens a modal
+ * that names the slot, warns when it is about to overwrite, and asks again.
+ * Nothing in the resting row is red. Store used to tint itself red on every
+ * occupied slot, which on a device with a dozen presets written rendered a
+ * solid column of red buttons — at that repetition red stops reading as a
+ * warning. It now appears once, on the modal's Overwrite button. */
 function PresetSlotRow({
   slot,
   isActive,
-  storeOpened,
-  onStoreOpenChange,
   onRecall,
-  onStore,
+  onRequestStore,
 }: {
   slot: PresetSlot;
   isActive: boolean;
-  storeOpened: boolean;
-  onStoreOpenChange: (opened: boolean) => void;
   onRecall: () => Promise<ActionResult>;
-  onStore: (name: string) => Promise<ActionResult>;
+  onRequestStore: () => void;
 }) {
   const empty = isEmptySlot(slot.name);
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  // Store is committed from the popover's confirm button, not the tile's own
-  // click, so the Store tile follows this controller.
-  const storeFeedback = useActionFeedback();
+  const recallFeedback = useActionFeedback();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuTriggerRef = useRef<HTMLDivElement>(null);
 
-  async function commitStore() {
-    const trimmed = draft.trim();
-    if (trimmed.length === 0 || saving) return;
-    setSaving(true);
-    const outcome = await storeFeedback.track(onStore(trimmed));
-    setSaving(false);
-    // Closes only on success: after a failure the typed name is still in the
-    // field, ready to retry, and the toast explains what went wrong.
-    if (outcome === "success") onStoreOpenChange(false);
+  function handleRecall() {
+    // A second click mid-request would fire the same recall again against a
+    // state the UI hasn't caught up with yet.
+    if (recallFeedback.busy) return;
+    void recallFeedback.track(onRecall());
   }
 
   return (
@@ -2057,12 +2093,12 @@ function PresetSlotRow({
       // Empty slots recede and lift on hover — the same treatment bypassed
       // columns get in the EQ strip, so "present but not doing anything"
       // looks the same everywhere in the app.
-      className={`flex min-w-0 flex-nowrap items-center gap-2 px-2 py-1 transition-opacity duration-150 ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
+      className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-opacity duration-150 ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
       style={{
-        borderTop: "1px solid var(--amp-color-default-border)",
-        // A left accent bar rather than a full border/fill — at row density a
-        // boxed highlight fights the divider lines, a bar just marks the row.
-        borderLeft: `2px solid ${isActive ? "var(--amp-color-green-6)" : "transparent"}`,
+        // The tint alone marks the active row now. This used to add a 2px
+        // left accent bar, which made sense while rows were divided by
+        // hairlines and a boxed highlight would have fought them — but with
+        // rounded rows the bar fights the corners instead.
         background: isActive
           ? "color-mix(in srgb, var(--amp-color-green-light) 25%, transparent)"
           : undefined,
@@ -2093,101 +2129,185 @@ function PresetSlotRow({
           Active
         </Chip>
       )}
-      <div className="flex shrink-0 flex-nowrap items-center gap-1.5">
-        {/* Nothing to recall from an empty slot. The tile is omitted rather
-         * than disabled, so 29 empty rows do not each carry a dead control —
-         * the spacer keeps Store in one straight column regardless. */}
+      <div className="flex shrink-0 flex-nowrap items-center gap-1">
+        {/* Nothing to recall from an empty slot. The control is omitted
+         * rather than disabled, so 29 empty rows do not each carry a dead
+         * button — the spacer keeps ⋯ in one straight column regardless. */}
         {empty ? (
-          <div style={{ width: 58 }} className="shrink-0" />
+          <div style={{ width: PRESET_ACTION_SIZE }} className="shrink-0" />
         ) : (
-          /* Direction is the meaning here: Recall lifts the preset out of
-           * the slot, Store drops the amp's current settings into it. These
-           * deliberately avoid `SquareArrowRightEnter`/`Exit` — that pair is
-           * already the Input/Output tab icons in this same view, so reusing
-           * it made the tiles read as "Input/Output". */
           <Tooltip delay={400}>
-            <Tooltip.Trigger>
-              <PresetActionTile
-                label="Recall"
-                icon={<ArrowUpFromLine size={14} />}
-                visualValidation
-                onClick={onRecall}
-              />
+            {/* `flex` is load-bearing, and so is the `flex` in
+                `PRESET_ACTION_CLASS`. `Tooltip.Trigger` renders a real
+                `<div role="button">`; an *inline-level* child inside it (a
+                plain `<button>`, as the old tile was) sits in a line box
+                whose strut adds descender space underneath, so the wrapper
+                measures taller than the button, and this row's
+                `items-center` then centres that taller box and leaves the
+                button riding visibly high. That is exactly why Recall used
+                to sit a few px above Store, whose `TilePopover` wrapper
+                already carried this fix — see the note there. Either flex
+                box removes the line box; both are set deliberately. */}
+            <Tooltip.Trigger className="flex">
+              {/* Direction is the meaning here: Recall lifts the preset out
+               * of the slot, Store drops the amp's current settings into it.
+               * This deliberately avoids `SquareArrowRightEnter`/`Exit` —
+               * that pair is already the Input/Output tab icons in this same
+               * view, so reusing it read as "Input/Output". */}
+              <button
+                type="button"
+                aria-label={`Recall "${slot.name}"`}
+                aria-busy={recallFeedback.busy || undefined}
+                className={PRESET_ACTION_CLASS}
+                style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
+                onClick={handleRecall}
+              >
+                <ActionFeedbackContent status={recallFeedback.status} size={16}>
+                  <div className="flex h-full items-center justify-center">
+                    <ArrowUpFromLine size={15} />
+                  </div>
+                </ActionFeedbackContent>
+              </button>
             </Tooltip.Trigger>
             <Tooltip.Content showArrow>{`Recall "${slot.name}"`}</Tooltip.Content>
           </Tooltip>
         )}
-        <TilePopover
-          opened={storeOpened}
-          onOpenChange={onStoreOpenChange}
-          placement="bottom"
-          width={240}
-          trigger={
-            <PresetActionTile
-              label="Store"
-              icon={<ArrowDownToLine size={14} />}
-              opens="popover"
-              visualValidation={storeFeedback}
-              // Occupied slots tint red: storing overwrites them, and red
-              // carries the same "this destroys something" meaning it does
-              // on the channel strips.
-              accent={empty ? undefined : "var(--amp-color-red-6)"}
-              onClick={() => {
-                setDraft(empty ? "" : slot.name);
-                onStoreOpenChange(!storeOpened);
-              }}
-            />
-          }
+        {/* The same standalone-overlay pattern `SourcePicker` uses above: no
+            `<Dropdown>` root, so the trigger stays this plain button instead
+            of being wrapped in a second one, and the popover is driven by
+            `triggerRef` + `isOpen`. `flex` on the wrapper for the same strut
+            reason as Recall's tooltip. */}
+        <div ref={menuTriggerRef} className="flex">
+          <button
+            type="button"
+            aria-label={`More actions for slot ${slot.index + 1}`}
+            className={PRESET_ACTION_CLASS}
+            style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <MoreHorizontal size={16} />
+          </button>
+        </div>
+        <Dropdown.Popover
+          triggerRef={menuTriggerRef}
+          isOpen={menuOpen}
+          onOpenChange={setMenuOpen}
+          placement="bottom end"
+          className={`${DROPDOWN_SLOTS.popover()} min-w-[200px]`}
         >
-          <div className="flex flex-col gap-2">
-            <span
-              style={{
-                fontSize: "var(--amp-font-size-xs)",
-                fontWeight: 700,
-                color: "var(--amp-color-dimmed)",
-                textTransform: "uppercase",
-                textAlign: "center",
-              }}
-            >
-              Store to slot {slot.index + 1}
-            </span>
-            <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
-              {empty ? (
-                "Saves the amp's current settings into this slot."
-              ) : (
-                <>
-                  Overwrites <b>{slot.name}</b> with the amp&apos;s current
-                  settings. This cannot be undone.
-                </>
-              )}
-            </span>
-            <input
-              type="text"
-              autoFocus
-              placeholder="Preset name"
-              value={draft}
-              maxLength={PRESET_NAME_MAX_LEN}
-              className={FIELD_INPUT}
-              onChange={(e) => setDraft(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitStore();
-              }}
-            />
-            <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "right" }}>
-              {draft.length}/{PRESET_NAME_MAX_LEN}
-            </span>
-            <Button
-              size="sm"
-              variant={empty ? "primary" : "danger"}
-              isDisabled={draft.trim().length === 0 || saving}
-              onPress={commitStore}
-            >
-              {saving ? <Spinner size="sm" /> : empty ? "Save preset" : "Overwrite"}
-            </Button>
-          </div>
-        </TilePopover>
+          <Dropdown.Menu
+            className={DROPDOWN_SLOTS.menu()}
+            onAction={() => {
+              setMenuOpen(false);
+              onRequestStore();
+            }}
+          >
+            {/* `Dropdown.Menu` is a RAC collection: its items have to be
+                direct children or the menu renders empty. */}
+            <Dropdown.Item id="store">
+              {empty ? "Store here…" : "Overwrite with current settings…"}
+            </Dropdown.Item>
+          </Dropdown.Menu>
+        </Dropdown.Popover>
       </div>
     </div>
+  );
+}
+
+/** Store's confirmation step. One modal for the whole tab rather than one per
+ * row — 40 rows would otherwise each carry an overlay — reseeded from `slot`
+ * each time a row's ⋯ menu opens it.
+ *
+ * A modal rather than the popover this used to be: it is opened from a menu
+ * item now, and that item unmounts as it fires, taking any popover anchored
+ * to it along with it. A modal also suits the weight of the action, which is
+ * the one thing in this tab that destroys something. */
+function PresetStoreModal({
+  slot,
+  onClose,
+  onStore,
+}: {
+  slot: PresetSlot | null;
+  onClose: () => void;
+  onStore: (name: string) => Promise<ActionResult>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const empty = slot ? isEmptySlot(slot.name) : false;
+
+  // Seeded from the slot being written: its current name when overwriting,
+  // since the usual edit is a small one, and blank for an empty slot.
+  useEffect(() => {
+    if (slot) setDraft(isEmptySlot(slot.name) ? "" : slot.name);
+  }, [slot]);
+
+  async function commitStore() {
+    const trimmed = draft.trim();
+    if (!slot || trimmed.length === 0 || saving) return;
+    setSaving(true);
+    const result = await onStore(trimmed);
+    setSaving(false);
+    // Closes only on success: after a failure the typed name is still in the
+    // field, ready to retry, and the toast explains what went wrong.
+    if (result.ok) onClose();
+  }
+
+  return (
+    <Modal.Backdrop isOpen={slot !== null} onOpenChange={(open) => !open && onClose()}>
+      <Modal.Container placement="center" size="sm">
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>
+              {slot ? `Store to slot ${slot.index + 1}` : "Store preset"}
+            </Modal.Heading>
+            <Modal.CloseTrigger />
+          </Modal.Header>
+          <Modal.Body>
+            <div className="flex flex-col gap-3">
+              <span className={PRESET_MUTED}>
+                {empty ? (
+                  "Saves the amp's current settings into this slot."
+                ) : (
+                  <>
+                    Overwrites <b>{slot?.name}</b> with the amp&apos;s current
+                    settings. This cannot be undone.
+                  </>
+                )}
+              </span>
+              <input
+                type="text"
+                autoFocus
+                placeholder="Preset name"
+                value={draft}
+                maxLength={PRESET_NAME_MAX_LEN}
+                className={FIELD_INPUT}
+                onChange={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitStore();
+                }}
+              />
+              <span className={`${PRESET_MUTED} text-right`}>
+                {draft.length}/{PRESET_NAME_MAX_LEN}
+              </span>
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" isDisabled={saving} onPress={onClose}>
+                  Cancel
+                </Button>
+                {/* The one red control in this tab, and the only place the
+                    overwrite can actually be committed. */}
+                <Button
+                  variant={empty ? "primary" : "danger"}
+                  isDisabled={draft.trim().length === 0 || saving}
+                  onPress={commitStore}
+                >
+                  {saving ? <Spinner size="sm" /> : empty ? "Save preset" : "Overwrite"}
+                </Button>
+              </div>
+            </div>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }
 
@@ -2207,9 +2327,9 @@ const PRESET_FILTER_OPTIONS = [
 ];
 const PRESET_FILTER_DEFAULT = ["used"];
 
-/** Wide enough for a full 32-character preset name plus its two action
- * tiles, and no wider. The header shares the cap so the Refresh button sits
- * over the list rather than a screen away from it on a wide window. */
+/** Wide enough for a full 32-character preset name plus its two controls,
+ * and no wider. The header shares the cap so the Refresh button sits over the
+ * list rather than a screen away from it on a wide window. */
 const PRESET_LIST_MAX_WIDTH = 620;
 
 /** FC=59 preset browser — fetch-on-demand (mount + manual Refresh) rather
@@ -2227,7 +2347,7 @@ function PresetConfigurationTab({
   firmwareFamily?: string | null;
 }) {
   const { presets, loading, refresh, recall, store } = useLivePresets(deviceId);
-  const [storeOpenFor, setStoreOpenFor] = useState<number | null>(null);
+  const [storeTarget, setStoreTarget] = useState<PresetSlot | null>(null);
   const [slotFilter, setSlotFilter] = useState<string[]>(PRESET_FILTER_DEFAULT);
 
   if (!deviceId) {
@@ -2253,78 +2373,98 @@ function PresetConfigurationTab({
 
   const slots = presets?.slots ?? [];
   const usedCount = slots.filter((slot) => !isEmptySlot(slot.name)).length;
+  const filterCounts: Record<string, number> = {
+    used: usedCount,
+    empty: slots.length - usedCount,
+  };
   const visibleSlots =
     slotFilter.length === 0
       ? slots
       : slots.filter((slot) =>
           slotFilter.includes(isEmptySlot(slot.name) ? "empty" : "used"),
         );
-  const hiddenCount = slots.length - visibleSlots.length;
+  const activeName =
+    presets?.activePresetName && !isEmptySlot(presets.activePresetName)
+      ? presets.activePresetName
+      : null;
 
   function toggleFilter(value: string) {
     setSlotFilter((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
   }
 
   return (
-    <div
-      className="mx-auto flex h-full w-full min-w-0 flex-col gap-4 p-4"
-      style={{ maxWidth: PRESET_LIST_MAX_WIDTH }}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div style={{ fontWeight: 600 }}>Preset Configuration</div>
-          <div style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
-            {slots.length === 0
-              ? "No preset data yet"
-              : `${usedCount} of ${slots.length} slots used${
-                  presets?.activePresetName &&
-                  !isEmptySlot(presets.activePresetName)
-                    ? ` — "${presets.activePresetName}" active`
-                    : ""
-                }${hiddenCount > 0 ? ` — ${hiddenCount} hidden` : ""}`}
-          </div>
-        </div>
-        <div className="flex flex-nowrap items-center gap-2">
-          <ButtonGroup size="sm" aria-label="Filter slots by state">
-            {PRESET_FILTER_OPTIONS.map((opt) => (
-              <Button
-                key={opt.value}
-                variant={slotFilter.includes(opt.value) ? "primary" : "ghost"}
-                onPress={() => toggleFilter(opt.value)}
-              >
-                {opt.label}
-              </Button>
-            ))}
-          </ButtonGroup>
-          <Button size="sm" variant="secondary" isDisabled={loading} onPress={refresh}>
-            {loading ? <Spinner size="sm" /> : <RefreshCw size={14} />} Refresh
-          </Button>
-        </div>
-      </div>
-      {slots.length === 0 && !loading && (
-        <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
-          No preset data yet — click Refresh.
-        </span>
-      )}
-      {slots.length > 0 && visibleSlots.length === 0 && (
-        <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
-          No slots match the current filter.
-        </span>
-      )}
+    /* `CenteredScrollPane`, like every other tab in this view: it centres the
+       column while it fits and scrolls once it doesn't. This used to be a
+       hand-rolled `h-full` column with its own inner scroller, which pinned a
+       short list to the top of a tall window with a void underneath it. */
+    <CenteredScrollPane>
       {/* A single column capped in width: preset names are short, so letting
        * rows run the full width of a maximised window would strand the
-       * actions a screen away from the name they belong to. Rows are divided
-       * by hairlines rather than each being boxed. */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div
-          className="min-w-0"
-          style={{
-            borderBottom:
-              visibleSlots.length > 0
-                ? "1px solid var(--amp-color-default-border)"
-                : undefined,
-          }}
-        >
+       * controls a screen away from the name they belong to. */}
+      <div
+        className="mx-auto flex w-full min-w-0 flex-col gap-3"
+        style={{ maxWidth: PRESET_LIST_MAX_WIDTH }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div style={{ fontWeight: 600 }}>Preset Configuration</div>
+          <div className="flex flex-nowrap items-center gap-2">
+            {/* The counts ride on the filter buttons themselves, which is
+                what retired the old header's "— N hidden" clause: the filter
+                is the reason anything is hidden, so it can say so itself. */}
+            <ButtonGroup size="sm" aria-label="Filter slots by state">
+              {PRESET_FILTER_OPTIONS.map((opt) => (
+                <Button
+                  key={opt.value}
+                  variant={slotFilter.includes(opt.value) ? "primary" : "ghost"}
+                  onPress={() => toggleFilter(opt.value)}
+                >
+                  {opt.label}
+                  {slots.length > 0 && (
+                    <span className="ml-1 opacity-60">{filterCounts[opt.value]}</span>
+                  )}
+                </Button>
+              ))}
+            </ButtonGroup>
+            <Button size="sm" variant="secondary" isDisabled={loading} onPress={refresh}>
+              {loading ? <Spinner size="sm" /> : <RefreshCw size={14} />} Refresh
+            </Button>
+          </div>
+        </div>
+
+        {/* The active preset gets its own line rather than a clause in a
+            run-on status string. Worth stating even though the list marks the
+            active row, since that row can be filtered out of view. */}
+        {slots.length > 0 && (
+          <div className={`flex min-w-0 items-center gap-1.5 ${PRESET_MUTED}`}>
+            {activeName ? (
+              <>
+                <span
+                  aria-hidden
+                  className="size-2 shrink-0 rounded-full"
+                  style={{ background: "var(--amp-color-green-6)" }}
+                />
+                <span className="min-w-0 truncate">
+                  <b>{activeName}</b> active on the amp
+                </span>
+              </>
+            ) : (
+              <span className="min-w-0 truncate">No preset reported as active</span>
+            )}
+          </div>
+        )}
+
+        {slots.length === 0 && !loading && (
+          <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
+            No preset data yet — click Refresh.
+          </span>
+        )}
+        {slots.length > 0 && visibleSlots.length === 0 && (
+          <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
+            No slots match the current filter.
+          </span>
+        )}
+
+        <div className="flex min-w-0 flex-col gap-0.5">
           {visibleSlots.map((slot) => (
             <PresetSlotRow
               key={slot.index}
@@ -2333,17 +2473,21 @@ function PresetConfigurationTab({
                 !isEmptySlot(slot.name) &&
                 presets?.activePresetName === slot.name
               }
-              storeOpened={storeOpenFor === slot.index}
-              onStoreOpenChange={(opened) =>
-                setStoreOpenFor(opened ? slot.index : null)
-              }
               onRecall={() => recall(slot.index)}
-              onStore={(name) => store(slot.index, name)}
+              onRequestStore={() => setStoreTarget(slot)}
             />
           ))}
         </div>
       </div>
-    </div>
+
+      <PresetStoreModal
+        slot={storeTarget}
+        onClose={() => setStoreTarget(null)}
+        onStore={(name) =>
+          storeTarget ? store(storeTarget.index, name) : Promise.resolve(ACTION_UNAVAILABLE)
+        }
+      />
+    </CenteredScrollPane>
   );
 }
 
@@ -2554,6 +2698,16 @@ export function AmpConfigureView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {assignment && (
+        <div className="px-3 pt-2">
+          <RenameableLabel
+            defaultLabel={ampModel ? `${ampModel.brand} ${ampModel.model}` : "Unnamed Amp"}
+            name={assignment.deviceName}
+            maxLength={DEVICE_NAME_MAX_LENGTH}
+            onRename={(name) => void actions?.setDeviceName?.(name)}
+          />
+        </div>
+      )}
       {live && source?.kind === "project" && (
         <Alert status="success" className="rounded-none py-1.5">
           <Alert.Indicator>
@@ -2714,8 +2868,12 @@ export function AmpConfigureView({
           44px so every icon (tab or button) lines up on one centerline,
           rather than each box shrink-wrapping to its own content and
           getting centered independently — that's what "centering" silently
-          stopped meaning once the tabs' own width shrank to their icon. */}
-      <div className="flex w-11 shrink-0 flex-col items-center gap-1 overflow-y-auto">
+          stopped meaning once the tabs' own width shrank to their icon.
+          `justify-center` keeps the column centered in the rail's height
+          regardless of how much header content sits above it; a short window
+          that can't fit the whole column still scrolls instead of clipping,
+          since a flex `center` that overflows falls back to `start`. */}
+      <div className="flex w-11 shrink-0 flex-col items-center justify-center gap-1 overflow-y-auto">
         <Tabs.List className="w-full">
           {/* Labels ride on the native `title` rather than a HeroUI `Tooltip`:
               `Tabs.List` is a RAC collection, so anything between it and its

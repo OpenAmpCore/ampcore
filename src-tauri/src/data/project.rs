@@ -289,7 +289,7 @@ pub struct AmpChannel {
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
 /// a slot's configuration survives a physical unit swap. `mac` starts unset
-/// at creation time — a slot is planned by model/label alone; linking it to
+/// at creation time — a slot is planned by model/name alone; linking it to
 /// a physical unit's MAC happens later via live network discovery, not by
 /// manual entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -297,7 +297,6 @@ pub struct AmpChannel {
 pub struct AmpAssignment {
     pub id: String,
     pub mac: Option<String>,
-    pub label: Option<String>,
     pub amp_model_id: Option<String>,
     /// Firmware version this slot is being planned for (e.g. "1.1.8",
     /// "1.1.9") — declared by the user at planning time, not detected, since
@@ -308,7 +307,9 @@ pub struct AmpAssignment {
     pub firmware_version: Option<String>,
     pub channels: Vec<AmpChannel>,
     /// The amp's user-set name (FC=60 `CUSTOMER_NAME_MODIFY`, read back via FC=0
-    /// BASIC_INFO). Not yet editable here.
+    /// BASIC_INFO). Editable offline here, or live via
+    /// `live_control_set_device_name` — the one name an amp has, whether
+    /// planned or connected.
     #[serde(default)]
     pub device_name: Option<String>,
     /// Manual override: this amp is linked to hardware that may well be
@@ -369,7 +370,15 @@ pub struct Project {
 /// alone" override. Defaults to `false` via serde — an older file loads as
 /// engaged, which is exactly how it behaved — so no custom migration is
 /// needed; files below 18 are rewritten once.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 18;
+///
+/// Bumped to 19 when `AmpAssignment.label` was dropped in favor of
+/// `device_name` — the two were redundant (one a planning-only nickname, one
+/// the amp's real on-device name), and `device_name` is now the single
+/// editable name. A raw-JSON backfill in `store.rs`
+/// (`backfill_label_into_device_name`) copies `label` into `deviceName` when
+/// `deviceName` is empty before the field disappears; files below 19 are
+/// rewritten once.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 19;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -393,7 +402,7 @@ impl Project {
 impl AmpAssignment {
     pub fn new(
         mac: Option<String>,
-        label: Option<String>,
+        device_name: Option<String>,
         channel_count: u32,
         amp_model_id: Option<String>,
         firmware_version: Option<String>,
@@ -402,11 +411,10 @@ impl AmpAssignment {
         Self {
             id: new_id(),
             mac,
-            label,
             amp_model_id,
             firmware_version,
             channels,
-            device_name: None,
+            device_name,
             live_disengaged: false,
         }
     }

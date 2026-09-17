@@ -9,7 +9,7 @@ use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch,
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use crate::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
+use crate::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use crate::live::cvr::fir;
 use crate::live::cvr::preset;
 use crate::live::cvr::request::{WriteOutcome, WriteSpec};
@@ -940,6 +940,37 @@ pub async fn live_control_set_channel_phase_invert(
     let mut tally = WriteTally::default();
     let packet = write::build_set_phase_invert(firmware_family.as_deref(), channel_index, inverted)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=60 CUSTOMER_NAME_MODIFY — renames the amp itself, not a channel. Same
+/// ASCII/length rules as `live_control_set_channel_name`, against the
+/// device-level field's wider 32-byte width. No explicit refetch: the new
+/// name comes back through the next FC=0 `BASIC_INFO` read.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_device_name(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    name: String,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+
+    let trimmed = name.trim();
+    if !trimmed.is_ascii() {
+        return Err(AppError::from("device name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return Err(AppError::from("device name cannot contain a null byte".to_string()));
+    }
+    if trimmed.len() > DEVICE_NAME_FIELD_LEN {
+        return Err(AppError::from(format!("device name is limited to {} characters", DEVICE_NAME_FIELD_LEN)));
+    }
+
+    let packet = write::build_set_device_name(firmware_family.as_deref(), trimmed)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
 }

@@ -138,7 +138,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
                         className="line-clamp-2 max-w-[48px] text-center"
                         style={{ fontSize: 9 }}
                       >
-                        {assignment.label ?? "Amp"}
+                        {assignment.deviceName ?? "Amp"}
                       </span>
                     </div>
                   </button>

@@ -135,7 +135,6 @@ export function buildLiveAssignmentViewModel(
   return {
     id: device.id,
     mac: device.mac,
-    label: device.name || device.mac,
     ampModelId: null,
     firmwareVersion: device.firmwareVersion,
     channels,
@@ -287,6 +286,9 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
      * `live_control_set_channel_source`). */
     async setChannelSource(channelIndex, kind, index) {
       return reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind, index));
+    },
+    async setDeviceName(name) {
+      return reportWrite("Set device name", commands.liveControlSetDeviceName(deviceId, name ?? ""));
     },
   };
 }

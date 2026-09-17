@@ -237,6 +237,7 @@ fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
             let contents = fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let mut value: serde_json::Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
             backfill_channel_sources(&mut value);
+            backfill_label_into_device_name(&mut value);
             let project: Project = serde_json::from_value(value).map_err(|e| e.to_string())?;
             projects.push(project);
         }
@@ -263,6 +264,33 @@ fn backfill_channel_sources(project: &mut serde_json::Value) {
             if channel.get("source").map_or(true, |source| source.is_null()) {
                 let index = channel.get("channelIndex").and_then(|v| v.as_u64()).unwrap_or(0);
                 channel.insert("source".to_string(), serde_json::json!({ "kind": "analog", "index": index }));
+            }
+        }
+    }
+}
+
+/// Schema 19 dropped `AmpAssignment.label` in favor of `device_name`. Files
+/// written before that may carry a `label` with no `deviceName`; this copies
+/// it over before the field disappears from the typed `Project`. Runs on the
+/// raw JSON, same rationale as `backfill_channel_sources`. Idempotent.
+fn backfill_label_into_device_name(project: &mut serde_json::Value) {
+    let Some(assignments) = project.get_mut("ampAssignments").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for assignment in assignments {
+        let Some(assignment) = assignment.as_object_mut() else {
+            continue;
+        };
+        let device_name_empty = assignment
+            .get("deviceName")
+            .map_or(true, |v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        if !device_name_empty {
+            continue;
+        }
+        let label = assignment.get("label").and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(label) = label {
+            if !label.trim().is_empty() {
+                assignment.insert("deviceName".to_string(), serde_json::Value::String(label));
             }
         }
     }

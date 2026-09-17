@@ -1,4 +1,4 @@
-import { forwardRef, type CSSProperties, type ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { ActionFeedbackContent, actionFeedbackAccent } from "./ActionFeedback";
 import {
@@ -24,7 +24,6 @@ import {
  *   StatToggle        on/off state, fills with its accent when engaged
  *   StatEditorTile    opens a popover or a sub-view, corner chevron, and
  *                     accents itself when its value is off-default
- *   PresetActionTile  row-density sibling of StatEditorTile for lists
  *
  * Tile colours carry one meaning each: red = this channel's audio is being cut
  * (mute) or something is destroyed (overwrite); the accent = engaged/off-default
@@ -268,60 +267,3 @@ export const StatEditorTile = forwardRef<
   );
 });
 
-/** Row-density sibling of `StatEditorTile` — same bordered value/label box,
- * same corner-chevron affordance for "this opens something", same accent
- * rules, just sized to sit in a list row rather than a channel strip. The
- * preset tab briefly used bare `ActionIcon`s here, which de-cluttered the
- * 40-slot list but stopped looking like the rest of the app; this keeps the
- * strip's vocabulary at a size 40 rows can carry. */
-export const PresetActionTile = forwardRef<
-  HTMLButtonElement,
-  {
-    label: string;
-    icon: ReactNode;
-    /** Set to tint the tile — used for the destructive Store action, matching
-     * the strips' rule that red means "this cuts or destroys something". */
-    accent?: string;
-    opens?: "popover";
-    disabled?: boolean;
-    /** See `VisualValidation`. */
-    visualValidation?: VisualValidation;
-    onClick?: TileClickHandler;
-  }
->(function PresetActionTile({ label, icon, accent, opens, disabled, visualValidation, onClick }, ref) {
-  const feedback = useTileFeedback(visualValidation, onClick);
-  const tone = feedback.accent ?? accent;
-  const labelStyle: CSSProperties = { fontSize: 10, color: "var(--amp-color-dimmed)", lineHeight: 1.3 };
-
-  return (
-    <button
-      type="button"
-      ref={ref}
-      onClick={feedback.handleClick}
-      disabled={disabled}
-      aria-busy={feedback.busy || undefined}
-      className={`${RESET_BUTTON} relative shrink-0 text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
-      style={{
-        width: 58,
-        height: 38,
-        borderRadius: TILE_RADIUS,
-        border: `1px solid ${tone ?? DEFAULT_BORDER}`,
-        background: tone ? wash(tone, 10) : "transparent",
-        color: tone ?? "var(--amp-color-text)",
-        cursor: "pointer",
-      }}
-    >
-      <ActionFeedbackContent status={feedback.status} size={16}>
-        {opens === "popover" && (
-          <div className="pointer-events-none absolute right-[2px] top-[2px] opacity-40">
-            <ChevronRight size={9} style={{ transform: "rotate(90deg)" }} />
-          </div>
-        )}
-        <div className="flex h-full flex-col items-center justify-center gap-0">
-          {icon}
-          <span style={labelStyle}>{label}</span>
-        </div>
-      </ActionFeedbackContent>
-    </button>
-  );
-});

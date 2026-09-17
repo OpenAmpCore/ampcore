@@ -13,9 +13,11 @@ import { showRollingNotification } from "../lib/rollingNotification";
  *
  * Errors surface as toasts rather than inline state — `refresh()`
  * failures are otherwise easy to miss (e.g. the on-mount fetch failing
- * silently before the user has looked at the tab), and `recall()` is a
- * fire-and-forget device write with no other feedback at all, so a toast is
- * the only confirmation the user gets that it actually fired. */
+ * silently before the user has looked at the tab), and a failed `recall()`
+ * has no other feedback at all, so a toast is the only confirmation the user
+ * gets that it fired (or didn't). Both `recall()` and `store()` refresh on
+ * success, since both can change which slot the device reports active and
+ * there is no background poll to catch that up otherwise. */
 export function useLivePresets(deviceId: string | undefined) {
   const [presetsById, setPresetsById] = useState<Record<string, DevicePresetsSnapshot>>({});
   const [loading, setLoading] = useState(false);
@@ -85,15 +87,20 @@ export function useLivePresets(deviceId: string | undefined) {
         message: slotName ? `"${slotName}" applied` : `Slot ${slotIndex + 1} applied`,
         autoClose: 1500,
       });
+      // Same reasoning as `store()`: recalling changes which slot is active,
+      // and there is no background poll for FC=59 to catch that up on its
+      // own — without this the `Active` chip stays on the previous row until
+      // the user hits Refresh by hand.
+      await refresh();
       return ACTION_OK;
     },
-    [deviceId],
+    [deviceId, refresh],
   );
 
   /** Saves the device's *current* DSP state into `slotIndex` under `name`.
-   * Unlike `recall`, this refreshes afterwards: storing renames the slot, so
-   * the list the user is looking at is stale the moment the write lands and
-   * there is no background poll for FC=59 to correct it. */
+   * Refreshes afterwards, same as `recall`: storing renames the slot, so the
+   * list the user is looking at is stale the moment the write lands and there
+   * is no background poll for FC=59 to correct it. */
   const store = useCallback(
     async (slotIndex: number, name: string) => {
       if (!deviceId) return ACTION_UNAVAILABLE;

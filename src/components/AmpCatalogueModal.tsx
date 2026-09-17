@@ -128,7 +128,7 @@ export function AmpCatalogueModal({
   const compact = useIsCompact();
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [specsExpanded, setSpecsExpanded] = useState(false);
-  const [label, setLabel] = useState("");
+  const [deviceName, setDeviceName] = useState("");
   const [firmwareVersion, setFirmwareVersion] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -248,7 +248,7 @@ export function AmpCatalogueModal({
     if (opened) {
       setSelectedModelId(null);
       setSpecsExpanded(false);
-      setLabel("");
+      setDeviceName("");
       setFirmwareVersion(null);
       setSubmitError(null);
       setExpandedState(expandedStateForPath(defaultExpandedPath));
@@ -272,7 +272,7 @@ export function AmpCatalogueModal({
     setSubmitting(true);
     const result = await commands.projectsAddAmpAssignment(
       projectId,
-      label.trim() || null,
+      deviceName.trim() || null,
       selectedModelId,
       firmwareVersion,
     );
@@ -509,8 +509,8 @@ export function AmpCatalogueModal({
 
                     <div className="mt-auto flex flex-col gap-2">
                       <TextField>
-                        <Label>Label</Label>
-                        <Input placeholder="Optional" value={label} onChange={(e) => setLabel(e.target.value)} />
+                        <Label>Device Name</Label>
+                        <Input placeholder="Optional" maxLength={32} value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
                       </TextField>
                       {firmwareOptions.length > 0 && (
                         <SimpleSelect

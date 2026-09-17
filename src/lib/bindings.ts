@@ -23,12 +23,12 @@ export const commands = {
 	projectsUpdate: (project: Project) => typedError<Project, AppError>(__TAURI_INVOKE("projects_update", { project })),
 	projectsDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_delete", { id })),
 	/**
-	 *  Adds an amp assignment to a project by model/label alone — `mac` starts
+	 *  Adds an amp assignment to a project by model/name alone — `mac` starts
 	 *  unset (`None`) and is linked later via live network discovery, not typed
 	 *  in manually. If `amp_model_id` references a catalog entry, its channel
 	 *  count pre-populates the assignment's channels.
 	 */
-	projectsAddAmpAssignment: (projectId: string, label: string | null, ampModelId: string | null, firmwareVersion: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, label, ampModelId, firmwareVersion })),
+	projectsAddAmpAssignment: (projectId: string, deviceName: string | null, ampModelId: string | null, firmwareVersion: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, deviceName, ampModelId, firmwareVersion })),
 	projectsRemoveAmpAssignment: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_amp_assignment", { projectId, assignmentId })),
 	/**
 	 *  Changes (or clears) an assignment's amp model, reconciling its channel
@@ -36,6 +36,12 @@ export const commands = {
 	 *  per-channel config where indices still exist. Never a destructive wipe.
 	 */
 	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
+	/**
+	 *  Renames an amp's device name — the same name FC=60 writes to the amp
+	 *  itself, editable here whether or not the amp is currently online. `name:
+	 *  None` clears it back to unset.
+	 */
+	projectsSetAmpDeviceName: (projectId: string, assignmentId: string, name: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_device_name", { projectId, assignmentId, name })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
 	/**
 	 *  Sets which physical source feeds a channel's input — Routing tab. There is
@@ -488,20 +494,26 @@ export const commands = {
 	 *  authority on whether the amp will accept it is the amp, not a cached poll.
 	 */
 	liveControlSetStandby: (deviceId: string, standby: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_standby", { deviceId, standby })),
+	/**
+	 *  FC=60 CUSTOMER_NAME_MODIFY — renames the amp itself, not a channel. Same
+	 *  ASCII/length rules as `live_control_set_channel_name`, against the
+	 *  device-level field's wider 32-byte width. No explicit refetch: the new
+	 *  name comes back through the next FC=0 `BASIC_INFO` read.
+	 */
+	liveControlSetDeviceName: (deviceId: string, name: string) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_device_name", { deviceId, name })),
 };
 
 /* Types */
 /**
  *  One assigned amp "slot" within a Project. `id` is independent of `mac` so
  *  a slot's configuration survives a physical unit swap. `mac` starts unset
- *  at creation time — a slot is planned by model/label alone; linking it to
+ *  at creation time — a slot is planned by model/name alone; linking it to
  *  a physical unit's MAC happens later via live network discovery, not by
  *  manual entry.
  */
 export type AmpAssignment = {
 	id: string,
 	mac: string | null,
-	label: string | null,
 	ampModelId: string | null,
 	/**
 	 *  Firmware version this slot is being planned for (e.g. "1.1.8",
@@ -514,7 +526,9 @@ export type AmpAssignment = {
 	channels: AmpChannel[],
 	/**
 	 *  The amp's user-set name (FC=60 `CUSTOMER_NAME_MODIFY`, read back via FC=0
-	 *  BASIC_INFO). Not yet editable here.
+	 *  BASIC_INFO). Editable offline here, or live via
+	 *  `live_control_set_device_name` — the one name an amp has, whether
+	 *  planned or connected.
 	 */
 	deviceName?: string | null,
 	/**

@@ -75,7 +75,7 @@ pub fn projects_delete(app: AppHandle, state: State<ProjectDataState>, id: Strin
     Ok(())
 }
 
-/// Adds an amp assignment to a project by model/label alone — `mac` starts
+/// Adds an amp assignment to a project by model/name alone — `mac` starts
 /// unset (`None`) and is linked later via live network discovery, not typed
 /// in manually. If `amp_model_id` references a catalog entry, its channel
 /// count pre-populates the assignment's channels.
@@ -85,7 +85,7 @@ pub fn projects_add_amp_assignment(
     app: AppHandle,
     state: State<ProjectDataState>,
     project_id: String,
-    label: Option<String>,
+    device_name: Option<String>,
     amp_model_id: Option<String>,
     firmware_version: Option<String>,
 ) -> Result<Project, AppError> {
@@ -110,7 +110,7 @@ pub fn projects_add_amp_assignment(
         .find(|p| p.id == project_id)
         .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
 
-    let mut assignment = AmpAssignment::new(None, label, channel_count, amp_model_id, firmware_version);
+    let mut assignment = AmpAssignment::new(None, device_name, channel_count, amp_model_id, firmware_version);
     assignment.reconcile_matrix_size(matrix_input_count);
     assignment.reconcile_eq_bands(eq_bands_per_channel);
     project.amp_assignments.push(assignment);
@@ -819,6 +819,40 @@ pub fn projects_set_channel_name(
         EqDirection::Input => channel.input_name = name,
         EqDirection::Output => channel.output_name = name,
     }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Renames an amp's device name — the same name FC=60 writes to the amp
+/// itself, editable here whether or not the amp is currently online. `name:
+/// None` clears it back to unset.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_amp_device_name(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    name: Option<String>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    assignment.device_name = name;
     project.touch();
 
     let project = project.clone();

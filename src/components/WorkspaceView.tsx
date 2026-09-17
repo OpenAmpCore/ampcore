@@ -41,10 +41,10 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editTarget, setEditTarget] = useState<AmpAssignment | null>(null);
-  const [editLabel, setEditLabel] = useState("");
+  const [editDeviceName, setEditDeviceName] = useState("");
   const [editFirmwareVersion, setEditFirmwareVersion] = useState<string | null>(null);
-  const [savingLabel, setSavingLabel] = useState(false);
-  const [labelError, setLabelError] = useState<string | null>(null);
+  const [savingDeviceName, setSavingDeviceName] = useState(false);
+  const [deviceNameError, setDeviceNameError] = useState<string | null>(null);
   // By id, so the modal sees the updated assignment (new MAC) after Assign/Unlink.
   const [linkTargetId, setLinkTargetId] = useState<string | null>(null);
 
@@ -78,7 +78,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   }
 
   function nameFor(assignment: AmpAssignment) {
-    return assignment.label ?? modelNameFor(assignment) ?? "Unnamed";
+    return assignment.deviceName ?? modelNameFor(assignment) ?? "Unnamed";
   }
 
   async function handleConfirmDelete() {
@@ -93,24 +93,24 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
     }
   }
 
-  async function handleSaveLabel() {
+  async function handleSaveDeviceName() {
     if (!editTarget) return;
-    setLabelError(null);
-    setSavingLabel(true);
+    setDeviceNameError(null);
+    setSavingDeviceName(true);
     const result = await commands.projectsUpdate({
       ...project,
       ampAssignments: project.ampAssignments.map((a) =>
         a.id === editTarget.id
-          ? { ...a, label: editLabel.trim() || null, firmwareVersion: editFirmwareVersion }
+          ? { ...a, deviceName: editDeviceName.trim() || null, firmwareVersion: editFirmwareVersion }
           : a,
       ),
     });
-    setSavingLabel(false);
+    setSavingDeviceName(false);
     if (result.status === "ok") {
       onProjectUpdate(result.data);
       setEditTarget(null);
     } else {
-      setLabelError(result.error.message);
+      setDeviceNameError(result.error.message);
     }
   }
 
@@ -163,7 +163,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
           >
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
-              const modelName = assignment.label ? modelNameFor(assignment) : null;
+              const modelName = assignment.deviceName ? modelNameFor(assignment) : null;
               const isSelected = assignment.id === selectedId;
               const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
               const isCvr = model?.brand === "CVR";
@@ -219,8 +219,8 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       className={`absolute -top-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
                       style={{ width: 22, height: 22, minWidth: 22 }}
                       onPress={() => {
-                        setLabelError(null);
-                        setEditLabel(assignment.label ?? "");
+                        setDeviceNameError(null);
+                        setEditDeviceName(assignment.deviceName ?? "");
                         setEditFirmwareVersion(assignment.firmwareVersion ?? null);
                         setEditTarget(assignment);
                       }}
@@ -333,11 +333,12 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
             <Modal.Body>
               <div className="flex flex-col gap-3">
                 <TextField autoFocus>
-                  <Label>Label</Label>
+                  <Label>Device Name</Label>
                   <Input
                     placeholder="Optional"
-                    value={editLabel}
-                    onChange={(e) => setEditLabel(e.target.value)}
+                    maxLength={32}
+                    value={editDeviceName}
+                    onChange={(e) => setEditDeviceName(e.target.value)}
                   />
                 </TextField>
                 {editFirmwareOptions.length > 0 && (
@@ -349,17 +350,17 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                     onChange={setEditFirmwareVersion}
                   />
                 )}
-                {labelError && (
+                {deviceNameError && (
                   <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-sm)" }}>
-                    {labelError}
+                    {deviceNameError}
                   </span>
                 )}
                 <div className="flex justify-end gap-2">
-                  <Button variant="secondary" onPress={() => setEditTarget(null)} isDisabled={savingLabel}>
+                  <Button variant="secondary" onPress={() => setEditTarget(null)} isDisabled={savingDeviceName}>
                     Cancel
                   </Button>
-                  <Button variant="primary" onPress={handleSaveLabel} isDisabled={savingLabel}>
-                    {savingLabel ? <Spinner size="sm" /> : "Save"}
+                  <Button variant="primary" onPress={handleSaveDeviceName} isDisabled={savingDeviceName}>
+                    {savingDeviceName ? <Spinner size="sm" /> : "Save"}
                   </Button>
                 </div>
               </div>
