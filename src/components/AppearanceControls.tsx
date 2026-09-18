@@ -1,5 +1,6 @@
-import { Button, ButtonGroup } from "@heroui/react";
-import { ACCENTS, RADII, useAppearance, type ColorScheme } from "../lib/appearance";
+import { Button, ButtonGroup, ColorSlider } from "@heroui/react";
+import { parseColor } from "react-aria-components";
+import { ACCENT_LIGHTNESS, ACCENT_SATURATION, RADII, useAppearance, type ColorScheme } from "../lib/appearance";
 
 /** One label + control row, matching `SettingsModal`'s row shape so these
  * read identically whether they appear in the title-bar menu or the modal. */
@@ -23,7 +24,7 @@ const MODES: { id: ColorScheme; label: string }[] = [
  * store (`src/lib/appearance.ts`) and must stay in step when one is changed
  * while the other is open. */
 export function AppearanceControls() {
-  const { colorScheme, accentId, radiusId, setColorScheme, setAccent, setRadius } = useAppearance();
+  const { colorScheme, accentHue, radiusId, setColorScheme, setAccent, setRadius } = useAppearance();
 
   return (
     <div className="flex flex-col gap-3">
@@ -42,26 +43,21 @@ export function AppearanceControls() {
       </Row>
 
       <Row label="Accent color">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {ACCENTS.map((accent) => (
-            <button
-              key={accent.id}
-              type="button"
-              aria-label={accent.label}
-              aria-pressed={accentId === accent.id}
-              title={accent.label}
-              onClick={() => setAccent(accent.id)}
-              // The swatch shows its own colour, so it can't also use the
-              // accent for its selected ring — that would be invisible on the
-              // selected swatch itself. `--foreground` keeps it legible in
-              // both schemes.
-              className={`size-5 cursor-pointer rounded-full border-0 p-0 outline-none ring-offset-2 ring-offset-[var(--overlay)] focus-visible:ring-2 focus-visible:ring-[var(--foreground)] ${
-                accentId === accent.id ? "ring-2 ring-[var(--foreground)]" : ""
-              }`}
-              style={{ background: accent.value }}
-            />
-          ))}
-        </div>
+        {/* Saturation/lightness are pinned (see `ACCENT_SATURATION`/
+            `ACCENT_LIGHTNESS`) so this only ever picks a hue — every position
+            on the track is a pastel tint, never a fully saturated colour. */}
+        <ColorSlider
+          aria-label="Accent color"
+          channel="hue"
+          colorSpace="hsl"
+          className="w-36"
+          value={parseColor(`hsl(${accentHue}, ${ACCENT_SATURATION}%, ${ACCENT_LIGHTNESS}%)`)}
+          onChange={(color) => setAccent(color.getChannelValue("hue"))}
+        >
+          <ColorSlider.Track>
+            <ColorSlider.Thumb />
+          </ColorSlider.Track>
+        </ColorSlider>
       </Row>
 
       <Row label="Corner radius">

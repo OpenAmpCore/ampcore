@@ -230,7 +230,7 @@ export function AmpPushSteps({
                 return (
                   <div
                     key={stage.id}
-                    className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-[var(--amp-radius-sm)] px-2 py-1 transition-colors duration-300 ${tint}`}
+                    className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-colors duration-300 ${tint}`}
                   >
                     <span className="flex size-4 shrink-0 items-center justify-center">
                       <StageIcon state={state} />

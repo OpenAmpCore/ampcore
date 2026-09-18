@@ -4,12 +4,10 @@ use specta::Type;
 use super::capability::{PowerMode, SourceKind};
 use super::common::{new_id, now_millis, EntryOrigin};
 
-/// Tolerates both a missing field (old schema didn't have it) and an explicit
-/// JSON `null` (old schema's placeholder `Option<u32>` fields, always `None`)
-/// for a field that is no longer optional — installs with pre-existing
-/// `amp_models.json` files predate this real topology data and would
-/// otherwise fail to deserialize entirely. `migrate_builtin_topology` in
-/// `store.rs` then backfills real values for builtin entries on next save.
+/// Tolerates both a missing field and an explicit JSON `null` for a field
+/// that is no longer optional, so a local `amp_models.json` saved earlier
+/// this session (before the field existed, or while it was still an
+/// `Option<u32>` placeholder) keeps loading instead of hard-failing.
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -32,8 +30,8 @@ pub struct SourceChannelCount {
     pub channel_count: u32,
     /// `#[serde(default)]` so `sourceCounts` entries saved before this field
     /// existed still deserialize (as `false`) instead of hard-failing store
-    /// load entirely — `migrate_builtin_topology` immediately recomputes the
-    /// real value for `BuiltIn` entries on the very next load either way.
+    /// load entirely. Delete `amp_models.json` to force a clean re-seed if a
+    /// local `BuiltIn` entry is stuck with a stale value.
     #[serde(default)]
     pub patchable: bool,
 }

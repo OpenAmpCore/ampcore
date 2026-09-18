@@ -3,8 +3,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::data::amp_model::AmpModelCatalogEntry;
 use crate::data::capability::{PowerMode, SourceKind};
 use crate::data::project::{
-    AmpAssignment, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
-    Project,
+    AmpAssignment, BackupPriorityPatch, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection,
+    LimiterPatch, Project, SourceTrimPatch,
 };
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use crate::error::AppError;
@@ -271,6 +271,121 @@ pub fn projects_set_channel_source(
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
     channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of one source's trim/delay pair — Routing tab. Each source
+/// keeps its own pair regardless of which one is selected, so this is
+/// addressed by `kind` rather than editing "the current source".
+///
+/// `SourceKind::Backup` is rejected: it is a failover *state*, not an input
+/// with its own gain matching, and the amp has no trim slot for it.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_source_trim(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    kind: SourceKind,
+    patch: SourceTrimPatch,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    let trim = match kind {
+        SourceKind::Analog => &mut channel.source_trims.analog,
+        SourceKind::Dante => &mut channel.source_trims.dante,
+        SourceKind::Backup => {
+            return Err(AppError::from(
+                "backup is a failover state, not an input with its own trim".to_string(),
+            ))
+        }
+    };
+    if let Some(trim_db) = patch.trim_db {
+        trim.trim_db = trim_db;
+    }
+    if let Some(delay_ms) = patch.delay_ms {
+        trim.delay_ms = delay_ms;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of a channel's backup/auto-source switching — Routing tab.
+///
+/// `first`/`second` are raw source codes in the amp's own space (0=Analog,
+/// 1=Dante), not `SourceKind`s, because that is how the amp stores them; the
+/// frontend derives `second` as the complement of `first`, since with two
+/// sources the fallback is never a free choice.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_backup_priority(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    patch: BackupPriorityPatch,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    let priority = &mut channel.backup_priority;
+    if let Some(enabled) = patch.enabled {
+        priority.enabled = enabled;
+    }
+    if let Some(first) = patch.first {
+        priority.first = first;
+    }
+    if let Some(second) = patch.second {
+        priority.second = second;
+    }
+    if let Some(threshold_db) = patch.threshold_db {
+        priority.threshold_db = threshold_db;
+    }
     project.touch();
 
     let project = project.clone();
@@ -893,6 +1008,49 @@ pub fn projects_set_channel_output_mute(
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
     channel.output_muted = muted;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
+/// already merged in from a live amp (`amp_merge`) and already pushed back to
+/// one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
+/// Only the bypass flag lives here — the coefficients themselves are read from
+/// the device with FC=43 and never enter the project file.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_fir_bypass(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    bypassed: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.fir_bypassed = bypassed;
     project.touch();
 
     let project = project.clone();

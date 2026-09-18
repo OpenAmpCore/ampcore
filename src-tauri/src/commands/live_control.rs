@@ -706,13 +706,13 @@ pub async fn live_control_set_channel_name(
 /// (`Channels.cs`) and the reference's `analogType` action both send FC=79
 /// with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
 /// channel already on analog a no-op on the device, even though the packet
-/// was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
-/// hard-wired 1:1 to their channel, so it is ignored for those kinds.
+/// was acknowledged. `index` is only meaningful for Analog; Dante is
+/// hard-wired 1:1 to its channel, so it is ignored for that kind.
 ///
 /// `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
-/// see `channel_config_v118::source`), not something FC=11 selects — the
-/// reference's own comment notes backup is driven by the priority/auto-source
-/// controls (FC=80), which is Tier B.
+/// see `channel_config_v118::source`), not something FC=11 selects. Backup is
+/// driven by the priority/auto-source controls instead — see
+/// `live_control_set_backup_priority` (FC=80).
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_source(
@@ -726,7 +726,6 @@ pub async fn live_control_set_channel_source(
     let source_code: u8 = match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
-        SourceKind::Aes3 => 2,
         SourceKind::Backup => {
             return Err(AppError::from(
                 "backup is a readback state, not an FC=11 selection — configure it via priority inputs".to_string(),
@@ -896,6 +895,29 @@ pub async fn live_control_set_output_mute(
     Ok(tally.finish())
 }
 
+/// FC=44 FIR bypass. Unlike the FC=43 coefficient read this is a one-byte body
+/// in a single datagram, so none of the outbound fragmentation that blocks
+/// *writing* coefficients applies (see `live/cvr/fir.rs`). Gated with
+/// `require_fir_firmware` rather than the usual unrecognized-firmware
+/// fallthrough, so a pre-1.1.8 amp is told why instead of being handed a
+/// packet its DSP has no handler for.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_fir_bypass(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    bypassed: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_set_fir_bypass(firmware_family.as_deref(), channel_index, bypassed)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_input_mute(
@@ -924,6 +946,65 @@ pub async fn live_control_set_channel_delay_in(
     let mut tally = WriteTally::default();
     let packet = write::build_set_delay_in(firmware_family.as_deref(), channel_index, delay_in_ms as f32)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=62 SOURCE_DATA. Takes **both** halves rather than a patch: the wire
+/// frame always carries trim and delay together, so there is nothing to send
+/// for a half-specified edit, and unlike the project command there is no
+/// stored copy here to read the sibling back from. The caller holds the live
+/// readback and supplies the unchanged value.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_source_trim(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    kind: SourceKind,
+    trim_db: f64,
+    delay_ms: f64,
+) -> Result<LiveWriteAck, AppError> {
+    let segment: u8 = match kind {
+        SourceKind::Analog => 0,
+        SourceKind::Dante => 1,
+        SourceKind::Backup => {
+            return Err(AppError::from(
+                "backup is a failover state, not an input with its own trim".to_string(),
+            ))
+        }
+    };
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet =
+        write::build_set_source_trim(firmware_family.as_deref(), channel_index, segment, trim_db as f32, delay_ms as f32)
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=80 PRIORITY_INPUTS. `first`/`second` are the amp's own source codes
+/// (0=Analog, 1=Dante); `threshold_db` is signed and arrives as `i32` because
+/// that is what the project model stores, so it is range-checked here rather
+/// than silently wrapping into the wire's `i8`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_backup_priority(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    first: u8,
+    second: u8,
+    enabled: bool,
+    threshold_db: i32,
+) -> Result<LiveWriteAck, AppError> {
+    let threshold = i8::try_from(threshold_db)
+        .map_err(|_| AppError::from(format!("backup threshold {} dB is out of range", threshold_db)))?;
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet =
+        write::build_set_backup_priority(firmware_family.as_deref(), channel_index, first, second, enabled, threshold)
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
 }

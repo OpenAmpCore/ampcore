@@ -126,7 +126,6 @@ fn mirror_channel(channel: &mut AmpChannel, config: &ChannelConfig, matrix_input
     channel.source_trims = SourceTrims {
         analog: mirror_trim(config.analog_trim_db, config.analog_delay_ms),
         dante: mirror_trim(config.dante_trim_db, config.dante_delay_ms),
-        aes3: mirror_trim(config.aes3_trim_db, config.aes3_delay_ms),
     };
 
     // The amp stores its default labels ("In1", "OutA") as literal names; the
@@ -310,8 +309,6 @@ mod tests {
             analog_delay_ms: 0.25,
             dante_trim_db: 0.0,
             dante_delay_ms: 0.0,
-            aes3_trim_db: -2.0,
-            aes3_delay_ms: 0.0,
             load_ohms: 4.0,
             backup_priority: BackupPriority { enabled: true, first: 1, second: 2, threshold_db: -80 },
         }

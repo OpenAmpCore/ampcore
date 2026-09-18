@@ -105,7 +105,6 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
     sourceTrims: {
       analog: { trimDb: config.analogTrimDb ?? 0, delayMs: config.analogDelayMs ?? 0 },
       dante: { trimDb: config.danteTrimDb ?? 0, delayMs: config.danteDelayMs ?? 0 },
-      aes3: { trimDb: config.aes3TrimDb ?? 0, delayMs: config.aes3DelayMs ?? 0 },
     },
     backupPriority: config.backupPriority,
   };
@@ -251,8 +250,23 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     async setChannelOutputMute(channelIndex, muted) {
       return reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
     },
+    async setChannelFirBypass(channelIndex, bypassed) {
+      return reportWrite("Set FIR bypass", commands.liveControlSetFirBypass(deviceId, channelIndex, bypassed));
+    },
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
+    },
+    async setSourceTrim(channelIndex, kind, trimDb, delayMs) {
+      return reportWrite(
+        "Set source trim/delay",
+        commands.liveControlSetSourceTrim(deviceId, channelIndex, kind, trimDb, delayMs),
+      );
+    },
+    async setBackupPriority(channelIndex, first, second, enabled, thresholdDb) {
+      return reportWrite(
+        "Set backup priority",
+        commands.liveControlSetBackupPriority(deviceId, channelIndex, first, second, enabled, thresholdDb),
+      );
     },
     async setEqBand(channelIndex, direction, bandIndex, patch) {
       return reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));

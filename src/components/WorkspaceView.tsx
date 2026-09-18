@@ -27,6 +27,10 @@ const CARD_CONTROL_REVEAL =
   "opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 " +
   "focus-visible:opacity-100 [@media(hover:none)]:opacity-100";
 
+/** Side of the square amp tile. The name/model labels below it are clamped to
+ * the same width, so they have to track this number. */
+const TILE_SIZE = 90;
+
 interface WorkspaceViewProps {
   project: Project;
   onProjectUpdate: (project: Project) => void;
@@ -171,18 +175,21 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
 
               return (
                 <div key={assignment.id} className="group flex flex-col items-center gap-1.5">
-                  <div className="relative">
+                  {/* The size lives on the *positioning context*, not just the
+                   * tile: the corner controls anchor to `bottom-0`, and
+                   * `Tooltip.Trigger` renders a real in-flow `inline-block`
+                   * `<div>` (see the dot below), whose line-box strut would
+                   * otherwise make this wrapper ~20px taller than the tile and
+                   * drop every bottom-anchored control below the border. */}
+                  <div className="relative" style={{ width: TILE_SIZE, height: TILE_SIZE }}>
                     <div
                       onClick={() => setSelectedId(assignment.id)}
-                      className={`flex cursor-pointer items-center justify-center border-solid transition-colors duration-150 group-hover:border-[var(--accent)] group-hover:bg-[var(--accent-soft)] ${
+                      className={`flex h-full w-full cursor-pointer items-center justify-center border-solid transition-colors duration-150 group-hover:border-[var(--accent)] group-hover:bg-[var(--accent-soft)] ${
                         isSelected
                           ? "border-2 border-[var(--accent)]"
                           : "border border-[var(--amp-color-default-border)]"
                       }`}
-                      // Same radius formula as HeroUI's own `Card`
-                      // (`min(32px, var(--radius-3xl))`), scaled down for this
-                      // 90px tile so it reads as the same shape-language.
-                      style={{ width: 90, height: 90, borderRadius: "min(24px, var(--radius-3xl))" }}
+                      style={{ borderRadius: "var(--radius-xl)" }}
                     >
                       {isCvr ? (
                         <img
@@ -207,7 +214,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                     {assignment.firmwareVersion && (
                       <Chip
                         size="sm"
-                        className="absolute bottom-1 left-1/2 -translate-x-1/2"
+                        className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2"
                         style={{ background: "var(--amp-color-dark-6)", color: "white" }}
                       >
                         v{assignment.firmwareVersion}
@@ -216,7 +223,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                     <Button
                       isIconOnly
                       size="sm"
-                      className={`absolute -top-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                      className={`absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
                       style={{ width: 22, height: 22, minWidth: 22 }}
                       onPress={() => {
                         setDeviceNameError(null);
@@ -232,7 +239,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       isIconOnly
                       size="sm"
                       variant="danger"
-                      className={`absolute -top-1.5 -right-1.5 ${CARD_CONTROL_REVEAL}`}
+                      className={`absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 ${CARD_CONTROL_REVEAL}`}
                       style={{ width: 22, height: 22, minWidth: 22 }}
                       onPress={() => setDeleteTarget(assignment)}
                       aria-label="Remove amp"
@@ -242,7 +249,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                     <Button
                       isIconOnly
                       size="sm"
-                      className={`absolute -bottom-1.5 -left-1.5 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
+                      className={`absolute bottom-0 left-0 -translate-x-1/2 translate-y-1/2 ${CARD_CONTROL_REVEAL} ${CARD_CONTROL_CLASS}`}
                       style={{ width: 22, height: 22, minWidth: 22 }}
                       onPress={() => setLinkTargetId(assignment.id)}
                       aria-label="Link amp"
@@ -250,25 +257,30 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       <Link size={12} />
                     </Button>
                     <Tooltip delay={300}>
-                      <Tooltip.Trigger>
-                        <span
-                          role="img"
-                          aria-label={linkStatus.label}
-                          className="absolute -right-1 -bottom-1 size-3 rounded-full border-2 border-solid border-[var(--amp-color-body)]"
-                          style={{ backgroundColor: `var(--amp-color-${linkStatus.color}-filled)` }}
-                        />
-                      </Tooltip.Trigger>
+                      {/* The dot *is* the trigger. `Tooltip.Trigger` renders its
+                       * own `<div role="button">`, so styling that div directly
+                       * beats nesting a span inside it: one element, and being
+                       * absolute makes it block-level, so it leaves no line box
+                       * in the wrapper above. */}
+                      <Tooltip.Trigger
+                        aria-label={linkStatus.label}
+                        className="absolute right-0 bottom-0 size-3 translate-x-1/2 translate-y-1/2 rounded-full border-2 border-solid border-[var(--amp-color-body)]"
+                        style={{ backgroundColor: `var(--amp-color-${linkStatus.color}-filled)` }}
+                      />
                       <Tooltip.Content showArrow>{linkStatus.label}</Tooltip.Content>
                     </Tooltip>
                   </div>
                   <div className="flex flex-col items-center gap-px">
-                    <span className="line-clamp-2 max-w-[90px] text-center" style={{ fontSize: "var(--amp-font-size-xs)" }}>
+                    <span
+                      className="line-clamp-2 text-center"
+                      style={{ maxWidth: TILE_SIZE, fontSize: "var(--amp-font-size-xs)" }}
+                    >
                       {displayName}
                     </span>
                     {modelName && (
                       <span
-                        className="line-clamp-1 max-w-[90px] text-center"
-                        style={{ fontSize: 10, color: "var(--amp-color-dimmed)" }}
+                        className="line-clamp-1 text-center"
+                        style={{ maxWidth: TILE_SIZE, fontSize: 10, color: "var(--amp-color-dimmed)" }}
                       >
                         {modelName}
                       </span>

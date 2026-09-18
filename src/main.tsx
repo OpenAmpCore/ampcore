@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Toast } from "@heroui/react";
+import "@fontsource-variable/inter";
 import "./styles/tailwind.css";
 import App from "./App";
 import { applyAppearance } from "./lib/appearance";

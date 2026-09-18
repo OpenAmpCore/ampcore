@@ -146,11 +146,6 @@ function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
             <td className="p-1 font-mono">{fmtNum(channel.danteTrimDb, "dB")}</td>
             <td className="p-1 font-mono">{fmtNum(channel.danteDelayMs, "ms")}</td>
           </tr>
-          <tr>
-            <td className="p-1">AES3</td>
-            <td className="p-1 font-mono">{fmtNum(channel.aes3TrimDb, "dB")}</td>
-            <td className="p-1 font-mono">{fmtNum(channel.aes3DelayMs, "ms")}</td>
-          </tr>
         </tbody>
       </table>
 

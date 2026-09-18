@@ -26,9 +26,11 @@ import { actionFailed, toActionResult, type ActionResult } from "./actionResult"
  * As of the 1.1.8 Tier-A pass the only member Direct Edit mode still leaves
  * undefined is `setChannelOhms` — a Project-only concept, gated by
  * `ConfigureCapabilities.ohmsEditable` so it explains itself rather than
- * sitting inert. Every other member has a live wire command; FIR is the one
- * remaining device feature with no action here at all, and its tab says so
- * explicitly instead of offering dead controls.
+ * sitting inert. Every other member has a live wire command. FIR is partly
+ * here: its bypass flag (FC=44) is an ordinary action on both sources, while
+ * importing or clearing coefficients has none — that needs outbound
+ * fragmentation the write path doesn't have, and the FIR tab says so rather
+ * than offering a dead control.
  *
  * Note that an early-return on `undefined` is silent by design *only* where
  * a capability flag already explains the absence. Adding a new optional
@@ -45,11 +47,25 @@ export interface ConfigureActions {
   ): Promise<ActionResult>;
   setChannelPhaseInvert(channelIndex: number, inverted: boolean): Promise<ActionResult>;
   setChannelOutputMute(channelIndex: number, muted: boolean): Promise<ActionResult>;
+  setChannelFirBypass(channelIndex: number, bypassed: boolean): Promise<ActionResult>;
   setChannelPowerMode(channelIndex: number, mode: PowerMode): Promise<ActionResult>;
 
   setChannelName?(channelIndex: number, side: EqDirection, name: string | null): Promise<ActionResult>;
   setOutputBridge?(pairLeaderChannelIndex: number, bridged: boolean): Promise<ActionResult>;
   setChannelSource?(channelIndex: number, kind: SourceKind, index: number | null): Promise<ActionResult>;
+  /** Trim and delay for one source, independent of which source is selected.
+   * Both halves are required because FC=62 has no partial form — the caller
+   * re-sends whichever value it isn't changing. */
+  setSourceTrim?(channelIndex: number, kind: SourceKind, trimDb: number, delayMs: number): Promise<ActionResult>;
+  /** `first`/`second` are the amp's own source codes (0=Analog, 1=Dante),
+   * not `SourceKind`s — that is how the amp stores them. */
+  setBackupPriority?(
+    channelIndex: number,
+    first: number,
+    second: number,
+    enabled: boolean,
+    thresholdDb: number,
+  ): Promise<ActionResult>;
   setMatrixCrosspoint?(
     channelIndex: number,
     sourceIndex: number,
@@ -101,6 +117,7 @@ export function lockConfigureActions(message: string): ConfigureActions {
     setChannelOutput: refuse,
     setChannelPhaseInvert: refuse,
     setChannelOutputMute: refuse,
+    setChannelFirBypass: refuse,
     setChannelPowerMode: refuse,
   };
 }
@@ -142,6 +159,8 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetChannelPhaseInvert(projectId, assignmentId, channelIndex, inverted)),
     setChannelOutputMute: (channelIndex, muted) =>
       apply(commands.projectsSetChannelOutputMute(projectId, assignmentId, channelIndex, muted)),
+    setChannelFirBypass: (channelIndex, bypassed) =>
+      apply(commands.projectsSetChannelFirBypass(projectId, assignmentId, channelIndex, bypassed)),
     setChannelPowerMode: (channelIndex, mode) =>
       apply(commands.projectsSetChannelPowerMode(projectId, assignmentId, channelIndex, mode)),
     setChannelName: (channelIndex, side, name) =>
@@ -150,6 +169,17 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetOutputBridge(projectId, assignmentId, pairLeaderChannelIndex, bridged)),
     setChannelSource: (channelIndex, kind, index) =>
       apply(commands.projectsSetChannelSource(projectId, assignmentId, channelIndex, kind, index)),
+    setSourceTrim: (channelIndex, kind, trimDb, delayMs) =>
+      apply(commands.projectsSetSourceTrim(projectId, assignmentId, channelIndex, kind, { trimDb, delayMs })),
+    setBackupPriority: (channelIndex, first, second, enabled, thresholdDb) =>
+      apply(
+        commands.projectsSetBackupPriority(projectId, assignmentId, channelIndex, {
+          first,
+          second,
+          enabled,
+          thresholdDb,
+        }),
+      ),
     setMatrixCrosspoint: (channelIndex, sourceIndex, gainDb, active) =>
       apply(commands.projectsSetMatrixCrosspoint(projectId, assignmentId, channelIndex, sourceIndex, gainDb, active)),
     setCrossoverSlot: (channelIndex, direction, slot, patch) =>

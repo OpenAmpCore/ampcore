@@ -47,7 +47,7 @@ export function TitleBar({
     >
       <div data-tauri-drag-region className="flex min-w-0 items-center gap-2">
         <Dropdown>
-          <Dropdown.Trigger className="rounded-[var(--amp-radius-sm)] border-0 bg-transparent px-2 py-1 text-sm text-[var(--amp-color-dimmed)] hover:bg-[var(--amp-color-gray-light)]">
+          <Dropdown.Trigger className="rounded-md border-0 bg-transparent px-2 py-1 text-sm text-[var(--amp-color-dimmed)] hover:bg-[var(--amp-color-gray-light)]">
             File
           </Dropdown.Trigger>
           <Dropdown.Popover placement="bottom start">

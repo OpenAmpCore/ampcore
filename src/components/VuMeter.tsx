@@ -180,7 +180,7 @@ export function VuMeter({
       }}
     >
       <div
-        className="rounded-[var(--amp-radius-sm)]"
+        className="rounded-sm"
         style={{
           position: "relative",
           width: horizontal ? trackSize : thickness,

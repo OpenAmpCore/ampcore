@@ -50,6 +50,24 @@ export const commands = {
 	 */
 	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, kind: SourceKind, index: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, kind, index })),
 	/**
+	 *  Partial update of one source's trim/delay pair — Routing tab. Each source
+	 *  keeps its own pair regardless of which one is selected, so this is
+	 *  addressed by `kind` rather than editing "the current source".
+	 * 
+	 *  `SourceKind::Backup` is rejected: it is a failover *state*, not an input
+	 *  with its own gain matching, and the amp has no trim slot for it.
+	 */
+	projectsSetSourceTrim: (projectId: string, assignmentId: string, channelIndex: number, kind: SourceKind, patch: SourceTrimPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_source_trim", { projectId, assignmentId, channelIndex, kind, patch })),
+	/**
+	 *  Partial update of a channel's backup/auto-source switching — Routing tab.
+	 * 
+	 *  `first`/`second` are raw source codes in the amp's own space (0=Analog,
+	 *  1=Dante), not `SourceKind`s, because that is how the amp stores them; the
+	 *  frontend derives `second` as the complement of `first`, since with two
+	 *  sources the fallback is never a free choice.
+	 */
+	projectsSetBackupPriority: (projectId: string, assignmentId: string, channelIndex: number, patch: BackupPriorityPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_backup_priority", { projectId, assignmentId, channelIndex, patch })),
+	/**
 	 *  Partial update of one Matrix-tab crosspoint — only touches the fields the
 	 *  caller passes (`Some`), matching the other partial-update commands'
 	 *  per-field-optional convention. Fails if the crosspoint doesn't exist yet
@@ -107,6 +125,14 @@ export const commands = {
 	 *  `projects_set_channel_input_mute`.
 	 */
 	projectsSetChannelOutputMute: (projectId: string, assignmentId: string, channelIndex: number, muted: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_output_mute", { projectId, assignmentId, channelIndex, muted })),
+	/**
+	 *  Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
+	 *  already merged in from a live amp (`amp_merge`) and already pushed back to
+	 *  one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
+	 *  Only the bypass flag lives here — the coefficients themselves are read from
+	 *  the device with FC=43 and never enter the project file.
+	 */
+	projectsSetChannelFirBypass: (projectId: string, assignmentId: string, channelIndex: number, bypassed: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_fir_bypass", { projectId, assignmentId, channelIndex, bypassed })),
 	/**
 	 *  Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
 	 *  must be even and have a following odd-indexed partner in the same
@@ -290,15 +316,30 @@ export const commands = {
 	 *  (`Channels.cs`) and the reference's `analogType` action both send FC=79
 	 *  with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
 	 *  channel already on analog a no-op on the device, even though the packet
-	 *  was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
-	 *  hard-wired 1:1 to their channel, so it is ignored for those kinds.
+	 *  was acknowledged. `index` is only meaningful for Analog; Dante is
+	 *  hard-wired 1:1 to its channel, so it is ignored for that kind.
 	 * 
 	 *  `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
-	 *  see `channel_config_v118::source`), not something FC=11 selects — the
-	 *  reference's own comment notes backup is driven by the priority/auto-source
-	 *  controls (FC=80), which is Tier B.
+	 *  see `channel_config_v118::source`), not something FC=11 selects. Backup is
+	 *  driven by the priority/auto-source controls instead — see
+	 *  `live_control_set_backup_priority` (FC=80).
 	 */
 	liveControlSetChannelSource: (deviceId: string, channelIndex: number, kind: SourceKind, index: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_source", { deviceId, channelIndex, kind, index })),
+	/**
+	 *  FC=62 SOURCE_DATA. Takes **both** halves rather than a patch: the wire
+	 *  frame always carries trim and delay together, so there is nothing to send
+	 *  for a half-specified edit, and unlike the project command there is no
+	 *  stored copy here to read the sibling back from. The caller holds the live
+	 *  readback and supplies the unchanged value.
+	 */
+	liveControlSetSourceTrim: (deviceId: string, channelIndex: number, kind: SourceKind, trimDb: number | null, delayMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_source_trim", { deviceId, channelIndex, kind, trimDb, delayMs })),
+	/**
+	 *  FC=80 PRIORITY_INPUTS. `first`/`second` are the amp's own source codes
+	 *  (0=Analog, 1=Dante); `threshold_db` is signed and arrives as `i32` because
+	 *  that is what the project model stores, so it is range-checked here rather
+	 *  than silently wrapping into the wire's `i8`.
+	 */
+	liveControlSetBackupPriority: (deviceId: string, channelIndex: number, first: number, second: number, enabled: boolean, thresholdDb: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_backup_priority", { deviceId, channelIndex, first, second, enabled, thresholdDb })),
 	/**
 	 *  FC=50 BRIDGE. `channel_index` is the bridged pair's **leader channel**,
 	 *  keeping this command's signature identical to the project-mode
@@ -321,6 +362,15 @@ export const commands = {
 	 *  `live_channel_config:updated` event — no optimistic update here.
 	 */
 	liveControlSetOutputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_output_mute", { deviceId, channelIndex, muted })),
+	/**
+	 *  FC=44 FIR bypass. Unlike the FC=43 coefficient read this is a one-byte body
+	 *  in a single datagram, so none of the outbound fragmentation that blocks
+	 *  *writing* coefficients applies (see `live/cvr/fir.rs`). Gated with
+	 *  `require_fir_firmware` rather than the usual unrecognized-firmware
+	 *  fallthrough, so a pre-1.1.8 amp is told why instead of being handed a
+	 *  packet its DSP has no handler for.
+	 */
+	liveControlSetFirBypass: (deviceId: string, channelIndex: number, bypassed: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_fir_bypass", { deviceId, channelIndex, bypassed })),
 	/**
 	 *  Partial update of a channel's output trim/volume/delay — mirrors
 	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
@@ -417,6 +467,23 @@ export const commands = {
 	 *  device must be polled first.
 	 */
 	fingerprintLiveDevice: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device", { deviceId })),
+	/**
+	 *  `fingerprint_live_device` plus one FIR read (FC=43) per output channel.
+	 * 
+	 *  A separate command rather than a flag on the synchronous one, because
+	 *  `projects_amp_edit_lock` rebuilds a live fingerprint on every FC=27 poll
+	 *  tick (see `useAmpEditLock`) — putting eight five-fragment FIR exchanges on
+	 *  that path would saturate the line several times a second. This is the
+	 *  opt-in variant, called only by the fingerprint inspector.
+	 * 
+	 *  Reads are sequential, never concurrent: the per-IP reassembler cannot
+	 *  interleave two fragmented exchanges. Per-channel failures are swallowed —
+	 *  an unreadable (or pre-1.1.8, which `live_control_fetch_channel_fir` refuses
+	 *  before any I/O) channel simply keeps `fir: None` rather than failing the
+	 *  whole fingerprint, and nothing is added to `missing`, which would null
+	 *  `amp_hash` and flip the editor to `Unreadable`.
+	 */
+	fingerprintLiveDeviceWithFir: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device_with_fir", { deviceId })),
 	/**
 	 *  Every discovered device that has an FC=27 snapshot, ordered by device id.
 	 *  Devices never polled are skipped rather than failing the whole call.
@@ -595,8 +662,7 @@ export type AmpChannel = {
 	/**
 	 *  Which physical source feeds this channel's input — Routing tab.
 	 *  Always set: a physical input always has a source. New channels
-	 *  default to Analog N (1:1); older files are backfilled on load (see
-	 *  `CURRENT_PROJECT_SCHEMA_VERSION`).
+	 *  default to Analog N (1:1).
 	 */
 	source: ChannelSource,
 	/**
@@ -673,9 +739,15 @@ export type AmpChannel = {
 	powerMode?: PowerMode,
 	/**  FIR filter bypass. Read back, not yet editable here. */
 	firBypassed?: boolean,
-	/**  Per-source trim/delay. Read back, not yet editable here. */
+	/**
+	 *  Per-source trim/delay — each source keeps its own pair, independent of
+	 *  which one is currently selected. Routing tab.
+	 */
 	sourceTrims?: SourceTrims,
-	/**  Backup source switching. Read back, not yet editable here. */
+	/**
+	 *  Backup source switching — Routing tab, offered only on amps with a
+	 *  second source to fail over to (`AmpModelCatalogEntry.is_dante`).
+	 */
 	backupPriority?: BackupPriority,
 };
 
@@ -937,6 +1009,20 @@ export type AmpParamRanges = {
 	peakLimiterReleaseMs: ParamRange,
 	noiseGateThresholdDbu: ParamRange,
 	/**
+	 *  Per-source input trim. The vendor allows a wider swing on a digital
+	 *  source than on analog, so these are two separate bounds rather than
+	 *  one shared with `output_trim_db`.
+	 */
+	sourceTrimAnalogDb: ParamRange,
+	sourceTrimDigitalDb: ParamRange,
+	/**
+	 *  Per-source input delay — distinct from `delay_in_ms`, which is the
+	 *  channel's own post-selection delay.
+	 */
+	sourceDelayMs: ParamRange,
+	/**  Signal-loss threshold for backup/auto-source switching. */
+	backupThresholdDb: ParamRange,
+	/**
 	 *  Max byte length for `AmpChannel.input_name`/`output_name` — a plain
 	 *  scalar, not a `ParamRange`, since it's a single bound, not a min/max.
 	 */
@@ -1037,6 +1123,17 @@ export type BackupPriority = {
 	thresholdDb: number,
 };
 
+/**
+ *  Partial update for a `BackupPriority` — same bundling rationale as
+ *  `EqBandPatch`.
+ */
+export type BackupPriorityPatch = {
+	enabled: boolean | null,
+	first: number | null,
+	second: number | null,
+	thresholdDb: number | null,
+};
+
 /**  The per-channel fields `ampHash` covers beyond the speaker hash. */
 export type ChannelAmpCanonical = {
 	inputEq: EqCanonical,
@@ -1101,8 +1198,6 @@ export type ChannelConfig = {
 	analogDelayMs: number | null,
 	danteTrimDb: number | null,
 	danteDelayMs: number | null,
-	aes3TrimDb: number | null,
-	aes3DelayMs: number | null,
 	/**
 	 *  Vendor `load_data` — the load impedance the amp is set to (Ω; unit to
 	 *  verify on hardware).
@@ -1164,6 +1259,12 @@ export type ChannelFingerprint = {
 	embeddedHashMatches: boolean | null,
 	speaker: SpeakerCanonical,
 	ampFields: ChannelAmpCanonical,
+	/**
+	 *  `None` unless a caller enriched this fingerprint with `attach_fir_stats`
+	 *  — FIR needs its own FC=43 round trip per channel, so the ordinary
+	 *  synchronous paths never populate it.
+	 */
+	fir: ChannelFirStats | null,
 };
 
 export type ChannelFirSnapshot = {
@@ -1203,6 +1304,24 @@ export type ChannelFirSnapshot = {
 	 */
 	bodyLen: number,
 	receivedAt: number | null,
+};
+
+/**
+ *  Derived FIR facts for one output channel — shown for context, never hashed
+ *  (see the module doc comment). Deliberately excludes the 512 coefficients:
+ *  this is what a reader needs to tell two filters apart, not the filter.
+ */
+export type ChannelFirStats = {
+	/**
+	 *  `false` when the channel holds the unit impulse an empty channel keeps
+	 *  (`order == 1`) — i.e. no real filter is loaded.
+	 */
+	loaded: boolean,
+	/**  `None` when the amp replied with the 2048-byte nameless form. */
+	name: string | null,
+	/**  Taps minus trailing zeros — the vendor's "Order: N Taps". */
+	order: number,
+	timeZeroMs: number | null,
 };
 
 /**
@@ -1273,8 +1392,6 @@ export type CrosspointCanonical = {
  */
 export type CvrFirmwareCapability = {
 	vNum: number | null,
-	extendedEq: boolean,
-	phonicVariant: boolean,
 	speakerManagement: boolean,
 	firFilters: boolean,
 	noiseGateThreshold: boolean,
@@ -1676,8 +1793,8 @@ export type SourceChannelCount = {
 	/**
 	 *  `#[serde(default)]` so `sourceCounts` entries saved before this field
 	 *  existed still deserialize (as `false`) instead of hard-failing store
-	 *  load entirely — `migrate_builtin_topology` immediately recomputes the
-	 *  real value for `BuiltIn` entries on the very next load either way.
+	 *  load entirely. Delete `amp_models.json` to force a clean re-seed if a
+	 *  local `BuiltIn` entry is stuck with a stale value.
 	 */
 	patchable?: boolean,
 };
@@ -1688,7 +1805,7 @@ export type SourceChannelCount = {
  *  many physical channels each variant has, is `AmpDspTopology.source_counts`,
  *  not this enum itself.
  */
-export type SourceKind = "analog" | "dante" | "aes3" | "backup";
+export type SourceKind = "analog" | "dante" | "backup";
 
 /**  One trim + delay pair for a single input source kind. */
 export type SourceTrim = {
@@ -1697,13 +1814,24 @@ export type SourceTrim = {
 };
 
 /**
- *  Per-source gain matching (vendor `Ana/Dante/AES_gain_matching`) — each
- *  source kind feeding a channel has its own trim and delay.
+ *  Partial update for one `SourceTrim` — same bundling rationale as
+ *  `EqBandPatch`. Either half may be omitted, but the wire has no partial
+ *  form (FC=62 always carries both), so a writer that sets one must re-send
+ *  the sibling's current value.
+ */
+export type SourceTrimPatch = {
+	trimDb: number | null,
+	delayMs: number | null,
+};
+
+/**
+ *  Per-source gain matching (vendor `Ana/Dante_gain_matching`) — each source
+ *  kind feeding a channel has its own trim and delay, independent of which
+ *  source is currently selected.
  */
 export type SourceTrims = {
 	analog: SourceTrim,
 	dante: SourceTrim,
-	aes3: SourceTrim,
 };
 
 /**  The values `speakerHash` is computed from. */

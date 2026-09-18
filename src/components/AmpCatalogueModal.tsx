@@ -322,7 +322,7 @@ export function AmpCatalogueModal({
             }
           }}
           style={{ paddingLeft: depth * LEVEL_OFFSET }}
-          className={`cursor-pointer rounded-[var(--amp-radius-xs)] px-[var(--amp-spacing-xs)] py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+          className={`cursor-pointer rounded-md px-[var(--amp-spacing-xs)] py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent ${
             isSelected ? "bg-accent-soft opacity-100" : "opacity-50 hover:opacity-80"
           }`}
         >
@@ -367,7 +367,7 @@ export function AmpCatalogueModal({
           }
         }}
         style={{ paddingLeft: depth * LEVEL_OFFSET }}
-        className="flex cursor-pointer flex-nowrap items-center gap-1 rounded-[var(--amp-radius-xs)] py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="flex cursor-pointer flex-nowrap items-center gap-1 rounded-md py-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
         <ChevronRight
           size={14}
@@ -450,7 +450,7 @@ export function AmpCatalogueModal({
                         <button
                           type="button"
                           onClick={() => setSpecsExpanded((v) => !v)}
-                          className="inline-flex w-fit cursor-pointer appearance-none items-center gap-1 rounded-[var(--amp-radius-xs)] border-0 bg-transparent p-0 font-[inherit] text-muted outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                          className="inline-flex w-fit cursor-pointer appearance-none items-center gap-1 rounded-sm border-0 bg-transparent p-0 font-[inherit] text-muted outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         >
                           <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
                             {specsExpanded ? "Hide more specs" : "Show more specs"}

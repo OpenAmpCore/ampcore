@@ -431,9 +431,7 @@ function ResponseGraph({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
-        // A surface, not a small control — matches the radius of the filter
-        // cards sitting under it rather than the small `--amp-radius-sm`.
-        className="rounded-[var(--radius-lg)]"
+        className="rounded-lg"
         style={{
           backgroundColor: "var(--amp-color-dark-8)",
           display: "block",
@@ -914,7 +912,7 @@ function StripShell({
 }) {
   return (
     <div
-      className={`flex min-w-0 flex-col gap-1 rounded-[var(--radius-lg)] border p-1.5 transition-opacity duration-150 ${
+      className={`flex min-w-0 flex-col gap-1 rounded-lg border p-1.5 transition-opacity duration-150 ${
         dimmed && !selected ? "opacity-[0.55] hover:opacity-100" : ""
       }`}
       style={{

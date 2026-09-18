@@ -37,6 +37,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { CommitNumberInput } from "./CommitNumberInput";
+import { useConfirm } from "./ConfirmDialog";
 import { SimpleSelect } from "./SimpleSelect";
 import { FIELD_INPUT } from "./fieldClasses";
 import { EqEditor } from "./EqEditor";
@@ -68,6 +69,8 @@ import {
   type AmpCapability_Serialize as AmpCapability,
   type AmpEditLock,
   type AmpModelCatalogEntry,
+  type AmpParamRanges,
+  type BackupPriority,
   type ChannelConfigSnapshot,
   type ChannelEq,
   type ChannelSource,
@@ -77,10 +80,13 @@ import {
   type Project,
   type SourceChannelCount,
   type SourceKind,
+  type SourceTrims,
   type Telemetry,
 } from "../lib/bindings";
 import {
+  buildLimiterThresholdVisuals,
   channelTelemetry,
+  FALLBACK_LIMITER,
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import {
@@ -98,6 +104,8 @@ import {
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
 import { usePreference } from "../lib/preferences";
+import { useListPreference } from "../lib/listPreferences";
+import { useElementWidth } from "../hooks/useElementWidth";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
  * Configure screen instance targets — the single seam that lets the same
@@ -197,18 +205,9 @@ const CONFIGURABLE_TABS = new Set(["input", "output", "routing"]);
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
   dante: "Dante",
-  aes3: "AES3",
   backup: "Backup",
 };
 
-/** Source picker for a single channel — a flat list for single-channel
- * kinds (e.g. AES3), a hover sub-menu for multi-channel kinds (e.g. 4
- * physical Analog inputs on a 4-channel amp) so picking "Analog" also picks
- * *which* analog input feeds this channel. */
-/** Source picker for a single digital input slot (`channelIndex`). Only
- * patchable kinds (Analog) get a free sub-menu of every physical input —
- * a non-patchable kind (Dante) is hard-wired 1:1 to this slot, so it's a
- * single fixed option ("Dante-N"), not a choice. */
 /** Width of the Routing tab's Source column — wider than a strip tile, since
  * it holds a source name rather than a short number. The grid column reads
  * this too, so the tile always fills its column exactly. */
@@ -229,89 +228,216 @@ const SOURCE_TILE_WIDTH = 150;
 const POPOVER_SLOTS = popoverVariants();
 const DROPDOWN_SLOTS = dropdownVariants();
 
+/** The amp's own source-code space, shared by `FC_SOURCE_SELECT` (11) and the
+ * backup priority struct (FC=80) — `BackupPriority.first`/`second` are raw
+ * codes, not `SourceKind`s, because that is how the amp stores them. Backup
+ * has no code of its own: it is the failover *state*, not a selectable
+ * input. */
+const SOURCE_CODES: Partial<Record<SourceKind, number>> = { analog: 0, dante: 1 };
+
+/** `AmpChannel.sourceTrims`/`backupPriority` are `#[serde(default)]` on the
+ * Rust side, so a channel from a project file written before they existed
+ * arrives without them. */
+const DEFAULT_SOURCE_TRIMS: SourceTrims = {
+  analog: { trimDb: 0, delayMs: 0 },
+  dante: { trimDb: 0, delayMs: 0 },
+};
+
+const DEFAULT_BACKUP_PRIORITY: BackupPriority = { enabled: false, first: 0, second: 1, thresholdDb: -80 };
+
+const SOURCE_KIND_BY_CODE: Record<number, SourceKind> = { 0: "analog", 1: "dante" };
+
+/** One labelled row of the source editor. */
+function EditorRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{label}</span>
+      <div className="w-[104px] shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** Source editor for one channel — the Routing tab's Source cell.
+ *
+ * A popover rather than extra grid columns: the matrix beside it already has
+ * an irreducible width and scrolls sideways, so four more columns of Delay /
+ * Trim / Backup would cost real horizontal room on a restored-down window.
+ *
+ * Every available source's trim and delay stay editable regardless of which
+ * one is selected — that independence is the point of per-source values (the
+ * amp keeps a pair per source, and the vendor UI lets you pre-trim a source
+ * you are about to switch to). */
 function SourcePicker({
   source,
   sourceCounts,
   channelIndex,
+  sourceTrims,
+  backupPriority,
+  paramRanges,
   onSelect,
+  onTrimChange,
+  onBackupChange,
 }: {
   source: ChannelSource;
   sourceCounts: SourceChannelCount[];
   channelIndex: number;
+  sourceTrims: SourceTrims;
+  backupPriority: BackupPriority;
+  paramRanges: AmpParamRanges;
   onSelect: (kind: SourceKind, index: number) => Promise<ActionResult>;
+  onTrimChange: (kind: SourceKind, trimDb: number, delayMs: number) => Promise<ActionResult>;
+  onBackupChange: (first: number, second: number, enabled: boolean, thresholdDb: number) => Promise<ActionResult>;
 }) {
-  // The tile only opens the menu; the write fires from a menu item, so the
-  // tile follows this controller rather than its own click.
   const feedback = useActionFeedback();
-  const select = (kind: SourceKind, index: number) =>
-    void feedback.track(onSelect(kind, index));
-  const [menuOpen, setMenuOpen] = useState(false);
-  const triggerRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+
+  const selectable = sourceCounts.filter((sc) => SOURCE_CODES[sc.kind] !== undefined);
+  // `builtin_topology` only offers Dante on a Dante-fitted amp, so a second
+  // selectable source is exactly the condition for backup being meaningful.
+  const backupAvailable = selectable.length > 1;
+
+  const trimFor = (kind: SourceKind) => (kind === "dante" ? sourceTrims.dante : sourceTrims.analog);
+  const trimRange = (kind: SourceKind) =>
+    kind === "analog" ? paramRanges.sourceTrimAnalogDb : paramRanges.sourceTrimDigitalDb;
+
+  const primaryCode = backupPriority.first;
+  // With two sources the fallback is never a free choice, so it is derived
+  // rather than offered — matching the vendor, whose third priority slot is
+  // likewise computed and never sent.
+  const complementOf = (code: number) => (code === 0 ? 1 : 0);
 
   return (
-    <>
-      {/* `flex` keeps the wrapper exactly the tile's height — see the note in
-          `TilePopover`, which hits the same inline-strut trap. */}
-      <div ref={triggerRef} className="flex">
+    <TilePopover
+      opened={open}
+      onOpenChange={setOpen}
+      width={260}
+      placement="bottom"
+      trigger={
         <StatEditorTile
           width={SOURCE_TILE_WIDTH}
           value={SOURCE_LABELS[source.kind]}
           label={`Input ${source.index + 1}`}
           visualValidation={feedback}
-          onClick={() => setMenuOpen((o) => !o)}
+          onClick={() => setOpen((o) => !o)}
         />
-      </div>
-      <Dropdown.Popover
-        triggerRef={triggerRef}
-        isOpen={menuOpen}
-        onOpenChange={setMenuOpen}
-        placement="bottom start"
-        className={`${DROPDOWN_SLOTS.popover()} min-w-[180px]`}>
-        <Dropdown.Menu
-          className={DROPDOWN_SLOTS.menu()}
-          onAction={(key: string | number) => {
-            const [kind, indexStr] = String(key).split(":");
-            if (indexStr === "submenu") return;
-            select(kind as SourceKind, Number(indexStr));
-            setMenuOpen(false);
-          }}
-        >
-          {sourceCounts.map((sc) => {
-            if (sc.patchable && sc.channelCount > 1) {
-              return (
-                <Dropdown.SubmenuTrigger key={sc.kind}>
-                  <Dropdown.Item id={`${sc.kind}:submenu`}>
-                    {SOURCE_LABELS[sc.kind]}
-                    <Dropdown.SubmenuIndicator />
-                  </Dropdown.Item>
-                  <Dropdown.Popover
-                    placement="right top"
-                    className={`${DROPDOWN_SLOTS.popover()} min-w-[140px]`}
+      }
+    >
+      <div className="flex flex-col gap-3">
+        {selectable.map((sc) => {
+          const isActive = source.kind === sc.kind;
+          const trim = trimFor(sc.kind);
+          // A non-patchable kind is wired 1:1 to this slot (Dante channel N
+          // feeds digital input N); only Analog is freely patchable.
+          const fixedIndex = sc.patchable ? source.index : channelIndex;
+          return (
+            <div key={sc.kind} className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  aria-label={`Select ${SOURCE_LABELS[sc.kind]}`}
+                  onClick={() => void feedback.track(onSelect(sc.kind, fixedIndex))}
+                  className="flex cursor-pointer items-center gap-2 border-0 bg-transparent p-0"
+                >
+                  <span
+                    className="flex size-3.5 items-center justify-center rounded-full border border-solid"
+                    style={{ borderColor: isActive ? "var(--accent)" : "var(--amp-color-default-border)" }}
                   >
-                    <Dropdown.Menu className={DROPDOWN_SLOTS.menu()}>
-                      {Array.from({ length: sc.channelCount }).map((_, i) => (
-                        <Dropdown.Item key={i} id={`${sc.kind}:${i}`}>
-                          {SOURCE_LABELS[sc.kind]} {i + 1}
-                        </Dropdown.Item>
-                      ))}
-                    </Dropdown.Menu>
-                  </Dropdown.Popover>
-                </Dropdown.SubmenuTrigger>
-              );
-            }
-            // Not patchable (or only ever has one physical channel): a single
-            // fixed option, pinned to this slot's own index for non-patchable
-            // kinds (e.g. Dante channel N always feeds digital input N).
-            const fixedIndex = sc.patchable ? 0 : channelIndex;
-            return (
-              <Dropdown.Item key={sc.kind} id={`${sc.kind}:${fixedIndex}`}>
-                {SOURCE_LABELS[sc.kind]} {fixedIndex + 1}
-              </Dropdown.Item>
-            );
-          })}
-        </Dropdown.Menu>
-      </Dropdown.Popover>
-    </>
+                    {isActive && <span className="size-2 rounded-full" style={{ background: "var(--accent)" }} />}
+                  </span>
+                  <span style={{ fontWeight: isActive ? 600 : 400 }}>{SOURCE_LABELS[sc.kind]}</span>
+                </button>
+                {sc.patchable && sc.channelCount > 1 && (
+                  <div className="ml-auto w-[88px]">
+                    <SimpleSelect
+                      data={Array.from({ length: sc.channelCount }).map((_, i) => ({
+                        value: String(i),
+                        label: `${SOURCE_LABELS[sc.kind]} ${i + 1}`,
+                      }))}
+                      value={String(isActive ? source.index : fixedIndex)}
+                      onChange={(next) => next !== null && void feedback.track(onSelect(sc.kind, Number(next)))}
+                    />
+                  </div>
+                )}
+              </div>
+              <EditorRow label="Delay">
+                <CommitNumberInput
+                  value={trim.delayMs ?? 0}
+                  min={paramRanges.sourceDelayMs.min ?? 0}
+                  max={paramRanges.sourceDelayMs.max ?? 30}
+                  step={0.01}
+                  suffix="ms"
+                  showStepper
+                  onCommit={(delayMs) => void feedback.track(onTrimChange(sc.kind, trim.trimDb ?? 0, delayMs))}
+                />
+              </EditorRow>
+              <EditorRow label="Trim">
+                <CommitNumberInput
+                  value={trim.trimDb ?? 0}
+                  min={trimRange(sc.kind).min ?? -18}
+                  max={trimRange(sc.kind).max ?? 18}
+                  step={0.1}
+                  suffix="dB"
+                  showStepper
+                  onCommit={(trimDb) => void feedback.track(onTrimChange(sc.kind, trimDb, trim.delayMs ?? 0))}
+                />
+              </EditorRow>
+            </div>
+          );
+        })}
+
+        {backupAvailable && (
+          <div
+            className="flex flex-col gap-1.5 border-0 border-t border-solid pt-3"
+            style={{ borderColor: "var(--amp-color-default-border)" }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ fontWeight: 500 }}>Backup</span>
+              <Switch
+                size="sm"
+                isSelected={backupPriority.enabled}
+                onChange={(enabled) =>
+                  void feedback.track(
+                    onBackupChange(primaryCode, complementOf(primaryCode), enabled, backupPriority.thresholdDb),
+                  )
+                }
+              />
+            </div>
+            <EditorRow label="Primary">
+              <SimpleSelect
+                data={selectable.map((sc) => ({ value: String(SOURCE_CODES[sc.kind]), label: SOURCE_LABELS[sc.kind] }))}
+                value={String(primaryCode)}
+                onChange={(next) => {
+                  if (next === null) return;
+                  const first = Number(next);
+                  void feedback.track(
+                    onBackupChange(first, complementOf(first), backupPriority.enabled, backupPriority.thresholdDb),
+                  );
+                }}
+              />
+            </EditorRow>
+            <EditorRow label="Threshold">
+              <CommitNumberInput
+                value={backupPriority.thresholdDb}
+                min={paramRanges.backupThresholdDb.min ?? -80}
+                max={paramRanges.backupThresholdDb.max ?? 0}
+                step={1}
+                suffix="dB"
+                showStepper
+                onCommit={(thresholdDb) =>
+                  void feedback.track(
+                    onBackupChange(primaryCode, complementOf(primaryCode), backupPriority.enabled, thresholdDb),
+                  )
+                }
+              />
+            </EditorRow>
+            <span style={{ fontSize: 10, color: "var(--amp-color-dimmed)" }}>
+              Falls back to {SOURCE_LABELS[SOURCE_KIND_BY_CODE[complementOf(primaryCode)] ?? "analog"]} when the primary
+              drops below the threshold.
+            </span>
+          </div>
+        )}
+      </div>
+    </TilePopover>
   );
 }
 
@@ -412,7 +538,7 @@ function TabSkeleton({
             {Array.from({ length: 6 }).map((_, i) => (
               <div
                 key={i}
-                className="animate-pulse rounded-[var(--amp-radius-sm)]"
+                className="animate-pulse rounded-md"
                 style={{ height: 34, background: "var(--amp-color-default)" }}
               />
             ))}
@@ -427,7 +553,7 @@ function TabSkeleton({
             {Array.from({ length: 8 }).map((_, i) => (
               <div
                 key={i}
-                className="animate-pulse rounded-[var(--amp-radius-md)]"
+                className="animate-pulse rounded-md"
                 style={{ height: 80, background: "var(--amp-color-default)" }}
               />
             ))}
@@ -493,18 +619,50 @@ const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map(
  * `levelDb` is `null` for a Project source, before the first heartbeat, and
  * for a channel with no signal — all of which render fully unlit, the same
  * as a real reading at the floor. The neighbouring stat tile reads "—"
- * rather than a number, which is what keeps those cases distinguishable. */
+ * rather than a number, which is what keeps those cases distinguishable.
+ *
+ * `limiterThresholds`, when given (only the Output tab passes it, behind the
+ * "limiter" option of "Enable limiter threshold lines in meters"), draws that
+ * channel's RMS/peak limiter lines and bands on top of the plain scale —
+ * see `buildLimiterThresholdVisuals` in `channelTelemetry.ts`. This
+ * component measures its own rendered width (`useElementWidth`) to feed that
+ * function's collision-avoidance, since it's a fluid flex item with no width
+ * known at render time, unlike the Limiter tab's fixed-height meter.
+ *
+ * `peakHold` has no default here — every call site passes it explicitly from
+ * "Enable peak hold in meters", so a new caller can't silently inherit an
+ * on/off state meant for a different tab. */
 function ChannelLevelMeter({
   levelDb,
   disabled,
   wide,
+  peakHold,
+  limiterThresholds,
 }: {
   levelDb: number | null;
   disabled?: boolean;
   wide?: boolean;
+  peakHold: boolean;
+  limiterThresholds?: {
+    rmsThresholdVrms: number;
+    peakThresholdVp: number;
+    ratedRmsVoltage: number | null;
+  };
 }) {
+  const [meterRef, meterWidth] = useElementWidth<HTMLDivElement>();
+  const thresholds = limiterThresholds
+    ? buildLimiterThresholdVisuals(
+        limiterThresholds.rmsThresholdVrms,
+        limiterThresholds.peakThresholdVp,
+        limiterThresholds.ratedRmsVoltage,
+        METER_FLOOR_DB,
+        meterWidth !== null ? { pixelsPerDb: meterWidth / (0 - METER_FLOOR_DB) } : undefined,
+      )
+    : null;
+
   return (
     <div
+      ref={meterRef}
       className="min-w-0"
       style={{
         // Basis `0`, not a width: the meter claims only what is left after
@@ -526,8 +684,9 @@ function ChannelLevelMeter({
         value={levelDb ?? METER_FLOOR_DB}
         gradient={DEFAULT_LEVEL_GRADIENT}
         thickness={24}
-        marks={LEVEL_MARKS}
-        peakHold
+        marks={thresholds ? [...LEVEL_MARKS, ...thresholds.marks] : LEVEL_MARKS}
+        zones={thresholds?.zones}
+        peakHold={peakHold}
         disabled={disabled}
       />
     </div>
@@ -601,10 +760,7 @@ function RenameableLabel({
             aria-label={`Rename channel (${name && name.length > 0 ? name : defaultLabel})`}
             className={`inline-flex min-w-0 shrink cursor-pointer appearance-none items-center border-0 bg-transparent px-1.5 py-0.5 font-inherit transition-colors duration-200 ${STAT_TILE_FOCUS}`}
             style={{
-              // Field radius, not `--amp-radius-sm`: this bordered button
-              // sits directly above the `StatTiles` row (which uses the same
-              // radius) and should read as one family with it.
-              borderRadius: "var(--radius-field)",
+              borderRadius: "var(--radius-md)",
               border: "1px solid var(--amp-color-default-border)",
             }}
           >
@@ -694,6 +850,7 @@ function InputChannelRow({
   const muted = channel.inputMuted ?? false;
   const delayInMs = channel.delayInMs ?? 0;
   const eqActive = activeFilterCount(channel.inputEq);
+  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
 
   return (
     <div>
@@ -705,7 +862,11 @@ function InputChannelRow({
         trailing={<InputClipPill clipping={telemetry.inputClipping} raw={telemetry.inputStateRaw} />}
       />
       <div className="flex items-center gap-2">
-        <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
+        <ChannelLevelMeter
+          levelDb={telemetry.inputDbv}
+          disabled={muted}
+          peakHold={peakHoldSurfaces.includes("input")}
+        />
         {/* Own wrapping cluster, same as the output strip — see the note
          * there on why the tiles don't share the meter's row. */}
         <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -808,7 +969,7 @@ function ChannelRail({
             type="button"
             key={channel.channelIndex}
             onClick={() => onSelectChannel(channel.channelIndex)}
-            className={`appearance-none bg-transparent p-1 font-inherit rounded-[var(--amp-radius-sm)] border ${
+            className={`appearance-none bg-transparent p-1 font-inherit rounded-md border ${
               isActive
                 ? "border-[var(--accent)] bg-[var(--accent-soft)]"
                 : "border-transparent"
@@ -940,6 +1101,7 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
 function OutputChannelRow({
   channel,
   telemetry,
+  ratedRmsVoltage,
   trimMin,
   trimMax,
   volumeMin,
@@ -963,6 +1125,9 @@ function OutputChannelRow({
 }: {
   channel: AmpAssignment["channels"][number];
   telemetry: ChannelTelemetry;
+  /** For the limiter threshold lines on this row's meter — see
+   * `capability.topology.ratedRmsVoltage` at the call site. */
+  ratedRmsVoltage: number | null;
   trimMin: number | null;
   trimMax: number | null;
   volumeMin: number | null;
@@ -1015,6 +1180,10 @@ function OutputChannelRow({
   const muted = channel.outputMuted ?? false;
   const powerMode = channel.powerMode ?? "lowOhm";
   const eqActive = activeFilterCount(channel.outputEq);
+  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
+  const showLimiterThresholds = limiterThresholdSurfaces.includes("output");
+  const limiter = channel.limiter ?? FALLBACK_LIMITER;
 
   return (
     <div>
@@ -1036,6 +1205,16 @@ function OutputChannelRow({
           levelDb={telemetry.outputLevelDb}
           disabled={muted}
           wide
+          peakHold={peakHoldSurfaces.includes("output")}
+          limiterThresholds={
+            showLimiterThresholds
+              ? {
+                  rmsThresholdVrms: limiter.rms.thresholdVrms ?? 0,
+                  peakThresholdVp: limiter.peak.thresholdVp ?? 0,
+                  ratedRmsVoltage,
+                }
+              : undefined
+          }
         />
         {/* The tiles wrap as their own cluster, never mixed in with the meter.
          * Every tile is exactly `STAT_TILE_W`, so a wrapped line starts a new
@@ -1161,6 +1340,7 @@ function OutputChannelRow({
           <StatEditorTile
             label="FIR"
             opens="view"
+            modified={!(channel.firBypassed ?? false)}
             icon={<Waves size={16} />}
             onClick={onOpenFir}
           />
@@ -1386,7 +1566,7 @@ function BridgePairSidebar({
     <button
       type="button"
       onClick={disabled ? undefined : onClick}
-      className={`appearance-none border-0 bg-transparent p-0 font-inherit rounded-[var(--amp-radius-sm)] ${disabled ? "cursor-not-allowed opacity-[0.45]" : ""}`}
+      className={`appearance-none border-0 bg-transparent p-0 font-inherit rounded-md ${disabled ? "cursor-not-allowed opacity-[0.45]" : "cursor-pointer"}`}
       style={{
         width: 28,
         display: "flex",
@@ -1403,8 +1583,16 @@ function BridgePairSidebar({
           fontSize: "var(--amp-font-size-xs)",
           fontWeight: 700,
           color: bridged ? "var(--amp-color-green-6)" : "var(--amp-color-dimmed)",
-          writingMode: "vertical-rl",
-          transform: "rotate(180deg)",
+          // A single rotation of ordinary horizontal text, not
+          // `writing-mode: vertical-rl` + `transform: rotate()` stacked —
+          // that compound rotation (the writing-mode itself already
+          // reorients the glyph run, then the transform rotates it again)
+          // is what Chromium/WebView2 renders through a blur-prone
+          // rasterize-then-rotate path under non-100% OS display scaling.
+          // One plain `rotate()` on horizontal text avoids that path
+          // entirely and stays crisp regardless of the button's height.
+          display: "inline-block",
+          transform: "rotate(-90deg)",
           whiteSpace: "nowrap",
         }}
       >
@@ -1444,6 +1632,7 @@ function OutputTab({
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const [subChannelIndex, setSubChannelIndex] = useState(0);
   const [view, setView] = useState<string | null>("output");
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const subChannel =
     assignment.channels.find((c) => c.channelIndex === subChannelIndex) ??
     assignment.channels[0];
@@ -1493,8 +1682,25 @@ function OutputTab({
   async function handleBridgeToggle(
     pairLeaderChannelIndex: number,
     bridged: boolean,
+    leaderLetter: string,
+    followerLetter: string,
   ) {
     if (!actions.setOutputBridge) return;
+    const ok = await confirm(
+      bridged
+        ? {
+            title: `Bridge outputs ${leaderLetter} and ${followerLetter}?`,
+            description: `${followerLetter} will follow ${leaderLetter} at combined power. Make sure it's wired for bridge mode first.`,
+            image: { light: "/bridged_graphic_b.png", dark: "/bridged_graphic_w.png" },
+            confirmLabel: "Bridge",
+          }
+        : {
+            title: `Unbridge outputs ${leaderLetter} and ${followerLetter}?`,
+            description: `${leaderLetter} and ${followerLetter} go back to driving separate speakers. Rewire them first.`,
+            confirmLabel: "Unbridge",
+          },
+    );
+    if (!ok) return;
     await actions.setOutputBridge(pairLeaderChannelIndex, bridged);
   }
 
@@ -1522,6 +1728,7 @@ function OutputTab({
 
   return (
     <div className="flex h-full min-w-0">
+      {confirmDialog}
       {(view === "fir" || view === "eq" || view === "limiter") && (
         <ChannelRail
           channels={assignment.channels}
@@ -1548,6 +1755,8 @@ function OutputTab({
               channelIndex={subChannel.channelIndex}
               label={letterLabel(subChannel)}
               capability={capability}
+              bypassed={subChannel.firBypassed ?? false}
+              onBypassChange={(next) => actions.setChannelFirBypass(subChannel.channelIndex, next)}
             />
           ) : view === "eq" ? (
             <div className="h-full overflow-y-auto">
@@ -1594,6 +1803,7 @@ function OutputTab({
                         channel.channelIndex,
                         ratedRmsVoltage,
                       )}
+                      ratedRmsVoltage={ratedRmsVoltage}
                       trimMin={trimRange.min}
                       trimMax={trimRange.max}
                       volumeMin={volumeRange.min}
@@ -1657,7 +1867,12 @@ function OutputTab({
                         bridged={bridged}
                         disabled={!actions.setOutputBridge}
                         onClick={() =>
-                          handleBridgeToggle(leader.channelIndex, !bridged)
+                          handleBridgeToggle(
+                            leader.channelIndex,
+                            !bridged,
+                            letterLabel(leader),
+                            letterLabel(follower),
+                          )
                         }
                       />
                       <div className="flex min-w-0 flex-1 flex-col gap-4">
@@ -1800,6 +2015,7 @@ function RoutingTab({
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const sourceCount = capability.topology.matrixInputCount;
   const sourceCounts = capability.topology.sourceCounts;
+  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
   const [hoveredCell, setHoveredCell] = useState<{
     channelIndex: number;
     sourceIndex: number;
@@ -1812,6 +2028,27 @@ function RoutingTab({
   ) {
     if (!actions.setChannelSource) return ACTION_UNAVAILABLE;
     return actions.setChannelSource(channelIndex, kind, index);
+  }
+
+  async function handleSourceTrimChange(
+    channelIndex: number,
+    kind: SourceKind,
+    trimDb: number,
+    delayMs: number,
+  ) {
+    if (!actions.setSourceTrim) return ACTION_UNAVAILABLE;
+    return actions.setSourceTrim(channelIndex, kind, trimDb, delayMs);
+  }
+
+  async function handleBackupChange(
+    channelIndex: number,
+    first: number,
+    second: number,
+    enabled: boolean,
+    thresholdDb: number,
+  ) {
+    if (!actions.setBackupPriority) return ACTION_UNAVAILABLE;
+    return actions.setBackupPriority(channelIndex, first, second, enabled, thresholdDb);
   }
 
   async function handleGainChange(
@@ -1930,8 +2167,17 @@ function RoutingTab({
                     source={channel.source}
                     sourceCounts={sourceCounts}
                     channelIndex={channel.channelIndex}
+                    sourceTrims={channel.sourceTrims ?? DEFAULT_SOURCE_TRIMS}
+                    backupPriority={channel.backupPriority ?? DEFAULT_BACKUP_PRIORITY}
+                    paramRanges={capability.paramRanges}
                     onSelect={(kind, index) =>
                       handleSourceChange(channel.channelIndex, kind, index)
+                    }
+                    onTrimChange={(kind, trimDb, delayMs) =>
+                      handleSourceTrimChange(channel.channelIndex, kind, trimDb, delayMs)
+                    }
+                    onBackupChange={(first, second, enabled, thresholdDb) =>
+                      handleBackupChange(channel.channelIndex, first, second, enabled, thresholdDb)
                     }
                   />
                   <div />
@@ -2014,6 +2260,7 @@ function RoutingTab({
                           ratedRmsVoltage,
                         ).outputLevelDb
                       }
+                      peakHold={peakHoldSurfaces.includes("output")}
                     />
                   </div>
                 </Fragment>
@@ -2104,11 +2351,11 @@ function PresetSlotRow({
           : undefined,
       }}
     >
-      {/* Monospace and zero-padded so the numbers form a straight column
-       * down the list instead of drifting between 1 and 40. */}
+      {/* Tabular figures and zero-padded so the numbers form a straight
+       * column down the list instead of drifting between 1 and 40. */}
       <span
         className="shrink-0"
-        style={{ fontSize: "var(--amp-font-size-xs)", fontWeight: 700, fontFamily: "monospace", color: "var(--amp-color-dimmed)" }}
+        style={{ fontSize: "var(--amp-font-size-xs)", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "var(--amp-color-dimmed)" }}
       >
         {String(slot.index + 1).padStart(2, "0")}
       </span>

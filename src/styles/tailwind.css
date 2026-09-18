@@ -1,8 +1,8 @@
 @import "@heroui/react/styles";
-/* This app's own design tokens (colors, radius, spacing, font sizes) as
+/* This app's own design tokens (colors, spacing, font sizes) as
    plain CSS custom properties — see that file's header comment for why
    they're named `--amp-*` and frozen as static values. Every component
-   styles itself with these var(--amp-color-*)/var(--amp-radius-*)/etc.
+   styles itself with these var(--amp-color-*)/var(--amp-spacing-*)/etc.
    names directly. */
 @import "./design-tokens.css";
 
@@ -10,17 +10,143 @@
    (see @heroui/styles' variants/index.css) — the same attribute
    `src/lib/colorScheme.ts` sets, so no override is needed here. */
 
-/* Accent colour and corner radius are deliberately *not* set here: both are
-   single HeroUI knobs (`--accent`, `--radius`) that the user picks at runtime
-   from the title bar's appearance menu, so their defaults live in
-   `src/lib/appearance.ts` and are written onto `:root` at boot.
+/* Accent colour and the base corner radius are deliberately *not* set here:
+   both are single HeroUI knobs (`--accent`, `--radius`) that the user picks
+   at runtime from the title bar's appearance menu, so their defaults live in
+   `src/lib/appearance.ts` and are written onto `:root` at boot. Do not add a
+   `--color-accent-*` scale. */
 
-   Do not reintroduce a `--color-accent-*` scale or `--radius-xs..xl` in a
-   `@theme` block. HeroUI declares `--color-accent` and derives the whole
-   `--radius-*` scale from `--radius` via `@theme inline`; hardcoding the
-   named steps overrides only some of them (`--radius-2xl/3xl/4xl` and
-   `--radius-field` still derive), which is what made modals and popovers
-   visibly rounder than the app's own tiles. */
+/* The app's one UI font. Tailwind's base sets `html { font-family:
+   var(--default-font-family) }` → `var(--font-sans)`, and HeroUI inherits it,
+   so this single line is the whole switch. The font file is bundled (offline
+   desktop app, no CDN) by the `@fontsource-variable/inter` import in
+   `main.tsx`; to change fonts, swap that package and this family name.
+   Unlayered, so it wins over Tailwind's `@layer theme` default. */
+:root {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* The one radius scale, shadcn-style: a few tight steps, every one derived
+   from `--radius` by multiplication so the user's knob moves them all and
+   "Square" (0) squares everything but real circles.
+
+   Out of the box this was three disagreeing systems: HeroUI derives only
+   xs/xl/2xl-4xl/field from `--radius` (sm/md/lg stayed Tailwind's fixed
+   0.25/0.375/0.5rem), and its component CSS hardcodes its own large
+   multiples on top (buttons x3, cards x3, chips x2 …). The complete set is
+   redefined here — never just some steps, which is what previously left
+   modals rounder than tiles — and the component radii are mapped onto it in
+   the `@layer components` block below.
+
+   Pick a step by role, never by look:
+     xs  hairline bits (meter bars)
+     sm  small inline bits: chips, badges, checkboxes, kbd
+     md  controls: buttons, inputs, selects, tabs, menu items, tiles/cells
+     lg  floating panels: popovers, dropdowns, tooltips; graph frames
+     xl  cards, modals, dialogs, toasts, alerts
+     full  true circles/pills only (dots, switches, slider thumbs)
+
+   Unlayered, so it wins over HeroUI's `@layer theme` declarations. */
+:root {
+  --radius-xs: calc(var(--radius) * 0.25);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.5);
+  --radius-2xl: var(--radius-xl);
+  --radius-3xl: var(--radius-xl);
+  --radius-4xl: var(--radius-xl);
+  --field-radius: var(--radius-md);
+}
+
+/* HeroUI's component radii, remapped onto the scale above. Same layer as
+   HeroUI's own rules and declared after them, so these win — while Tailwind
+   utilities (`@layer utilities`) on a call site, e.g. the edge-to-edge
+   banner `Alert`s' `rounded-none`, still win over these. Circles/pills
+   (switch, slider and color-slider thumbs/tracks, avatars) are left alone. */
+@layer components {
+  .button,
+  .button-group--horizontal .button:first-child:last-child,
+  .button-group--vertical .button:first-child:last-child,
+  .toggle-button,
+  .toggle-button-group--detached .toggle-button,
+  .toggle-button-group--horizontal .toggle-button:first-child:last-child,
+  .toggle-button-group--vertical .toggle-button:first-child:last-child,
+  .tabs__tab,
+  .tabs__indicator,
+  .menu-item,
+  .list-box-item,
+  .select__clear-button,
+  .autocomplete__clear-button,
+  .close-button,
+  .modal__icon,
+  .alert-dialog__icon {
+    border-radius: var(--radius-md);
+  }
+
+  /* A group's outer corners only; HeroUI squares the inner ones itself. */
+  .button-group--horizontal .button:first-child,
+  .toggle-button-group--horizontal .toggle-button:first-child {
+    border-start-start-radius: var(--radius-md);
+    border-end-start-radius: var(--radius-md);
+  }
+  .button-group--horizontal .button:last-child,
+  .toggle-button-group--horizontal .toggle-button:last-child {
+    border-start-end-radius: var(--radius-md);
+    border-end-end-radius: var(--radius-md);
+  }
+  .button-group--vertical .button:first-child,
+  .toggle-button-group--vertical .toggle-button:first-child {
+    border-top-left-radius: var(--radius-md);
+    border-top-right-radius: var(--radius-md);
+  }
+  .button-group--vertical .button:last-child,
+  .toggle-button-group--vertical .toggle-button:last-child {
+    border-bottom-left-radius: var(--radius-md);
+    border-bottom-right-radius: var(--radius-md);
+  }
+
+  .tabs__list-container,
+  .popover,
+  .dropdown__popover,
+  .select__popover,
+  .combo-box__popover,
+  .autocomplete__popover,
+  .color-picker__popover,
+  .date-picker__popover,
+  .date-range-picker__popover,
+  .tooltip {
+    border-radius: var(--radius-lg);
+  }
+
+  .card,
+  .modal__dialog,
+  .alert-dialog__dialog,
+  .toast,
+  .alert,
+  .accordion--surface,
+  .table-root--primary {
+    border-radius: var(--radius-xl);
+  }
+  /* Same specificity as `.modal__dialog` above and HeroUI's own rule came
+     earlier, so restore it: full-screen (compact-window) modals stay square. */
+  .modal__dialog--full {
+    border-radius: 0;
+  }
+
+  .chip,
+  .badge,
+  .badge--sm,
+  .badge--lg,
+  .tag,
+  .tag--lg,
+  .kbd,
+  .link,
+  .checkbox__control,
+  .checkbox__control:before {
+    border-radius: var(--radius-sm);
+  }
+}
 
 /* Link Amp modal match strip (AmpLinkModal.tsx). */
 @keyframes link-fill {
@@ -121,4 +247,11 @@ body,
 #root {
   height: 100%;
   margin: 0;
+}
+
+/* Nothing else paints the page: without this it is transparent and the
+   webview's own (pitch-black in dark mode) canvas shows through. */
+html,
+body {
+  background: var(--background);
 }

@@ -131,7 +131,7 @@ function AmpEnd({
     <div className="flex shrink-0 flex-col items-center gap-1">
       <span
         key={pulseKey}
-        className={`rounded-[var(--amp-radius-sm)] ${
+        className={`rounded-full ${
           pulseKey ? "animate-[merge-pulse_900ms_ease-out_450ms_2] motion-reduce:animate-none" : ""
         }`}
       >

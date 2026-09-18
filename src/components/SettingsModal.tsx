@@ -4,7 +4,19 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Button, Chip, Modal, Spinner, Switch } from "@heroui/react";
 import { setPreference, usePreference } from "../lib/preferences";
-import { AppearanceControls } from "./AppearanceControls";
+import { setListPreference, useListPreference } from "../lib/listPreferences";
+import { MultiSelect } from "./MultiSelect";
+
+const PEAK_HOLD_OPTIONS = [
+  { value: "input", label: "Input" },
+  { value: "output", label: "Output" },
+  { value: "limiter", label: "Limiter" },
+];
+
+const LIMITER_THRESHOLD_OPTIONS = [
+  { value: "output", label: "Output" },
+  { value: "limiter", label: "Limiter" },
+];
 
 interface SettingsModalProps {
   opened: boolean;
@@ -35,11 +47,19 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
 }
 
 /** One label + control row. Every setting in this modal is this shape, so
- * the wrapping/spacing is decided once here rather than per row. */
+ * the wrapping/spacing is decided once here rather than per row.
+ *
+ * Never wraps onto two rows — `flex-nowrap` plus the modal's own width (see
+ * `Modal.Container`'s `size="lg"`) keep every label/control pair on one
+ * line. If the label text itself is too long for its shrunk share of the
+ * row, it wraps internally (`min-w-0`) rather than pushing the control onto
+ * its own line below. */
 function SettingRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <span style={{ fontSize: "var(--amp-font-size-sm)" }}>{label}</span>
+    <div className="flex flex-nowrap items-center justify-between gap-2">
+      <span className="min-w-0" style={{ fontSize: "var(--amp-font-size-sm)" }}>
+        {label}
+      </span>
       {children}
     </div>
   );
@@ -63,6 +83,8 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const autoUpdateChecks = usePreference("autoUpdateChecks");
   const showFingerprintMenu = usePreference("showFingerprintMenu");
   const showRawTelemetry = usePreference("showRawTelemetry");
+  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
 
   useEffect(() => {
     if (!opened) return;
@@ -116,7 +138,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
 
   return (
     <Modal.Backdrop isOpen={opened} onOpenChange={(open) => !open && onClose()}>
-      <Modal.Container placement="center">
+      <Modal.Container placement="center" size="lg">
         <Modal.Dialog>
           <Modal.Header>
             <Modal.Heading>App Settings</Modal.Heading>
@@ -124,10 +146,22 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
           </Modal.Header>
           <Modal.Body>
             <div className="flex flex-col gap-4">
-              <SettingsSection title="Appearance">
-                {/* Same controls as the title bar's appearance menu — one
-                 * component, so the two never drift apart. */}
-                <AppearanceControls />
+              <SettingsSection title="General">
+                <SettingRow label="Enable peak hold in meters">
+                  <MultiSelect
+                    data={PEAK_HOLD_OPTIONS}
+                    values={peakHoldSurfaces}
+                    onChange={(values) => setListPreference("peakHoldSurfaces", values)}
+                  />
+                </SettingRow>
+
+                <SettingRow label="Enable limiter threshold lines in meters">
+                  <MultiSelect
+                    data={LIMITER_THRESHOLD_OPTIONS}
+                    values={limiterThresholdSurfaces}
+                    onChange={(values) => setListPreference("limiterThresholdSurfaces", values)}
+                  />
+                </SettingRow>
               </SettingsSection>
 
               {/* Two developer-facing surfaces in the amp editor, off by default so

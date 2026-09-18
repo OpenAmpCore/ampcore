@@ -116,7 +116,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
                   <button
                     type="button"
                     onClick={() => onActiveTabChange(tabValue)}
-                    className={`w-full appearance-none bg-transparent p-1 font-inherit rounded-[var(--amp-radius-sm)] border ${
+                    className={`w-full appearance-none bg-transparent p-1 font-inherit rounded-md border ${
                       isActive
                         ? "border-[var(--accent)] bg-[var(--accent-soft)]"
                         : "border-transparent"

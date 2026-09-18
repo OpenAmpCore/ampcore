@@ -22,6 +22,43 @@ function targetKey(target: FingerprintTarget | undefined): string | null {
     : `live:${target.deviceId}`;
 }
 
+/** FIR stats exist only when the fingerprint came from the enriching live
+ * command — a project fingerprint has none at all, and a live one can still
+ * miss them on pre-1.1.8 firmware or a failed read. Each absence says which it
+ * is rather than showing a bare dash, since they mean different things. */
+function FirCell({ channel, offline }: { channel: ChannelFingerprint; offline: boolean }) {
+  const fir = channel.fir;
+  const dimmed = { color: "var(--amp-color-dimmed)" };
+
+  if (!fir) {
+    return (
+      <span
+        style={dimmed}
+        title={
+          offline
+            ? "FIR filters are read from the device — they are not stored in the project file."
+            : "Not read — FIR requires firmware 1.1.8 or newer."
+        }
+      >
+        —
+      </span>
+    );
+  }
+
+  if (!fir.loaded) {
+    return (
+      <span style={dimmed} title="Channel holds only the unit impulse — no filter loaded.">
+        none
+      </span>
+    );
+  }
+
+  const detail = [fir.name?.trim() || null, `zero ${(fir.timeZeroMs ?? 0).toFixed(3)} ms`]
+    .filter(Boolean)
+    .join(" · ");
+  return <span title={detail}>{fir.order} taps</span>;
+}
+
 /** Match/drift/none for the `_XXXX` hash carried in an output name. */
 function EmbeddedHashBadge({ channel }: { channel: ChannelFingerprint }) {
   if (channel.embeddedHash === null) {
@@ -93,7 +130,11 @@ export function FingerprintInspector({
     const call =
       target.kind === "project"
         ? commands.fingerprintProjectAmp(target.projectId, target.assignmentId)
-        : commands.fingerprintLiveDevice(target.deviceId);
+        : // The enriching variant: adds a FIR read per channel, which the
+          // synchronous command deliberately skips because the edit lock
+          // rebuilds it on every poll tick. This modal is manual, so the extra
+          // round trips are affordable here and nowhere else.
+          commands.fingerprintLiveDeviceWithFir(target.deviceId);
     call.then((result) => {
       if (cancelled) return;
       setLoading(false);
@@ -190,13 +231,14 @@ export function FingerprintInspector({
 
                 {fingerprint && (
                   <div className="min-w-0 overflow-x-auto">
-                    <table className="w-full border-collapse text-sm" style={{ minWidth: 420 }}>
+                    <table className="w-full border-collapse text-sm" style={{ minWidth: 500 }}>
                       <thead>
                         <tr className="border-b border-[var(--amp-color-default-border)]">
                           <th className="p-2 text-left">Out</th>
                           <th className="p-2 text-left">Speaker hash</th>
                           <th className="p-2 text-left">Output name</th>
                           <th className="p-2 text-left">Name hash</th>
+                          <th className="p-2 text-left">FIR</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -216,6 +258,12 @@ export function FingerprintInspector({
                             <td className="p-2">
                               <EmbeddedHashBadge channel={channel} />
                             </td>
+                            <td className="p-2">
+                              <FirCell
+                                channel={channel}
+                                offline={fingerprint.origin.kind === "offline"}
+                              />
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -224,7 +272,7 @@ export function FingerprintInspector({
                 )}
 
                 {fingerprint && (
-                  <pre className="max-h-[50vh] overflow-auto rounded-[var(--amp-radius-sm)] bg-[var(--amp-color-default)] p-2 font-mono text-sm">
+                  <pre className="max-h-[50vh] overflow-auto rounded-md bg-[var(--amp-color-default)] p-2 font-mono text-sm">
                     {json}
                   </pre>
                 )}

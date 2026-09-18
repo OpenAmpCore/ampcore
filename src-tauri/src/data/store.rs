@@ -6,7 +6,6 @@ use tauri::{AppHandle, Manager};
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use super::capability::cvr::builtin_topology;
-use super::common::EntryOrigin;
 use super::device_link::DeviceModelLink;
 use super::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
 
@@ -75,45 +74,6 @@ fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
     changed
 }
 
-/// Backfill for installs whose `amp_models.json` predates real topology data
-/// (when `AmpDspTopology` was an always-empty placeholder), or predates a
-/// field later added to `AmpDspTopology` (e.g. `source_counts` replacing
-/// `available_sources`). Scoped to `BuiltIn` origin only, same rationale as
-/// `migrate_dante_flag` — a user-defined model's hand-authored topology must
-/// never be overwritten. Recomputed from `builtin_topology` every load
-/// (deterministic from model/channel_count/is_dante) and compared
-/// field-for-field via `PartialEq`, so this is idempotent rather than a
-/// one-time migration, and self-updating — no per-field staleness check to
-/// remember to extend the next time `AmpDspTopology` grows a field.
-fn migrate_builtin_topology(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
-    let mut changed = false;
-    for m in amp_models.iter_mut() {
-        if m.origin != EntryOrigin::BuiltIn {
-            continue;
-        }
-        let expected = builtin_topology(&m.model, m.channel_count, m.is_dante);
-        if m.topology != expected {
-            m.topology = expected;
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// One-time backfill for installs with `amp_models.json` predating
-/// `is_dante`. Scoped to `BuiltIn` origin only — a user-defined model that
-/// happens to end in "D" should not be force-flagged as Dante.
-fn migrate_dante_flag(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
-    let mut changed = false;
-    for m in amp_models.iter_mut() {
-        if !m.is_dante && m.origin == EntryOrigin::BuiltIn && m.model.ends_with('D') {
-            m.is_dante = true;
-            changed = true;
-        }
-    }
-    changed
-}
-
 impl ProjectDataState {
     pub fn load(app: &AppHandle) -> Result<Self, String> {
         let data_dir = app
@@ -136,23 +96,14 @@ impl ProjectDataState {
         }
         let device_model_links = load_json_or_default(&data_dir.join("device_model_links.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
-        let migrated = migrate_dante_flag(&mut amp_models);
         let seeded = seed_builtin_amp_models(&mut amp_models);
-        let topology_migrated = migrate_builtin_topology(&mut amp_models);
-        if migrated || seeded || topology_migrated {
+        if seeded {
             save_amp_models(&data_dir, &amp_models)?;
         }
 
         let mut projects = load_projects(&data_dir)?;
         for project in projects.iter_mut() {
             let mut changed = false;
-            // Files below schema 11 still carry the removed speaker/Join
-            // fields (`speakerLibraryId`, `wayIndex`, `joinGroupId`). serde
-            // ignores them on load, so rewriting the file here is what strips
-            // them from disk — see `CURRENT_PROJECT_SCHEMA_VERSION`.
-            if project.schema_version < CURRENT_PROJECT_SCHEMA_VERSION {
-                changed = true;
-            }
             changed |= reconcile_project_matrix_sizes(project, &amp_models);
             changed |= reconcile_project_eq_band_sizes(project, &amp_models);
             if changed {
@@ -235,10 +186,7 @@ fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
             let contents = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let mut value: serde_json::Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-            backfill_channel_sources(&mut value);
-            backfill_label_into_device_name(&mut value);
-            let project: Project = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let project: Project = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
             projects.push(project);
         }
     }
@@ -249,53 +197,6 @@ fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
 /// carry a missing or `null` source; those load as Analog `channelIndex` — the
 /// same 1:1 default a new channel gets. Runs on the raw JSON because the typed
 /// `Project` can no longer represent "no source". Idempotent.
-fn backfill_channel_sources(project: &mut serde_json::Value) {
-    let Some(assignments) = project.get_mut("ampAssignments").and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-    for assignment in assignments {
-        let Some(channels) = assignment.get_mut("channels").and_then(|v| v.as_array_mut()) else {
-            continue;
-        };
-        for channel in channels {
-            let Some(channel) = channel.as_object_mut() else {
-                continue;
-            };
-            if channel.get("source").map_or(true, |source| source.is_null()) {
-                let index = channel.get("channelIndex").and_then(|v| v.as_u64()).unwrap_or(0);
-                channel.insert("source".to_string(), serde_json::json!({ "kind": "analog", "index": index }));
-            }
-        }
-    }
-}
-
-/// Schema 19 dropped `AmpAssignment.label` in favor of `device_name`. Files
-/// written before that may carry a `label` with no `deviceName`; this copies
-/// it over before the field disappears from the typed `Project`. Runs on the
-/// raw JSON, same rationale as `backfill_channel_sources`. Idempotent.
-fn backfill_label_into_device_name(project: &mut serde_json::Value) {
-    let Some(assignments) = project.get_mut("ampAssignments").and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-    for assignment in assignments {
-        let Some(assignment) = assignment.as_object_mut() else {
-            continue;
-        };
-        let device_name_empty = assignment
-            .get("deviceName")
-            .map_or(true, |v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
-        if !device_name_empty {
-            continue;
-        }
-        let label = assignment.get("label").and_then(|v| v.as_str()).map(str::to_string);
-        if let Some(label) = label {
-            if !label.trim().is_empty() {
-                assignment.insert("deviceName".to_string(), serde_json::Value::String(label));
-            }
-        }
-    }
-}
-
 fn load_json_or_default<T>(path: &Path) -> Result<T, String>
 where
     T: Default + serde::de::DeserializeOwned,

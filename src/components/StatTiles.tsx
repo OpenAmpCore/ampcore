@@ -45,12 +45,7 @@ import {
 const STAT_TILE_W = 72;
 const STAT_TILE_H = 52;
 const DEFAULT_BORDER = "var(--amp-color-default-border)";
-/** Tiles are button/field-shaped, so they use HeroUI's own field radius
- * (`--radius-field`, ~1.5x the base `--radius`) rather than the generic
- * `--amp-radius-sm` scale — that scale is meant for small chip/badge-sized
- * corners and reads visibly sharper than every real HeroUI control next to
- * it (buttons, selects, popovers all use their own oversized radii). */
-const TILE_RADIUS = "var(--radius-field)";
+const TILE_RADIUS = "var(--radius-md)";
 
 /** Tiles are the only focusable things in a strip now that readouts are
  * plain divs, so they need a visible focus ring — a plain reset `<button>`
@@ -107,8 +102,10 @@ function useTileFeedback(visualValidation: VisualValidation | undefined, onClick
 
 /** A passive telemetry display — level, volts, amps, temperature. Rendered
  * as a recessed <div>, not a button: nothing happens when you click it, so
- * it must not offer a border, a pointer cursor or a tab stop. Values are
- * monospaced so a live-updating number doesn't reflow its own tile. */
+ * it must not offer a border, a pointer cursor or a tab stop. Values use
+ * tabular figures (fixed-width digits within the app's own font, not a
+ * switch to a monospace typeface) so a live-updating number doesn't reflow
+ * its own tile. */
 export function StatReadout({ value, label }: { value: string; label: string }) {
   return (
     <div
@@ -121,7 +118,7 @@ export function StatReadout({ value, label }: { value: string; label: string }) 
       }}
     >
       <div className="flex h-full flex-col items-center justify-center gap-0.5">
-        <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontFamily: "monospace" }}>
+        <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
           {value}
         </span>
         <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{label}</span>
@@ -254,7 +251,7 @@ export const StatEditorTile = forwardRef<
           {icon ? (
             <span style={{ color, display: "flex" }}>{icon}</span>
           ) : (
-            <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontFamily: "monospace", color }}>
+            <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 700, fontVariantNumeric: "tabular-nums", color }}>
               {value}
             </span>
           )}

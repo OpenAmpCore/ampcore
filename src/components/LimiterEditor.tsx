@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { Button, Slider } from "@heroui/react";
-import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type Limiter } from "../lib/bindings";
+import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability } from "../lib/bindings";
 import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } from "./VuMeter";
-import { limiterThresholdToDb, type ChannelTelemetry } from "../lib/channelTelemetry";
+import {
+  buildLimiterThresholdVisuals,
+  FALLBACK_LIMITER,
+  type ChannelTelemetry,
+} from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
 import { FIELD_INPUT } from "./fieldClasses";
+import { useListPreference } from "../lib/listPreferences";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
@@ -13,40 +18,12 @@ const SLIDER_HEIGHT = 220;
  * renders at, so a channel with no telemetry sits unlit on both columns. */
 const LIMITER_METER_FLOOR = -40;
 
-/** Threshold marker colors on the Out dB column — the vivid ends of
- * `DEFAULT_LEVEL_GRADIENT` (its yellow and red stops run through
- * `vibrantColor`), so the lines read as belonging to the same scale they're
- * drawn on rather than as arbitrary UI accents. */
-const RMS_THRESHOLD_COLOR = "rgb(255, 237, 31)";
-const PEAK_THRESHOLD_COLOR = "rgb(255, 28, 28)";
-/** Shaded operating bands sit under the fill, so they have to stay readable
- * through the unlit track without competing with the bar itself. */
-const THRESHOLD_ZONE_OPACITY = 0.5;
-/** Left/right halves of the Out dB track, used only while the two threshold
- * lines would otherwise occlude each other (see `thresholdsCollide`). */
-const RMS_MARK_SPAN = [0, 0.5] as const;
-const PEAK_MARK_SPAN = [0.5, 1] as const;
-/** Vertical gap, in px, below which the two threshold lines are treated as
- * overlapping. A touch more than the 2px line height, so a near-miss splits
- * rather than rendering as one thick smear with a sliver of gap. */
-const MARK_COLLISION_PX = 3;
-
 /** Scale for the Out dB/Limit dB columns. `0` means rated max output on the
  * Out column and *no* gain reduction on the Limit column. */
 const LIMITER_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map((value) => ({
   value,
   label: String(value),
 }));
-
-/** `AmpChannel.limiter` is typed optional in TS (specta marks any
- * `#[serde(default = ...)]` field optional) even though the backend's
- * default constructor always populates it. Mirrors `default_limiter` in
- * `src-tauri/src/data/project.rs` so the editor never has to handle a
- * missing struct. */
-const FALLBACK_LIMITER: Limiter = {
-  rms: { enabled: false, thresholdVrms: 100, attackMs: 5, releaseMultiplier: 4 },
-  peak: { enabled: false, thresholdVp: 140, holdMs: 10, releaseMs: 50 },
-};
 
 /** RMS power into `ohms` from an RMS voltage threshold — `P = V^2 / R`. */
 function rmsPowerWatts(vrms: number, ohms: number): number {
@@ -134,6 +111,8 @@ export function LimiterEditor({
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
   const ohms = channel.ohms ?? 8;
   const ranges = capability.paramRanges;
+  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
 
   async function patch(fields: {
     rmsEnabled?: boolean;
@@ -230,75 +209,25 @@ export function LimiterEditor({
   // per-channel thresholds, not the bridge-doubled display values: the meter
   // shows this channel's own output level against its own rated voltage, so
   // a doubled threshold would sit ~6dB off on a bridged pair.
-  const rmsThresholdDb = limiterThresholdToDb(rmsThresholdVrms, "rms", ratedRmsVoltage);
-  const peakThresholdDb = limiterThresholdToDb(peakThresholdVp, "peak", ratedRmsVoltage);
-  // A threshold off the bottom of the scale is dropped rather than clamped —
-  // a line pinned to the floor would read as a threshold *at* -40dB.
-  const inScale = (db: number | null): db is number => db !== null && db >= LIMITER_METER_FLOOR && db <= 0;
-  // Two bands under the bar: red from the peak threshold up to 0dB (past
-  // peak protection), yellow between the two thresholds (RMS limiting, peak
-  // still clear). Both need their own threshold in scale to have a defined
-  // edge; the yellow band additionally needs the peak line, since that's
-  // where it starts.
   //
-  // Peak normally sits at or above RMS in dB, since the panel enforces
-  // `peakVp >= rmsVrms * √2` on every edit — but only on edit. Stored data
-  // can violate it (`FALLBACK_LIMITER`'s own 100Vrms/140Vp pair is 1.4V
-  // short of the floor, putting peak 0.1dB *below* RMS), so the two can
-  // cross. `VuMeter` orders each zone's ends itself rather than assuming
-  // `from < to`, which is what keeps that case rendering as a thin band
-  // instead of vanishing.
-  const outMeterZones: VuMeterZone[] = [
-    ...(inScale(peakThresholdDb)
-      ? [{ from: peakThresholdDb, to: 0, color: PEAK_THRESHOLD_COLOR, opacity: THRESHOLD_ZONE_OPACITY }]
-      : []),
-    ...(inScale(peakThresholdDb) && inScale(rmsThresholdDb)
-      ? [
-          {
-            from: rmsThresholdDb,
-            to: peakThresholdDb,
-            color: RMS_THRESHOLD_COLOR,
-            opacity: THRESHOLD_ZONE_OPACITY,
-          },
-        ]
-      : []),
-  ];
-  // Peak lands on exactly the same dB as RMS whenever it sits at its
-  // enforced floor of `rmsVrms * √2` — the panel's default state — so the
-  // collision test is measured in rendered pixels rather than in dB, and
-  // tracks the meter's real height and scale instead of a guessed epsilon.
-  const meterPxPerDb = SLIDER_HEIGHT / (0 - LIMITER_METER_FLOOR);
-  const thresholdsCollide =
-    inScale(rmsThresholdDb) &&
-    inScale(peakThresholdDb) &&
-    Math.abs(peakThresholdDb - rmsThresholdDb) * meterPxPerDb < MARK_COLLISION_PX;
-
-  const outMeterMarks: VuMeterMark[] = [
-    ...LIMITER_METER_MARKS,
-    // Full-width normally; half-width lanes only while the two lines would
-    // land on top of each other. Neither is ever nudged off its true value —
-    // the split is what makes a genuine tie readable as one yellow/red line.
-    ...(inScale(rmsThresholdDb)
-      ? [
-          {
-            value: rmsThresholdDb,
-            color: RMS_THRESHOLD_COLOR,
-            glow: true,
-            span: thresholdsCollide ? RMS_MARK_SPAN : undefined,
-          },
-        ]
-      : []),
-    ...(inScale(peakThresholdDb)
-      ? [
-          {
-            value: peakThresholdDb,
-            color: PEAK_THRESHOLD_COLOR,
-            glow: true,
-            span: thresholdsCollide ? PEAK_MARK_SPAN : undefined,
-          },
-        ]
-      : []),
-  ];
+  // `buildLimiterThresholdVisuals` (shared with the Output tab's meter, see
+  // `channelTelemetry.ts`) builds the zones and marks, splitting the two
+  // marks into side-by-side halves when they'd otherwise land on top of each
+  // other — the `pixelsPerDb` this passes comes from this meter's fixed
+  // 220px height, which is what makes that collision check meaningful here.
+  // Gated on "limiter" in "Enable limiter threshold lines in meters" — off,
+  // the Out dB column keeps its plain scale ticks and no bands.
+  const showLimiterThresholds = limiterThresholdSurfaces.includes("limiter");
+  const { zones: outMeterZones, marks: thresholdMarks } = showLimiterThresholds
+    ? buildLimiterThresholdVisuals(
+        rmsThresholdVrms,
+        peakThresholdVp,
+        ratedRmsVoltage,
+        LIMITER_METER_FLOOR,
+        { pixelsPerDb: SLIDER_HEIGHT / (0 - LIMITER_METER_FLOOR) },
+      )
+    : { zones: [], marks: [] };
+  const outMeterMarks: VuMeterMark[] = [...LIMITER_METER_MARKS, ...thresholdMarks];
 
   async function handleOhmsChange(value: number) {
     if (!actions.setChannelOhms) return;
@@ -349,7 +278,7 @@ export function LimiterEditor({
         <LimiterMeterColumn
           label="Out dB"
           gradient
-          peakHold
+          peakHold={peakHoldSurfaces.includes("limiter")}
           levelDb={telemetry?.outputLevelDb ?? null}
           valueText={fmtDb(telemetry?.outputLevelDb ?? null)}
           marks={outMeterMarks}

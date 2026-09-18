@@ -364,7 +364,7 @@ export function AmpLinkModal({
                 </div>
                 {devices.length === 0 ? (
                   <div
-                    className="flex flex-col items-center justify-center gap-2 rounded-[var(--amp-radius-sm)] border border-dashed border-[var(--amp-color-default-border)]"
+                    className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--amp-color-default-border)]"
                     style={{ minHeight: 140 }}
                   >
                     <Spinner size="sm" />

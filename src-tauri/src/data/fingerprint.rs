@@ -34,8 +34,14 @@
 //!
 //! Pure status — standby, the last recalled preset's name, the front-panel
 //! knob lock — is carried in `AmpFingerprint.status` and shown, never hashed.
-//! Not covered at all: FIR coefficients (not in FC=27), the noise-gate
-//! threshold (no 1.1.8 readback), MAC/IP (identity, not config).
+//! FIR filter stats — the filter's name, effective tap count and zero-time —
+//! are shown, never hashed, and only when a caller has explicitly enriched the
+//! fingerprint via `attach_fir_stats`. They cannot be hashed while FIR
+//! coefficients are read-only and absent from the project file: a live amp with
+//! a filter loaded could never match its offline twin, which would lock the
+//! editor on a difference no push could resolve. Not covered at all: the FIR
+//! coefficients themselves (not in FC=27), the noise-gate threshold (no 1.1.8
+//! readback), MAC/IP (identity, not config).
 //!
 //! **What the JSON shows vs. what is hashed.** The JSON shows what the amp
 //! actually stores, in natural units, including a bypassed band's or a
@@ -71,6 +77,7 @@ use super::project::{
 };
 use crate::live::cvr::bridge::DeviceBridgeSnapshot;
 use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot};
+use crate::live::cvr::fir::ChannelFirSnapshot;
 use crate::live::cvr::protocol::detect_firmware_family;
 use crate::live::state::DiscoveredDevice;
 
@@ -100,7 +107,10 @@ use crate::live::state::DiscoveredDevice;
 ///
 /// 9: backup priority removed from the hash (still shown) — its trailer
 /// offset is unverified against hardware; see the module doc comment.
-pub const FINGERPRINT_VERSION: u8 = 9;
+///
+/// 10: AES3 removed (no supported model has it), dropping its trim/delay pair
+/// from every channel's digest.
+pub const FINGERPRINT_VERSION: u8 = 10;
 
 /// `_XXXX` — separator plus 4 hex chars appended to an output name.
 pub const HASH_SUFFIX_LEN: usize = 5;
@@ -283,6 +293,44 @@ pub struct ChannelAmpCanonical {
     pub backup_priority: BackupPriority,
 }
 
+/// Derived FIR facts for one output channel — shown for context, never hashed
+/// (see the module doc comment). Deliberately excludes the 512 coefficients:
+/// this is what a reader needs to tell two filters apart, not the filter.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFirStats {
+    /// `false` when the channel holds the unit impulse an empty channel keeps
+    /// (`order == 1`) — i.e. no real filter is loaded.
+    pub loaded: bool,
+    /// `None` when the amp replied with the 2048-byte nameless form.
+    pub name: Option<String>,
+    /// Taps minus trailing zeros — the vendor's "Order: N Taps".
+    pub order: u32,
+    pub time_zero_ms: f64,
+}
+
+/// Fills in `ChannelFingerprint.fir` from FC=43 reads, matched on channel
+/// index. Callers fetch the snapshots themselves — see `commands::fingerprint`.
+///
+/// Deliberately infallible, and deliberately never touches `missing`: a
+/// non-empty `missing` forces `amp_hash` to `None`, which would turn a FIR read
+/// that simply wasn't attempted into an unreadable amp and lock the editor. A
+/// channel with no snapshot just keeps `None`.
+pub fn attach_fir_stats(fingerprint: &mut AmpFingerprint, snapshots: &[ChannelFirSnapshot]) {
+    for snapshot in snapshots {
+        let Some(channel) = fingerprint.channels.iter_mut().find(|c| c.channel_index == snapshot.channel_index)
+        else {
+            continue;
+        };
+        channel.fir = Some(ChannelFirStats {
+            loaded: snapshot.order > 1,
+            name: snapshot.name.clone(),
+            order: snapshot.order,
+            time_zero_ms: snapshot.time_zero_ms,
+        });
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelFingerprint {
@@ -297,6 +345,10 @@ pub struct ChannelFingerprint {
     pub embedded_hash_matches: Option<bool>,
     pub speaker: SpeakerCanonical,
     pub amp_fields: ChannelAmpCanonical,
+    /// `None` unless a caller enriched this fingerprint with `attach_fir_stats`
+    /// — FIR needs its own FC=43 round trip per channel, so the ordinary
+    /// synchronous paths never populate it.
+    pub fir: Option<ChannelFirStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -412,7 +464,6 @@ impl<'a> ChannelInput<'a> {
             source_trims: SourceTrims {
                 analog: SourceTrim { trim_db: config.analog_trim_db as f64, delay_ms: config.analog_delay_ms as f64 },
                 dante: SourceTrim { trim_db: config.dante_trim_db as f64, delay_ms: config.dante_delay_ms as f64 },
-                aes3: SourceTrim { trim_db: config.aes3_trim_db as f64, delay_ms: config.aes3_delay_ms as f64 },
             },
             backup_priority: config.backup_priority,
         }
@@ -589,6 +640,7 @@ fn build(
             embedded_hash_matches,
             speaker,
             amp_fields,
+            fir: None,
         });
     }
 
@@ -732,7 +784,6 @@ fn canonical_amp_fields(input: &ChannelInput, matrix_input_count: u32) -> Channe
         source_trims: SourceTrims {
             analog: canonical_trim(input.source_trims.analog),
             dante: canonical_trim(input.source_trims.dante),
-            aes3: canonical_trim(input.source_trims.aes3),
         },
         backup_priority: input.backup_priority,
     }
@@ -790,11 +841,13 @@ fn power_mode_tag(mode: PowerMode) -> u8 {
     }
 }
 
+/// Tag 2 was AES3; the gap is left rather than renumbering `Backup` down,
+/// because these tags are hashed and shifting one would silently change every
+/// stored fingerprint beyond the `FINGERPRINT_VERSION` bump's intent.
 fn source_kind_tag(kind: SourceKind) -> u8 {
     match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
-        SourceKind::Aes3 => 2,
         SourceKind::Backup => 3,
     }
 }
@@ -967,7 +1020,7 @@ fn encode_channel_amp(h: &mut HashInput, channel_index: u32, speaker_hash: u16, 
     h.bool(fields.input_muted);
     h.bool(fields.output_muted);
     h.str(&fields.output_name_base);
-    for trim in [fields.source_trims.analog, fields.source_trims.dante, fields.source_trims.aes3] {
+    for trim in [fields.source_trims.analog, fields.source_trims.dante] {
         h.i32(steps(trim.trim_db, GAIN_STEPS));
         h.i32(steps(trim.delay_ms, DELAY_STEPS));
     }
@@ -1108,7 +1161,7 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Name", name);
         push_entry(&mut out, &group, "Mute", on_off(fields.input_muted));
         let trims = &fields.source_trims;
-        for (label, trim) in [("Analog trim", trims.analog), ("Dante trim", trims.dante), ("AES3 trim", trims.aes3)] {
+        for (label, trim) in [("Analog trim", trims.analog), ("Dante trim", trims.dante)] {
             push_entry(&mut out, &group, label, format!("{:+.2} dB · {:.2} ms", trim.trim_db, trim.delay_ms));
         }
         let priority = &fields.backup_priority;
@@ -1168,6 +1221,16 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Power mode", power_mode);
         push_entry(&mut out, &group, "Load", format!("{:.1} Ω", speaker.load_ohms));
         push_entry(&mut out, &group, "FIR", if speaker.fir_bypassed { "bypassed" } else { "active" });
+        if let Some(fir) = &channel.fir {
+            let value = if fir.loaded {
+                let name = fir.name.as_deref().unwrap_or("").trim();
+                let prefix = if name.is_empty() { String::new() } else { format!("{name} · ") };
+                format!("{prefix}{} taps · zero {:.3} ms", fir.order, fir.time_zero_ms)
+            } else {
+                "none loaded".to_string()
+            };
+            push_info(&mut out, &group, "FIR filter", value);
+        }
     }
 
     if fp.origin.kind == FingerprintSource::Online {
@@ -1373,6 +1436,59 @@ mod tests {
             firmware_family: Some("1.1.8".to_string()),
         };
         build(origin, identity, matrix_input_count, no_amp_settings(), inputs, Vec::new()).amp_hash
+    }
+
+    /// The one real corruption vector: FIR stats are shown but must never
+    /// reach the reduce path, or every existing hash comparison shifts.
+    #[test]
+    fn attaching_fir_stats_leaves_every_hash_untouched() {
+        let limiter = limiter();
+        let eq = eq(0.1, 1.41);
+        let origin = FingerprintOrigin {
+            kind: FingerprintSource::Offline,
+            project_id: None,
+            assignment_id: None,
+            device_id: None,
+            mac: None,
+            label: None,
+        };
+        let identity = AmpIdentity {
+            model: Some("DSP-1002".to_string()),
+            amp_model_id: None,
+            channel_count: 1,
+            firmware_family: Some("1.1.8".to_string()),
+        };
+        let mut fp =
+            build(origin, identity, 0, no_amp_settings(), vec![input(&eq, &limiter, 2.35)], Vec::new());
+        let before_amp = fp.amp_hash.clone();
+        let before_speaker: Vec<_> = fp.channels.iter().map(|c| c.speaker_hash.clone()).collect();
+
+        let snapshot = |order: u32| ChannelFirSnapshot {
+            channel_index: 0,
+            name: Some("lowpass".to_string()),
+            sample_rate_hz: 48_000,
+            max_taps: 512,
+            order,
+            time_zero_index: 256,
+            time_zero_ms: 5.333,
+            coefficients: vec![0.0; 512],
+            body_len: 2080,
+            received_at: 0.0,
+        };
+
+        attach_fir_stats(&mut fp, &[snapshot(257)]);
+        let stats = fp.channels[0].fir.as_ref().expect("channel 0 enriched");
+        assert!(stats.loaded);
+        assert_eq!(stats.order, 257);
+
+        assert_eq!(fp.amp_hash, before_amp);
+        assert_eq!(fp.channels.iter().map(|c| c.speaker_hash.clone()).collect::<Vec<_>>(), before_speaker);
+        // Enriching must never make the amp look unreadable.
+        assert!(fp.missing.is_empty());
+
+        // A channel holding only the unit impulse has no filter loaded.
+        attach_fir_stats(&mut fp, &[snapshot(1)]);
+        assert!(!fp.channels[0].fir.as_ref().unwrap().loaded);
     }
 
     #[test]

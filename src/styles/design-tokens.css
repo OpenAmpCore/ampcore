@@ -27,12 +27,8 @@
   --amp-color-white: #fff;
   --amp-color-black: #000;
   --amp-line-height: 1.55;
-  --amp-font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji;
-  --amp-font-family-monospace: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
-  --amp-font-family-headings: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji;
   --amp-heading-font-weight: 700;
   --amp-heading-text-wrap: wrap;
-  --amp-radius-default: var(--radius-xs);
   --amp-breakpoint-xs: 36em;
   --amp-breakpoint-sm: 48em;
   --amp-breakpoint-md: 62em;
@@ -58,14 +54,6 @@
   --amp-shadow-md: 0 2px 4px rgba(0, 0, 0, 0.14);
   --amp-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.16);
   --amp-shadow-xl: 0 4px 8px rgba(0, 0, 0, 0.18);
-  /* Aliases onto HeroUI's derived radius scale, so the many
-     `rounded-[var(--amp-radius-sm)]` call sites follow the user's `--radius`
-     choice instead of staying pinned while HeroUI's own components move. */
-  --amp-radius-xs: var(--radius-xs);
-  --amp-radius-sm: var(--radius-sm);
-  --amp-radius-md: var(--radius-md);
-  --amp-radius-lg: var(--radius-lg);
-  --amp-radius-xl: var(--radius-xl);
   --amp-font-weight-regular: 400;
   --amp-font-weight-medium: 600;
   --amp-font-weight-bold: 700;
@@ -392,6 +380,10 @@
   --amp-color-body: var(--amp-color-dark-7);
   /* See the light block above for why this is here. */
   --overlay: var(--amp-color-body);
+  /* Page background (painted on `html`/`body` in tailwind.css). Overrides
+     HeroUI's own dark `--background`; mirrored in index.html's pre-paint
+     script. */
+  --background: #0a0b0c;
   --amp-color-error: var(--amp-color-red-8);
   --amp-color-success: var(--amp-color-teal-8);
   --amp-color-placeholder: var(--amp-color-dark-3);

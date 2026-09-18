@@ -21,26 +21,25 @@
 
         var stored = ls.getItem("ampcore-color-scheme");
         var scheme = stored === "light" || stored === "dark" || stored === "auto" ? stored : "auto";
-        root.setAttribute(
-          "data-theme",
+        var resolved =
           scheme !== "auto"
             ? scheme
             : window.matchMedia("(prefers-color-scheme: dark)").matches
               ? "dark"
-              : "light",
-        );
+              : "light";
+        root.setAttribute("data-theme", resolved);
+        // Page background until the stylesheet loads (dark: design-tokens.css
+        // `--background`; light: HeroUI's own). `applyAppearance` clears this
+        // inline value at boot so theme switches afterwards aren't pinned.
+        root.style.background = resolved === "dark" ? "#0a0b0c" : "oklch(97.02% 0 0)";
 
-        var accents = {
-          blue: "oklch(0.6204 0.195 253.83)",
-          violet: "oklch(0.606 0.216 292.7)",
-          teal: "oklch(0.6 0.118 184.7)",
-          green: "oklch(0.627 0.165 149.2)",
-          amber: "oklch(0.606 0.117 66.3)",
-          rose: "oklch(0.616 0.212 12.9)",
-        };
-        var accent = accents[ls.getItem("ampcore-accent")] || accents.blue;
-        root.style.setProperty("--accent", accent);
-        root.style.setProperty("--accent-foreground", "var(--snow)");
+        // Accent is a single hue (0-359) on a pastel HSL ColorSlider — see
+        // `ACCENT_SATURATION`/`ACCENT_LIGHTNESS`/`DEFAULT_ACCENT_HUE` in
+        // appearance.ts, which these three numbers must stay in sync with.
+        var storedHue = Number(ls.getItem("ampcore-accent"));
+        var hue = ls.getItem("ampcore-accent") !== null && isFinite(storedHue) && storedHue >= 0 && storedHue < 360 ? storedHue : 217;
+        root.style.setProperty("--accent", "hsl(" + hue + " 65% 80%)");
+        root.style.setProperty("--accent-foreground", "oklch(0.32 0 0)");
 
         var radii = { square: "0rem", small: "0.25rem", default: "0.5rem", large: "0.875rem" };
         root.style.setProperty("--radius", radii[ls.getItem("ampcore-radius")] || radii.default);

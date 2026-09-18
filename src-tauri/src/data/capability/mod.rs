@@ -14,7 +14,6 @@ pub mod cvr;
 pub enum SourceKind {
     Analog,
     Dante,
-    Aes3,
     Backup,
 }
 

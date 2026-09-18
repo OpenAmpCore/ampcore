@@ -161,3 +161,13 @@ pub fn build_set_device_name(name: &str) -> Vec<u8> {
 pub fn build_set_source_trim(channel_index: u8, segment: u8, trim_db: f32, delay_ms: f32) -> Vec<u8> {
     super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms)
 }
+
+pub fn build_set_backup_priority(
+    channel_index: u8,
+    first: u8,
+    second: u8,
+    enabled: bool,
+    threshold_db: i8,
+) -> Vec<u8> {
+    super::write_v118::build_set_backup_priority(channel_index, first, second, enabled, threshold_db)
+}
