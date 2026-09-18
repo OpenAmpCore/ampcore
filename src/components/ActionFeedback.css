@@ -39,7 +39,7 @@
   opacity: 0;
   transform: scale(0.5);
   pointer-events: none;
-  color: var(--mantine-color-dimmed);
+  color: var(--amp-color-dimmed);
 }
 
 .action-feedback:not([data-status="idle"]) > .action-feedback__content {
@@ -53,12 +53,12 @@
 }
 
 .action-feedback[data-status="success"] > .action-feedback__indicator {
-  color: var(--mantine-color-green-6);
+  color: var(--amp-color-green-6);
   animation: action-feedback-pop calc(300ms * var(--af-s)) cubic-bezier(0.2, 0.9, 0.3, 1.3);
 }
 
 .action-feedback[data-status="error"] > .action-feedback__indicator {
-  color: var(--mantine-color-red-6);
+  color: var(--amp-color-red-6);
   animation: action-feedback-shake calc(320ms * var(--af-s)) ease-in-out calc(60ms * var(--af-s));
 }
 

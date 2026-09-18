@@ -44,15 +44,16 @@ use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqC
 pub enum SourceTrimFamily {
     Analog,
     Dante,
-    Aes3,
 }
 
 impl SourceTrimFamily {
+    /// Segment 2 is AES3, which this app dropped — the gap is deliberate.
+    /// These are the device's own numbers, so Dante stays 1 rather than
+    /// sliding up to fill it.
     pub fn segment(self) -> u8 {
         match self {
             SourceTrimFamily::Analog => 0,
             SourceTrimFamily::Dante => 1,
-            SourceTrimFamily::Aes3 => 2,
         }
     }
 }
@@ -336,17 +337,18 @@ fn plan_input(
     if config.source.map(|s| (s.kind, s.index)) != Some((planned.kind, planned.index)) {
         if planned.kind == SourceKind::Backup {
             // FC=11 selects a real input; backup is a state the amp enters on
-            // its own via the priority controls (FC=80, not ported).
+            // its own via the priority controls (FC=80, which this push
+            // deliberately does not drive — see `plan_input`'s note below).
             return Err(PushPlanError(format!(
                 "In {}: backup is a readback state, not something the amp can be told to select",
                 index + 1
             )));
         }
-        // Only an analog pick names a physical input; Dante/AES3 are wired
-        // 1:1 to their channel, so FC=79 would be meaningless for them.
+        // Only an analog pick names a physical input; Dante is wired 1:1 to
+        // its channel, so FC=79 would be meaningless for it.
         //
         // Which also makes any other index unreachable: `channel_config_v118::
-        // source` always reads Dante/AES3 back as `index = channel_index`, so
+        // source` always reads Dante back as `index = channel_index`, so
         // a project asking for a different one would be written, read back
         // changed, and leave the two fingerprints permanently apart. Better to
         // say so than to push and let the amp look stuck in mismatch.
@@ -381,7 +383,6 @@ fn plan_input(
     let trims = [
         (SourceTrimFamily::Analog, channel.source_trims.analog, config.analog_trim_db, config.analog_delay_ms),
         (SourceTrimFamily::Dante, channel.source_trims.dante, config.dante_trim_db, config.dante_delay_ms),
-        (SourceTrimFamily::Aes3, channel.source_trims.aes3, config.aes3_trim_db, config.aes3_delay_ms),
     ];
     for (family, planned, live_trim, live_delay) in trims {
         if trim_differs(&planned, live_trim, live_delay) {
@@ -393,6 +394,17 @@ fn plan_input(
             });
         }
     }
+
+    // `backup_priority` is intentionally absent, even though FC=80 is now
+    // implemented and reachable from the Routing tab. This push exists to
+    // make the two fingerprints agree, and backup is not hashed (its trailer
+    // read offset is still unverified against hardware), so a backup packet
+    // here could never move the comparison. Worse, `amp_merge` does not
+    // mirror backup device→project either, so the two sides can never be
+    // observed to agree: every push would re-send it, and for an amp whose
+    // owner never touched backup that means writing the struct default —
+    // `threshold_db: 0`, i.e. "fail over immediately". Adding it belongs with
+    // the fingerprint/merge change once the offset is confirmed, not before.
 
     // Names compare canonically: the project stores an unnamed channel as
     // `None` while the amp stores the literal default "In1", and those mean
@@ -804,8 +816,6 @@ mod tests {
             analog_delay_ms: 0.25,
             dante_trim_db: 0.0,
             dante_delay_ms: 0.0,
-            aes3_trim_db: -2.0,
-            aes3_delay_ms: 0.0,
             load_ohms: 4.0,
             backup_priority: BackupPriority { enabled: true, first: 1, second: 2, threshold_db: -80 },
         }
@@ -884,7 +894,6 @@ mod tests {
                 match family {
                     SourceTrimFamily::Analog => (config.analog_trim_db, config.analog_delay_ms) = (trim, delay),
                     SourceTrimFamily::Dante => (config.dante_trim_db, config.dante_delay_ms) = (trim, delay),
-                    SourceTrimFamily::Aes3 => (config.aes3_trim_db, config.aes3_delay_ms) = (trim, delay),
                 }
             }
             PushAction::EqChain { channel, direction, eq, wire: chain } => {

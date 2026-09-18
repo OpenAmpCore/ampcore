@@ -67,11 +67,9 @@ pub enum CvrFirmwareFamily {
 /// invites this: "the future live driver can reuse this exact function...
 /// do not duplicate this parsing there") rather than a narrow ad-hoc
 /// substring check, so every CVR-generation firmware gets bucketed instead
-/// of silently dropped. Any detected vNum below 119 — including 116
-/// (`VNUM_EXTENDED_EQ`) and 117 (`VNUM_PHONIC_VARIANT`, confirmed real: the
-/// vendor reference has `FlowChart\PHONIC\...117.xaml` files, i.e.
-/// Phonic-branded amps run CVR firmware v117) — routes to the V118 adapter
-/// as an honest best-effort, the same caveat already applied to
+/// of silently dropped. 118 is the baseline: any detected vNum below 119
+/// (including older strings such as 116/117) routes to the V118 adapter as
+/// an honest best-effort, the same caveat already applied to
 /// `channel_config_v119.rs`/`telemetry_v119.rs` reusing v118's parser. The
 /// precise raw string is untouched and still fully visible via
 /// `DiscoveredDevice.firmware_version` — this only changes which adapter

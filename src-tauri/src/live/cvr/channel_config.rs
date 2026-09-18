@@ -71,8 +71,6 @@ pub struct ChannelConfig {
     pub analog_delay_ms: f32,
     pub dante_trim_db: f32,
     pub dante_delay_ms: f32,
-    pub aes3_trim_db: f32,
-    pub aes3_delay_ms: f32,
     /// Vendor `load_data` — the load impedance the amp is set to (Ω; unit to
     /// verify on hardware).
     pub load_ohms: f32,

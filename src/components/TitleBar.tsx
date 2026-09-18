@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ActionIcon, Button, Group, Menu, Text } from "@mantine/core";
-import { Copy, Minus, Square, X } from "lucide-react";
+import { Button, Dropdown, Popover } from "@heroui/react";
+import { Copy, Minus, Palette, Square, X } from "lucide-react";
+import { useIsTight } from "../lib/breakpoints";
+import { AppearanceControls } from "./AppearanceControls";
 
 const appWindow = getCurrentWindow();
 
@@ -26,6 +28,7 @@ export function TitleBar({
   centerContent,
 }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
+  const tight = useIsTight();
 
   useEffect(() => {
     appWindow.isMaximized().then(setIsMaximized);
@@ -40,72 +43,100 @@ export function TitleBar({
   return (
     <div
       data-tauri-drag-region
-      className="grid h-9 select-none grid-cols-[1fr_auto_1fr] items-center border-b border-b-[light-dark(var(--mantine-color-gray-2),var(--mantine-color-dark-6))] px-[var(--mantine-spacing-xs)]"
+      className="grid h-9 select-none grid-cols-[1fr_auto_1fr] items-center border-b border-b-[light-dark(var(--amp-color-gray-2),var(--amp-color-dark-6))] px-[var(--amp-spacing-xs)]"
     >
-      <Group data-tauri-drag-region gap="xs" wrap="nowrap" className="min-w-0">
-        <Menu shadow="md" width={180} position="bottom-start">
-          <Menu.Target>
-            <Button variant="subtle" color="gray" size="compact-sm">
-              File
-            </Button>
-          </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Item onClick={onOpenSettings}>Open App Settings</Menu.Item>
-            {projectName && onCloseProject && (
-              <>
-                <Menu.Divider />
-                <Menu.Item onClick={onCloseProject}>Exit Project</Menu.Item>
-              </>
-            )}
-            {onBackToStart && (
-              <>
-                <Menu.Divider />
-                <Menu.Item onClick={onBackToStart}>Back to Start</Menu.Item>
-              </>
-            )}
-          </Menu.Dropdown>
-        </Menu>
-        {/* Below 640px the File menu, the centered tabs and the three window
-            buttons already fill the bar, so the title (also shown in the OS
-            taskbar) is the one thing that gives up its space. */}
-        <Text data-tauri-drag-region size="sm" fw={500} truncate className="hidden min-w-0 flex-1 sm:block">
-          {title}
-        </Text>
-      </Group>
+      <div data-tauri-drag-region className="flex min-w-0 items-center gap-2">
+        <Dropdown>
+          <Dropdown.Trigger className="rounded-md border-0 bg-transparent px-2 py-1 text-sm text-[var(--amp-color-dimmed)] hover:bg-[var(--amp-color-gray-light)]">
+            File
+          </Dropdown.Trigger>
+          <Dropdown.Popover placement="bottom start">
+            <Dropdown.Menu className="min-w-[180px]">
+              <Dropdown.Section>
+                <Dropdown.Item id="settings" onAction={onOpenSettings}>
+                  Open App Settings
+                </Dropdown.Item>
+              </Dropdown.Section>
+              {projectName && onCloseProject && (
+                <Dropdown.Section>
+                  <Dropdown.Item id="exit-project" onAction={onCloseProject}>
+                    Exit Project
+                  </Dropdown.Item>
+                </Dropdown.Section>
+              )}
+              {onBackToStart && (
+                <Dropdown.Section>
+                  <Dropdown.Item id="back-to-start" onAction={onBackToStart}>
+                    Back to Start
+                  </Dropdown.Item>
+                </Dropdown.Section>
+              )}
+            </Dropdown.Menu>
+          </Dropdown.Popover>
+        </Dropdown>
+        {/* Below `useIsTight` the File menu, the centered tabs and the three
+            window buttons already fill the bar, so the title (also shown in
+            the OS taskbar) is the one thing that gives up its space. Driven
+            by the shared breakpoint rather than Tailwind's own `sm:`, which
+            happened to match today but could drift from it silently. */}
+        {!tight && (
+          <span
+            data-tauri-drag-region
+            className="min-w-0 flex-1 truncate"
+            style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 500 }}
+          >
+            {title}
+          </span>
+        )}
+      </div>
 
-      <Group data-tauri-drag-region gap={4} wrap="nowrap" justify="center" className="min-w-0">
+      <div data-tauri-drag-region className="flex min-w-0 items-center justify-center gap-1">
         {centerContent}
-      </Group>
+      </div>
 
-      <Group data-tauri-drag-region gap={4} wrap="nowrap" justify="flex-end">
-        <ActionIcon
-          variant="subtle"
-          color="gray"
+      <div data-tauri-drag-region className="flex items-center justify-end gap-1">
+        {/* Appearance sits left of the window buttons: it's app chrome, not an
+            OS control, and keeping it out of that group avoids a mis-click on
+            Close. The same controls also live in Settings → Appearance. */}
+        <Popover>
+          <Button isIconOnly variant="ghost" size="sm" aria-label="Appearance">
+            <Palette size={16} />
+          </Button>
+          <Popover.Content placement="bottom end">
+            <Popover.Dialog className="w-[280px]">
+              <AppearanceControls />
+            </Popover.Dialog>
+          </Popover.Content>
+        </Popover>
+        <Button
+          isIconOnly
+          variant="ghost"
           size="sm"
-          onClick={() => appWindow.minimize()}
+          onPress={() => appWindow.minimize()}
           aria-label="Minimize"
         >
           <Minus size={16} />
-        </ActionIcon>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
+        </Button>
+        <Button
+          isIconOnly
+          variant="ghost"
           size="sm"
-          onClick={() => appWindow.toggleMaximize()}
+          onPress={() => appWindow.toggleMaximize()}
           aria-label={isMaximized ? "Restore" : "Maximize"}
         >
           {isMaximized ? <Copy size={14} /> : <Square size={14} />}
-        </ActionIcon>
-        <ActionIcon
-          variant="subtle"
-          color="red"
+        </Button>
+        <Button
+          isIconOnly
+          variant="ghost"
           size="sm"
-          onClick={() => appWindow.close()}
+          className="hover:!bg-[var(--amp-color-red-light)] hover:!text-[var(--amp-color-red-6)]"
+          onPress={() => appWindow.close()}
           aria-label="Close"
         >
           <X size={16} />
-        </ActionIcon>
-      </Group>
+        </Button>
+      </div>
     </div>
   );
 }

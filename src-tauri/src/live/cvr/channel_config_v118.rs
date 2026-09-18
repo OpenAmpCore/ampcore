@@ -170,30 +170,43 @@ fn power_mode(code: u8) -> Option<PowerMode> {
 }
 
 /// Confirmed base mapping against the reference's `clampSourceCode`/
-/// `sourceNameFromCode` (0=Analog, 1=Dante, 2=Aes3, >=3=Backup — matches
-/// `SourceKind`'s declaration order exactly for the common case). One
-/// unresolved edge case the reference itself only handles with model
-/// capability data we don't have here: on an amp with AES3 but no Dante,
-/// code 1 actually means Aes3, not Dante. Without a catalog-model link this
-/// phase (see `channel_config.rs`'s module doc), that distinction can't be
-/// made — this always maps code 1 to `Dante`, which is correct for
-/// Dante-equipped amps and wrong only for the analog+AES3-no-Dante case.
+/// `sourceNameFromCode`: 0=Analog, 1=Dante, >=3=Backup.
+///
+/// **Code 2 is AES3, which this app does not support**, so it decodes to
+/// `None` — "the amp is on a source we have no name for" — rather than being
+/// folded into a kind we do have. Both cheap alternatives are actively
+/// harmful: calling it `Dante` would report a source the amp is not on, and
+/// calling it `Backup` hits the hard error in `plan_input` and would be
+/// hashed as a genuine tag. `None` already has well-defined meaning
+/// downstream — `ChannelConfig.source` is `Option` and `fingerprint`'s
+/// `source_readable` flag covers exactly this — so the reading stays honest
+/// and no code path can round-trip a 2 back out.
+///
+/// An explicit push still plans an `FC_SOURCE_SELECT` write for such a
+/// channel, moving the amp onto whatever the project asks for. That is push
+/// doing its job (`None` can never compare equal to a planned source), not a
+/// decode artifact — but it does mean pushing to a genuinely AES3-fed amp
+/// will take it off AES3.
+///
+/// Code 1 stays `Dante`. The vendor treats code 1 as AES3 on an
+/// AES3-but-no-Dante amp, but that model line is out of scope here, and
+/// `Dante` is correct for every amp this app supports.
 ///
 /// `index`: for Analog, the trailer's per-channel analog-matrix source
-/// index (patchable, not fixed to `channel_index`). For Dante/Aes3, this
-/// app's own established convention is a fixed 1:1 pairing (Dante/AES3
-/// channel N feeds digital input N — see `data/project.rs`'s
-/// `SourceChannelCount` doc), so `index = channel_index`. For Backup, there
-/// is no established index semantics in this app's model yet — `0` is a
-/// placeholder, not a meaningful position.
-fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> ChannelSource {
+/// index (patchable, not fixed to `channel_index`). For Dante, this app's
+/// own established convention is a fixed 1:1 pairing (Dante channel N feeds
+/// digital input N — see `data/project.rs`'s `SourceChannelCount` doc), so
+/// `index = channel_index`. For Backup, there is no established index
+/// semantics in this app's model yet — `0` is a placeholder, not a
+/// meaningful position.
+fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<ChannelSource> {
     if raw_code >= 3 {
-        return ChannelSource { kind: SourceKind::Backup, index: 0 };
+        return Some(ChannelSource { kind: SourceKind::Backup, index: 0 });
     }
     match raw_code {
-        0 => ChannelSource { kind: SourceKind::Analog, index: analog_matrix_index as u32 },
-        1 => ChannelSource { kind: SourceKind::Dante, index: channel_index },
-        _ => ChannelSource { kind: SourceKind::Aes3, index: channel_index },
+        0 => Some(ChannelSource { kind: SourceKind::Analog, index: analog_matrix_index as u32 }),
+        1 => Some(ChannelSource { kind: SourceKind::Dante, index: channel_index }),
+        _ => None,
     }
 }
 
@@ -336,15 +349,16 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         },
         fir_bypassed: u8_at(body, at(404)) != 0, // inverted: 0=enabled
         power_mode: power_mode(u8_at(body, at(403))),
-        source: Some(source(raw_source_code, channel_index, analog_matrix_index)),
+        source: source(raw_source_code, channel_index, analog_matrix_index),
         input_name: ascii_16(body, at(414)),
         output_name: ascii_16(body, at(430)),
+        // Offsets are absolute, so skipping AES3's pair at 52/56 shifts
+        // nothing — the amp still sends those bytes, this app just ignores
+        // them.
         analog_trim_db: f32_le(body, at(36)),
         analog_delay_ms: f32_le(body, at(40)),
         dante_trim_db: f32_le(body, at(44)),
         dante_delay_ms: f32_le(body, at(48)),
-        aes3_trim_db: f32_le(body, at(52)),
-        aes3_delay_ms: f32_le(body, at(56)),
         load_ohms: f32_le(body, at(410)),
         backup_priority,
     }
@@ -434,6 +448,27 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Code 2 is AES3, which this app dropped. It must read back as `None`
+    /// ("on a source we can't name") rather than being folded into a kind we
+    /// do have — reporting it as Dante would name an input the amp is not on.
+    /// Codes 0/1 and the backup range must be unaffected by that removal.
+    #[test]
+    fn unsupported_source_code_reads_as_unknown() {
+        // Projected to a tuple because `ChannelSource` has no `PartialEq` —
+        // the same comparison `amp_push::plan_input` makes.
+        let source_of = |code: u8| {
+            let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
+            body[85] = code; // channel 0's source selector
+            body[4 * BYTES_PER_CHANNEL + 136] = 3; // channel 0's analog matrix index
+            parse_channel_config(&body).unwrap().channels[0].source.map(|s| (s.kind, s.index))
+        };
+
+        assert_eq!(source_of(2), None, "AES3 must not be folded into a supported kind");
+        assert_eq!(source_of(0), Some((SourceKind::Analog, 3)));
+        assert_eq!(source_of(1), Some((SourceKind::Dante, 0)));
+        assert_eq!(source_of(3), Some((SourceKind::Backup, 0)));
+    }
 
     #[test]
     fn header_flags_are_read_at_absolute_offsets() {

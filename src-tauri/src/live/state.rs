@@ -11,6 +11,7 @@ use crate::data::common::now_millis;
 use super::cvr::bridge::DeviceBridgeSnapshot;
 use super::cvr::channel_config::ChannelConfigSnapshot;
 use super::cvr::channel_state::AmpChannelState;
+use super::cvr::fir::ChannelFirSnapshot;
 use super::cvr::preset::DevicePresetsSnapshot;
 use super::cvr::request::{RequestSpec, WriteSpec};
 use super::cvr::telemetry::Telemetry;
@@ -183,6 +184,18 @@ pub struct DeviceBridge {
 pub struct DevicePresets {
     pub device_id: String,
     pub presets: DevicePresetsSnapshot,
+}
+
+/// Command payload pairing a device id with one output channel's FC=43 FIR
+/// snapshot — what `live_control_fetch_channel_fir` returns. Unlike its
+/// siblings above there is no matching `LiveDeviceInner` field and no event:
+/// FIR is fetched on demand per channel and never refreshed behind the
+/// caller's back (see that command's doc comment).
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceChannelFir {
+    pub device_id: String,
+    pub fir: ChannelFirSnapshot,
 }
 
 #[derive(Clone)]

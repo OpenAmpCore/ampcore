@@ -1,4 +1,4 @@
-import { Button, Group, Modal, Stack, Text } from "@mantine/core";
+import { Button, Modal, Spinner } from "@heroui/react";
 import type { Update } from "@tauri-apps/plugin-updater";
 
 interface UpdateAvailableModalProps {
@@ -17,34 +17,40 @@ export function UpdateAvailableModal({
   onDisable,
 }: UpdateAvailableModalProps) {
   return (
-    <Modal
-      opened={update !== null}
-      onClose={onAbort}
-      title="Update Available"
-      centered
-      closeOnClickOutside={!installing}
-      closeOnEscape={!installing}
-      withCloseButton={!installing}
+    <Modal.Backdrop
+      isOpen={update !== null}
+      onOpenChange={(open) => !open && onAbort()}
+      isDismissable={!installing}
+      isKeyboardDismissDisabled={installing}
     >
-      <Stack gap="md">
-        <Text size="sm">
-          Version {update?.version} is available — you're currently on{" "}
-          {update?.currentVersion}.
-        </Text>
-        <Group justify="space-between">
-          <Button variant="subtle" color="gray" onClick={onDisable} disabled={installing}>
-            Disable update checks
-          </Button>
-          <Group gap="xs">
-            <Button variant="default" onClick={onAbort} disabled={installing}>
-              Not now
-            </Button>
-            <Button onClick={onInstall} loading={installing}>
-              Install now
-            </Button>
-          </Group>
-        </Group>
-      </Stack>
-    </Modal>
+      <Modal.Container placement="center">
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Update Available</Modal.Heading>
+            {!installing && <Modal.CloseTrigger />}
+          </Modal.Header>
+          <Modal.Body>
+            <div className="flex flex-col gap-3">
+              <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
+                Version {update?.version} is available — you're currently on {update?.currentVersion}.
+              </span>
+              <div className="flex items-center justify-between">
+                <Button variant="ghost" onPress={onDisable} isDisabled={installing}>
+                  Disable update checks
+                </Button>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" onPress={onAbort} isDisabled={installing}>
+                    Not now
+                  </Button>
+                  <Button variant="primary" onPress={onInstall} isDisabled={installing}>
+                    {installing ? <Spinner size="sm" /> : "Install now"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }

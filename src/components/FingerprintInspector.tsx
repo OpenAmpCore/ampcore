@@ -1,19 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  ActionIcon,
-  Alert,
-  Badge,
-  Button,
-  Code,
-  CopyButton,
-  Group,
-  Loader,
-  Modal,
-  Stack,
-  Table,
-  Text,
-  Tooltip,
-} from "@mantine/core";
+import { Alert, Button, Chip, Modal, Spinner, Tooltip } from "@heroui/react";
 import { Fingerprint, RefreshCw } from "lucide-react";
 import {
   commands,
@@ -36,30 +22,88 @@ function targetKey(target: FingerprintTarget | undefined): string | null {
     : `live:${target.deviceId}`;
 }
 
+/** FIR stats exist only when the fingerprint came from the enriching live
+ * command — a project fingerprint has none at all, and a live one can still
+ * miss them on pre-1.1.8 firmware or a failed read. Each absence says which it
+ * is rather than showing a bare dash, since they mean different things. */
+function FirCell({ channel, offline }: { channel: ChannelFingerprint; offline: boolean }) {
+  const fir = channel.fir;
+  const dimmed = { color: "var(--amp-color-dimmed)" };
+
+  if (!fir) {
+    return (
+      <span
+        style={dimmed}
+        title={
+          offline
+            ? "FIR filters are read from the device — they are not stored in the project file."
+            : "Not read — FIR requires firmware 1.1.8 or newer."
+        }
+      >
+        —
+      </span>
+    );
+  }
+
+  if (!fir.loaded) {
+    return (
+      <span style={dimmed} title="Channel holds only the unit impulse — no filter loaded.">
+        none
+      </span>
+    );
+  }
+
+  const detail = [fir.name?.trim() || null, `zero ${(fir.timeZeroMs ?? 0).toFixed(3)} ms`]
+    .filter(Boolean)
+    .join(" · ");
+  return <span title={detail}>{fir.order} taps</span>;
+}
+
 /** Match/drift/none for the `_XXXX` hash carried in an output name. */
 function EmbeddedHashBadge({ channel }: { channel: ChannelFingerprint }) {
   if (channel.embeddedHash === null) {
     return (
-      <Badge color="gray" variant="light" size="sm">
+      <Chip color="default" size="sm">
         none
-      </Badge>
+      </Chip>
     );
   }
   if (channel.embeddedHashMatches === null) {
     return (
-      <Badge color="gray" variant="light" size="sm">
+      <Chip color="default" size="sm">
         unknown
-      </Badge>
+      </Chip>
     );
   }
   return channel.embeddedHashMatches ? (
-    <Badge color="green" variant="light" size="sm">
+    <Chip color="success" size="sm">
       match
-    </Badge>
+    </Chip>
   ) : (
-    <Badge color="red" variant="light" size="sm">
+    <Chip color="danger" size="sm">
       drift
-    </Badge>
+    </Chip>
+  );
+}
+
+/** Minimal copy-to-clipboard button, replacing Mantine's `CopyButton` render
+ * prop — flips to "Copied" for 1.5s then reverts. */
+function CopyJsonButton({ value, disabled }: { value: string; disabled: boolean }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      size="sm"
+      variant={copied ? "primary" : "secondary"}
+      isDisabled={disabled}
+      onPress={() => {
+        void navigator.clipboard.writeText(value).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? "Copied" : "Copy JSON"}
+    </Button>
   );
 }
 
@@ -86,7 +130,11 @@ export function FingerprintInspector({
     const call =
       target.kind === "project"
         ? commands.fingerprintProjectAmp(target.projectId, target.assignmentId)
-        : commands.fingerprintLiveDevice(target.deviceId);
+        : // The enriching variant: adds a FIR read per channel, which the
+          // synchronous command deliberately skips because the edit lock
+          // rebuilds it on every poll tick. This modal is manual, so the extra
+          // round trips are affordable here and nowhere else.
+          commands.fingerprintLiveDeviceWithFir(target.deviceId);
     call.then((result) => {
       if (cancelled) return;
       setLoading(false);
@@ -108,123 +156,131 @@ export function FingerprintInspector({
 
   return (
     <>
-      <Tooltip label="Fingerprint" position="right" withArrow openDelay={300}>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          size="lg"
-          mt="xs"
-          className="self-center"
-          aria-label="Fingerprint"
-          disabled={!target}
-          onClick={() => setOpened(true)}
-        >
-          <Fingerprint size={18} />
-        </ActionIcon>
+      <Tooltip delay={300}>
+        <Tooltip.Trigger>
+          <Button
+            isIconOnly
+            variant="ghost"
+            size="lg"
+            className="mt-2 self-center"
+            aria-label="Fingerprint"
+            isDisabled={!target}
+            onPress={() => setOpened(true)}
+          >
+            <Fingerprint size={18} />
+          </Button>
+        </Tooltip.Trigger>
+        <Tooltip.Content placement="right" showArrow>
+          Fingerprint
+        </Tooltip.Content>
       </Tooltip>
 
-      <Modal
-        opened={opened}
-        onClose={() => setOpened(false)}
-        title="Amp Fingerprint"
-        size="xl"
-        centered
-        fullScreen={compact}
-      >
-        <Stack gap="sm" className="min-w-0">
-          <Group justify="space-between" wrap="wrap" gap="xs">
-            <Group gap="xs" wrap="wrap" className="min-w-0">
-              <Text size="sm" c="dimmed">
-                Amp hash
-              </Text>
-              <Code>{fingerprint?.ampHash ?? "—"}</Code>
-              {fingerprint && (
-                <Text size="sm" c="dimmed">
-                  {fingerprint.identity.model ?? "unknown model"} ·{" "}
-                  {fingerprint.identity.channelCount} ch · fw{" "}
-                  {fingerprint.identity.firmwareFamily ?? "?"}
-                </Text>
-              )}
-            </Group>
-            <Group gap="xs">
-              {loading && <Loader size="xs" />}
-              <Button
-                size="xs"
-                variant="default"
-                leftSection={<RefreshCw size={14} />}
-                onClick={() => setReloadToken((t) => t + 1)}
-              >
-                Refresh
-              </Button>
-              <CopyButton value={json}>
-                {({ copied, copy }) => (
-                  <Button
-                    size="xs"
-                    color={copied ? "green" : undefined}
-                    disabled={!fingerprint}
-                    onClick={copy}
-                  >
-                    {copied ? "Copied" : "Copy JSON"}
-                  </Button>
+      <Modal.Backdrop isOpen={opened} onOpenChange={setOpened}>
+        <Modal.Container placement="center" size={compact ? "full" : "lg"}>
+          <Modal.Dialog>
+            <Modal.Header>
+              <Modal.Heading>Amp Fingerprint</Modal.Heading>
+              <Modal.CloseTrigger />
+            </Modal.Header>
+            <Modal.Body>
+              <div className="flex min-w-0 flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
+                      Amp hash
+                    </span>
+                    <code className="font-mono text-sm">{fingerprint?.ampHash ?? "—"}</code>
+                    {fingerprint && (
+                      <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
+                        {fingerprint.identity.model ?? "unknown model"} · {fingerprint.identity.channelCount} ch · fw{" "}
+                        {fingerprint.identity.firmwareFamily ?? "?"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {loading && <Spinner size="sm" />}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onPress={() => setReloadToken((t) => t + 1)}
+                    >
+                      <RefreshCw size={14} /> Refresh
+                    </Button>
+                    <CopyJsonButton value={json} disabled={!fingerprint} />
+                  </div>
+                </div>
+
+                {error && <Alert status="danger">{error}</Alert>}
+
+                {fingerprint && fingerprint.missing.length > 0 && (
+                  <Alert status="warning">
+                    <Alert.Content>
+                      <Alert.Title>Incomplete</Alert.Title>
+                      <Alert.Description>
+                        <div className="flex flex-col gap-0.5">
+                          {fingerprint.missing.map((reason) => (
+                            <span key={reason} style={{ fontSize: "var(--amp-font-size-sm)" }}>
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
+                      </Alert.Description>
+                    </Alert.Content>
+                  </Alert>
                 )}
-              </CopyButton>
-            </Group>
-          </Group>
 
-          {error && (
-            <Alert color="red" variant="light">
-              {error}
-            </Alert>
-          )}
+                {fingerprint && (
+                  <div className="min-w-0 overflow-x-auto">
+                    <table className="w-full border-collapse text-sm" style={{ minWidth: 500 }}>
+                      <thead>
+                        <tr className="border-b border-[var(--amp-color-default-border)]">
+                          <th className="p-2 text-left">Out</th>
+                          <th className="p-2 text-left">Speaker hash</th>
+                          <th className="p-2 text-left">Output name</th>
+                          <th className="p-2 text-left">Name hash</th>
+                          <th className="p-2 text-left">FIR</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {fingerprint.channels.map((channel, i) => (
+                          <tr
+                            key={channel.channelIndex}
+                            className="border-b border-[var(--amp-color-default-border)]"
+                            style={{
+                              background: i % 2 === 1 ? "var(--amp-color-default-hover)" : undefined,
+                            }}
+                          >
+                            <td className="p-2">{channel.label}</td>
+                            <td className="p-2">
+                              <code className="font-mono">{channel.speakerHash ?? "—"}</code>
+                            </td>
+                            <td className="p-2">{channel.outputName ?? "—"}</td>
+                            <td className="p-2">
+                              <EmbeddedHashBadge channel={channel} />
+                            </td>
+                            <td className="p-2">
+                              <FirCell
+                                channel={channel}
+                                offline={fingerprint.origin.kind === "offline"}
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
 
-          {fingerprint && fingerprint.missing.length > 0 && (
-            <Alert color="yellow" variant="light" title="Incomplete">
-              <Stack gap={2}>
-                {fingerprint.missing.map((reason) => (
-                  <Text key={reason} size="sm">
-                    {reason}
-                  </Text>
-                ))}
-              </Stack>
-            </Alert>
-          )}
-
-          {fingerprint && (
-            <div className="min-w-0 overflow-x-auto">
-              <Table striped withTableBorder miw={420}>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Out</Table.Th>
-                    <Table.Th>Speaker hash</Table.Th>
-                    <Table.Th>Output name</Table.Th>
-                    <Table.Th>Name hash</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {fingerprint.channels.map((channel) => (
-                    <Table.Tr key={channel.channelIndex}>
-                      <Table.Td>{channel.label}</Table.Td>
-                      <Table.Td>
-                        <Code>{channel.speakerHash ?? "—"}</Code>
-                      </Table.Td>
-                      <Table.Td>{channel.outputName ?? "—"}</Table.Td>
-                      <Table.Td>
-                        <EmbeddedHashBadge channel={channel} />
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </div>
-          )}
-
-          {fingerprint && (
-            <Code block className="max-h-[50vh] overflow-auto">
-              {json}
-            </Code>
-          )}
-        </Stack>
-      </Modal>
+                {fingerprint && (
+                  <pre className="max-h-[50vh] overflow-auto rounded-md bg-[var(--amp-color-default)] p-2 font-mono text-sm">
+                    {json}
+                  </pre>
+                )}
+              </div>
+            </Modal.Body>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
     </>
   );
 }

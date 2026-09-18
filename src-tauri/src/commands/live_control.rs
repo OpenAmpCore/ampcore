@@ -9,13 +9,15 @@ use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch,
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use crate::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
+use crate::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
+use crate::live::cvr::fir;
 use crate::live::cvr::preset;
 use crate::live::cvr::request::{WriteOutcome, WriteSpec};
 use crate::live::cvr::write;
 use crate::live::driver::all_drivers;
 use crate::live::state::{
-    DeviceBridge, DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink, LiveWriteAck,
+    DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
+    LiveEventSink, LiveWriteAck,
 };
 
 /// Shared lookup for every write command below: resolves `device_id` to its
@@ -91,6 +93,22 @@ fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Resu
     if firmware_family != Some("1.1.8") {
         return Err(AppError::from(format!(
             "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
+            device_id, firmware_family
+        )));
+    }
+    Ok(())
+}
+
+/// FC=43 FIR_datas is confirmed against 1.1.8, and 1.1.9 is accepted on the
+/// same basis `write.rs` already accepts it for FC=44 FIR bypass: the two
+/// firmwares share the v118 encoder for every FIR command, and
+/// `capability::cvr` gates the whole feature on vNum >= 118 (`fir_filters`).
+/// Anything older — or an unrecognized firmware — is refused rather than
+/// guessed at, matching this app's no-fallback-encoding rule.
+fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
+    if !matches!(firmware_family, Some("1.1.8") | Some("1.1.9")) {
+        return Err(AppError::from(format!(
+            "device {} FIR data requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
             device_id, firmware_family
         )));
     }
@@ -273,6 +291,7 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
         body: Vec::new(),
         // FC=27 is always fragmented.
         expects_fragments: true,
+        in_out_flag: 0,
         sink: crate::live::cvr::request::ResultSink::External(tx),
     };
     request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -317,8 +336,9 @@ const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 /// things fire close together) would surface a raw "Busy" error instead of
 /// just quietly succeeding a moment later.
 ///
-/// `expects_fragments` is passed straight through to the spec — see its doc
-/// for why a single-datagram read must declare itself as one.
+/// `expects_fragments` and `in_out_flag` are passed straight through to the
+/// spec — see their docs for why a single-datagram read must declare itself as
+/// one, and why an output-side query has to say so.
 async fn send_request_with_retry(
     request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
     ip: &str,
@@ -326,6 +346,7 @@ async fn send_request_with_retry(
     chx: u8,
     body: Vec<u8>,
     expects_fragments: bool,
+    in_out_flag: u8,
 ) -> Result<Vec<u8>, AppError> {
     let mut last_err = AppError::from(format!("device {} request never attempted", ip));
     for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
@@ -336,6 +357,7 @@ async fn send_request_with_retry(
             chx,
             body: body.clone(),
             expects_fragments,
+            in_out_flag,
             sink: crate::live::cvr::request::ResultSink::External(tx),
         };
         request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -372,13 +394,13 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
 
     let list_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true)
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true, 0)
             .await?;
     let slots = preset::parse_preset_list(&list_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
 
     let current_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true)
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true, 0)
             .await?;
     let active_preset_name = preset::parse_preset_current(&current_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
@@ -439,6 +461,7 @@ pub async fn live_control_fetch_bridge(
             pair_index,
             Vec::new(),
             false,
+            0,
         )
         .await?;
         // The pair comes from the reply's own header, not from what was
@@ -683,13 +706,13 @@ pub async fn live_control_set_channel_name(
 /// (`Channels.cs`) and the reference's `analogType` action both send FC=79
 /// with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
 /// channel already on analog a no-op on the device, even though the packet
-/// was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
-/// hard-wired 1:1 to their channel, so it is ignored for those kinds.
+/// was acknowledged. `index` is only meaningful for Analog; Dante is
+/// hard-wired 1:1 to its channel, so it is ignored for that kind.
 ///
 /// `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
-/// see `channel_config_v118::source`), not something FC=11 selects — the
-/// reference's own comment notes backup is driven by the priority/auto-source
-/// controls (FC=80), which is Tier B.
+/// see `channel_config_v118::source`), not something FC=11 selects. Backup is
+/// driven by the priority/auto-source controls instead — see
+/// `live_control_set_backup_priority` (FC=80).
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_source(
@@ -703,7 +726,6 @@ pub async fn live_control_set_channel_source(
     let source_code: u8 = match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
-        SourceKind::Aes3 => 2,
         SourceKind::Backup => {
             return Err(AppError::from(
                 "backup is a readback state, not an FC=11 selection — configure it via priority inputs".to_string(),
@@ -792,6 +814,7 @@ pub async fn live_control_set_output_bridge(
             pair_index,
             Vec::new(),
             false,
+            0,
         )
         .await;
         if let Ok(frame) = frame {
@@ -872,6 +895,29 @@ pub async fn live_control_set_output_mute(
     Ok(tally.finish())
 }
 
+/// FC=44 FIR bypass. Unlike the FC=43 coefficient read this is a one-byte body
+/// in a single datagram, so none of the outbound fragmentation that blocks
+/// *writing* coefficients applies (see `live/cvr/fir.rs`). Gated with
+/// `require_fir_firmware` rather than the usual unrecognized-firmware
+/// fallthrough, so a pre-1.1.8 amp is told why instead of being handed a
+/// packet its DSP has no handler for.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_fir_bypass(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    bypassed: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_set_fir_bypass(firmware_family.as_deref(), channel_index, bypassed)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_input_mute(
@@ -904,6 +950,65 @@ pub async fn live_control_set_channel_delay_in(
     Ok(tally.finish())
 }
 
+/// FC=62 SOURCE_DATA. Takes **both** halves rather than a patch: the wire
+/// frame always carries trim and delay together, so there is nothing to send
+/// for a half-specified edit, and unlike the project command there is no
+/// stored copy here to read the sibling back from. The caller holds the live
+/// readback and supplies the unchanged value.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_source_trim(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    kind: SourceKind,
+    trim_db: f64,
+    delay_ms: f64,
+) -> Result<LiveWriteAck, AppError> {
+    let segment: u8 = match kind {
+        SourceKind::Analog => 0,
+        SourceKind::Dante => 1,
+        SourceKind::Backup => {
+            return Err(AppError::from(
+                "backup is a failover state, not an input with its own trim".to_string(),
+            ))
+        }
+    };
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet =
+        write::build_set_source_trim(firmware_family.as_deref(), channel_index, segment, trim_db as f32, delay_ms as f32)
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=80 PRIORITY_INPUTS. `first`/`second` are the amp's own source codes
+/// (0=Analog, 1=Dante); `threshold_db` is signed and arrives as `i32` because
+/// that is what the project model stores, so it is range-checked here rather
+/// than silently wrapping into the wire's `i8`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_backup_priority(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    first: u8,
+    second: u8,
+    enabled: bool,
+    threshold_db: i32,
+) -> Result<LiveWriteAck, AppError> {
+    let threshold = i8::try_from(threshold_db)
+        .map_err(|_| AppError::from(format!("backup threshold {} dB is out of range", threshold_db)))?;
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet =
+        write::build_set_backup_priority(firmware_family.as_deref(), channel_index, first, second, enabled, threshold)
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_phase_invert(
@@ -916,6 +1021,37 @@ pub async fn live_control_set_channel_phase_invert(
     let mut tally = WriteTally::default();
     let packet = write::build_set_phase_invert(firmware_family.as_deref(), channel_index, inverted)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=60 CUSTOMER_NAME_MODIFY — renames the amp itself, not a channel. Same
+/// ASCII/length rules as `live_control_set_channel_name`, against the
+/// device-level field's wider 32-byte width. No explicit refetch: the new
+/// name comes back through the next FC=0 `BASIC_INFO` read.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_device_name(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    name: String,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+
+    let trimmed = name.trim();
+    if !trimmed.is_ascii() {
+        return Err(AppError::from("device name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return Err(AppError::from("device name cannot contain a null byte".to_string()));
+    }
+    if trimmed.len() > DEVICE_NAME_FIELD_LEN {
+        return Err(AppError::from(format!("device name is limited to {} characters", DEVICE_NAME_FIELD_LEN)));
+    }
+
+    let packet = write::build_set_device_name(firmware_family.as_deref(), trimmed)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
 }
@@ -1132,4 +1268,60 @@ pub async fn live_control_set_crossover_slot(
         tally.record(write::send_control(&write_tx, ip, &write::CROSSOVER_COMMIT_PACKET).await.map_err(|e| e.to_string())?);
     }
     Ok(tally.finish())
+}
+
+/// Reads one output channel's FIR filter (FC=43) — name plus the raw 512-tap
+/// coefficient array. The on-demand counterpart to nothing: FIR data is not in
+/// the FC=27 sync block and nothing polls it in the background, so this command
+/// is the only way it ever reaches the app.
+///
+/// `expects_fragments` is true because the reply is ~2093 bytes, which the
+/// protocol splits into five datagrams. That also makes the request wait for a
+/// clear line per `RequestRegistry::conflicts_with` — the per-IP reassembler
+/// cannot interleave two fragmented exchanges — so it will collide with the
+/// 200ms FC=27 poll tick fairly often; `send_request_with_retry`'s `Busy`
+/// retry is what absorbs that.
+///
+/// **Deliberately unlike `live_control_fetch_presets`/`_fetch_bridge`, this
+/// stores nothing in `LiveDeviceState` and emits no event.** Those cache
+/// because several views read the same snapshot and a background tick keeps it
+/// fresh. FIR has one consumer, is fetched per channel on demand, and is never
+/// refreshed behind the caller's back — so a cache here would add an
+/// invalidation question and answer none. The snapshot is returned; the caller
+/// holds it.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_fetch_channel_fir(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+) -> Result<DeviceChannelFir, AppError> {
+    let (ip, firmware_family, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, device.firmware_family, request_tx)
+    };
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+
+    let frame = send_request_with_retry(
+        &request_tx,
+        &ip,
+        fir::FC_FIR_DATA,
+        channel_index,
+        fir::build_fir_request_body(),
+        true,
+        fir::FIR_IN_OUT_FLAG,
+    )
+    .await?;
+
+    let snapshot = fir::parse_fir_data(&frame, channel_index).ok_or_else(|| {
+        AppError::from(format!(
+            "device {} FC=43 response for channel {} had an unexpected shape ({} bytes)",
+            device_id,
+            channel_index,
+            frame.len()
+        ))
+    })?;
+    Ok(DeviceChannelFir { device_id, fir: snapshot })
 }

@@ -1,6 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Button, Loader, SegmentedControl, Stack, Text, ThemeIcon } from "@mantine/core";
+import { Button, ButtonGroup, Spinner } from "@heroui/react";
 import { ArrowLeft, ArrowRight, Check, Network, Server, X } from "lucide-react";
+
+function ThemeIcon({ color, size, className, children }: { color: string; size: number; className?: string; children: ReactNode }) {
+  return (
+    <div
+      className={`flex shrink-0 items-center justify-center rounded-full ${className ?? ""}`}
+      style={{ width: size, height: size, background: `var(--amp-color-${color}-light)`, color: `var(--amp-color-${color}-6)` }}
+    >
+      {children}
+    </div>
+  );
+}
 import {
   commands,
   type AmpEditLock,
@@ -90,31 +101,64 @@ function caption(
     default:
       return {
         text: pull
-          ? "Hold to copy every online setting into this project amp."
-          : "Hold to write every differing setting to the online amp.",
+          ? "Replaces every setting in this project amp with the online amp's."
+          : "Replaces every differing setting on the online amp with this project's.",
       };
   }
 }
 
 /** One side of the strip. `pulseKey` replays a green ring pulse whenever it
- * changes — used on whichever side just received data. */
-function AmpEnd({ icon, label, color, pulseKey }: { icon: ReactNode; label: string; color: string; pulseKey?: string }) {
+ * changes — used on whichever side just received data.
+ *
+ * `role` is the static half of "which way does this go": one word under each
+ * end naming what it is in *this* transfer. The flowing dashes on the track
+ * say the same thing, but only while they're moving — this survives a
+ * screenshot, a reduced-motion setting, and a glance. */
+function AmpEnd({
+  icon,
+  label,
+  color,
+  role,
+  pulseKey,
+}: {
+  icon: ReactNode;
+  label: string;
+  color: string;
+  role?: "source" | "destination";
+  pulseKey?: string;
+}) {
   return (
-    <Stack gap={4} align="center" className="shrink-0">
+    <div className="flex shrink-0 flex-col items-center gap-1">
       <span
         key={pulseKey}
-        className={`rounded-[var(--mantine-radius-sm)] ${
+        className={`rounded-full ${
           pulseKey ? "animate-[merge-pulse_900ms_ease-out_450ms_2] motion-reduce:animate-none" : ""
         }`}
       >
-        <ThemeIcon variant="light" color={color} size={40} className="transition-colors duration-300">
+        <ThemeIcon color={color} size={40} className="transition-colors duration-300">
           {icon}
         </ThemeIcon>
       </span>
-      <Text size="xs" c="dimmed">
+      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}>
         {label}
-      </Text>
-    </Stack>
+      </span>
+      {/* Amber on the side that loses its settings — the same "this changes
+          something" accent the tiles use — and a plain dimmed word on the
+          side that doesn't. */}
+      {role && (
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            textAlign: "center",
+            color: role === "destination" ? "var(--accent)" : "var(--amp-color-dimmed)",
+          }}
+        >
+          {role === "destination" ? "Overwritten" : "Source"}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -124,28 +168,28 @@ function CenterNode({ state, direction }: { state: StripState; direction: MergeD
   switch (state) {
     case "pending":
       return (
-        <div className={`${base} border-[var(--mantine-color-amber-filled)] bg-[var(--mantine-color-body)]`}>
-          <Loader size={12} color="amber" />
+        <div className={`${base} border-[var(--accent)] bg-[var(--amp-color-body)]`}>
+          <Spinner size="sm" style={{ color: "var(--accent)" }} />
         </div>
       );
     case "merged":
       return (
         <div
-          className={`${base} animate-[link-pop_320ms_ease-out_450ms_both] border-transparent bg-[var(--mantine-color-green-filled)] motion-reduce:animate-none`}
+          className={`${base} animate-[link-pop_320ms_ease-out_450ms_both] border-transparent bg-[var(--amp-color-green-filled)] motion-reduce:animate-none`}
         >
           <Check size={16} strokeWidth={3} color="white" />
         </div>
       );
     case "inSync":
       return (
-        <div className={`${base} border-transparent bg-[var(--mantine-color-green-filled)]`}>
+        <div className={`${base} border-transparent bg-[var(--amp-color-green-filled)]`}>
           <Check size={16} strokeWidth={3} color="white" />
         </div>
       );
     case "failed":
       return (
         <div
-          className={`${base} animate-[merge-shake_360ms_ease-in-out] border-transparent bg-[var(--mantine-color-red-filled)] motion-reduce:animate-none`}
+          className={`${base} animate-[merge-shake_360ms_ease-in-out] border-transparent bg-[var(--amp-color-red-filled)] motion-reduce:animate-none`}
         >
           <X size={16} strokeWidth={3} color="white" />
         </div>
@@ -153,11 +197,11 @@ function CenterNode({ state, direction }: { state: StripState; direction: MergeD
     default: {
       const tone =
         state === "holding"
-          ? "border-[var(--mantine-color-amber-filled)] text-[var(--mantine-color-amber-filled)]"
-          : "border-[var(--mantine-color-default-border)] text-[var(--mantine-color-dimmed)]";
+          ? "border-[var(--accent)] text-[var(--accent)]"
+          : "border-[var(--amp-color-default-border)] text-[var(--amp-color-dimmed)]";
       const Arrow = direction === "pull" ? ArrowLeft : ArrowRight;
       return (
-        <div className={`${base} ${tone} bg-[var(--mantine-color-body)]`}>
+        <div className={`${base} ${tone} bg-[var(--amp-color-body)]`}>
           <Arrow size={14} strokeWidth={2.5} />
         </div>
       );
@@ -186,6 +230,9 @@ function MergeStrip({
   // The fill grows from the sending amp, so its transform origin is that side.
   const origin = pull ? "origin-right" : "origin-left";
   const pulse = state === "merged" ? `merged-${attempt}` : undefined;
+  // Once the two match there is no source and no destination any more, so the
+  // roles drop away rather than claiming something is about to be overwritten.
+  const showRoles = !green;
 
   return (
     <div className="flex w-full max-w-[520px] min-w-0 items-start gap-3">
@@ -193,11 +240,12 @@ function MergeStrip({
         icon={<Server size={20} />}
         label="Offline Amp"
         color={green ? "green" : state === "failed" ? "red" : "gray"}
+        role={showRoles ? (pull ? "destination" : "source") : undefined}
         pulseKey={pull ? pulse : undefined}
       />
 
       <div className="relative mt-1 h-8 min-w-0 flex-1">
-        <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-[var(--mantine-color-default-border)]">
+        <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-[var(--amp-color-default-border)]">
           {drifting && (
             <div
               className={`absolute inset-0 opacity-80 motion-reduce:animate-none ${
@@ -205,14 +253,14 @@ function MergeStrip({
               }`}
               style={{
                 backgroundImage:
-                  "repeating-linear-gradient(90deg, var(--mantine-color-gray-5) 0 6px, transparent 6px 18px)",
+                  "repeating-linear-gradient(90deg, var(--amp-color-gray-5) 0 6px, transparent 6px 18px)",
               }}
             />
           )}
           {/* The hold fill: follows the hook's progress frame by frame while
               held, and eases back on an early release. */}
           <div
-            className={`absolute inset-0 ${origin} bg-[var(--mantine-color-amber-filled)] ${
+            className={`absolute inset-0 ${origin} bg-[var(--accent)] ${
               state === "holding" ? "" : "transition-transform duration-200"
             }`}
             style={{ transform: `scaleX(${state === "holding" || state === "idle" ? progress : 0})` }}
@@ -223,18 +271,18 @@ function MergeStrip({
                 pull ? "animate-[merge-shimmer_900ms_linear_infinite]" : "animate-[link-shimmer_900ms_linear_infinite]"
               }`}
               style={{
-                background: "linear-gradient(90deg, transparent, var(--mantine-color-amber-filled), transparent)",
+                background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
               }}
             />
           )}
           {state === "merged" && (
             <div
               key={`fill-${attempt}`}
-              className={`absolute inset-0 ${origin} animate-[link-fill_500ms_ease-out_both] bg-[var(--mantine-color-green-filled)] motion-reduce:animate-none`}
+              className={`absolute inset-0 ${origin} animate-[link-fill_500ms_ease-out_both] bg-[var(--amp-color-green-filled)] motion-reduce:animate-none`}
             />
           )}
-          {state === "inSync" && <div className="absolute inset-0 bg-[var(--mantine-color-green-filled)]" />}
-          {state === "failed" && <div className="absolute inset-0 bg-[var(--mantine-color-red-filled)]" />}
+          {state === "inSync" && <div className="absolute inset-0 bg-[var(--amp-color-green-filled)]" />}
+          {state === "failed" && <div className="absolute inset-0 bg-[var(--amp-color-red-filled)]" />}
         </div>
 
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
@@ -246,6 +294,7 @@ function MergeStrip({
         icon={<Network size={20} />}
         label="Online Amp"
         color={green ? "green" : !pull && state === "failed" ? "red" : "gray"}
+        role={showRoles ? (pull ? "source" : "destination") : undefined}
         pulseKey={pull ? undefined : pulse}
       />
     </div>
@@ -363,11 +412,17 @@ export function AmpMergePanel({
 
   const hold = useHoldToConfirm({ durationMs: HOLD_MS, disabled: !runnable, onConfirm: () => void run() });
 
+  // Compared by hash rather than by `state === "matches"`: a disengaged amp
+  // reports `disengaged` whether or not the two agree, and offering a merge
+  // for settings that are already identical would be a lie.
+  const hashesAgree =
+    lock?.project?.ampHash != null && lock.project.ampHash === lock.live?.ampHash;
+
   const state: StripState = busy
     ? "pending"
     : outcome?.kind === "merged"
       ? "merged"
-      : lock?.state === "matches"
+      : hashesAgree
         ? "inSync"
         : outcome
           ? "failed"
@@ -379,75 +434,101 @@ export function AmpMergePanel({
   const { text, color } = caption(state, outcome, reason, direction);
   const done = state === "merged" || state === "inSync";
   const Arrow = direction === "pull" ? ArrowLeft : ArrowRight;
-  const idleLabel = direction === "pull" ? "Hold to match offline to online" : "Hold to match online to offline";
+  // "Match offline to online" was ambiguous English — it can mean "make
+  // offline resemble online" or "pair the two". Name the side that loses its
+  // settings instead.
+  const idleLabel =
+    direction === "pull" ? "Hold to overwrite the offline amp" : "Hold to overwrite the online amp";
   const retryLabel = outcome?.kind === "partial" ? "Hold to carry on" : "Hold to try again";
 
   return (
-    <Stack gap="sm" align="center" className="min-w-0 py-1">
-      <SegmentedControl
-        size="xs"
-        radius="xl"
-        value={direction}
-        onChange={(value) => onDirectionChange(value as MergeDirection)}
-        // Switching direction mid-write would leave the step list describing a
-        // run that is no longer the one in flight.
-        disabled={busy}
-        data={[
-          { value: "pull", label: "Offline ← Online" },
-          { value: "push", label: "Online ← Offline", disabled: Boolean(pushBlocked) },
-        ]}
-      />
+    <div className="flex min-w-0 flex-col items-center gap-2 py-1">
+      {/* Switching direction mid-write would leave the step list describing a
+          run that is no longer the one in flight.
+          Deliberately *not* "Offline ← Online" / "Online ← Offline": two
+          labels built from the same two words in swapped order can only be
+          told apart by decoding an arrow, and `dest ← src` is a convention
+          the panel never states. These share no words, so they read
+          differently at a glance, and from/to carries the direction in
+          plain English. Which side gets overwritten is named by the role
+          badges in the strip below. */}
+      <ButtonGroup size="sm" isDisabled={busy}>
+        <Button variant={direction === "pull" ? "primary" : "ghost"} onPress={() => onDirectionChange("pull")}>
+          Read from Amp
+        </Button>
+        <Button
+          variant={direction === "push" ? "primary" : "ghost"}
+          isDisabled={Boolean(pushBlocked)}
+          onPress={() => onDirectionChange("push")}
+        >
+          Write to Amp
+        </Button>
+      </ButtonGroup>
 
       <MergeStrip state={state} progress={hold.progress} attempt={attempt} direction={direction} />
 
       {/* The whole ring is the hold target, not just the button inside it,
           and the button keeps one width while its label changes — a hit area
-          that shrank under the pointer mid-hold used to cancel the hold. */}
+          that shrank under the pointer mid-hold used to cancel the hold.
+          A plain styled <div>, not HeroUI's Button: all interaction here is
+          the custom `hold.bind` pointer handlers on the wrapping ring, not a
+          click/press event, so an interactive Aria component would only add
+          conflicting press semantics. */}
       <div
         className={`inline-flex max-w-full touch-none rounded-full p-[3px] select-none ${
           runnable ? "cursor-pointer" : ""
         }`}
         style={{
           background: done
-            ? "var(--mantine-color-green-filled)"
-            : `conic-gradient(var(--mantine-color-amber-filled) ${hold.progress * 360}deg, var(--mantine-color-default-border) 0deg)`,
+            ? "var(--amp-color-green-filled)"
+            : `conic-gradient(var(--accent) ${hold.progress * 360}deg, var(--amp-color-default-border) 0deg)`,
         }}
         {...(done ? {} : hold.bind)}
       >
         {done ? (
-          <Button
-            component="div"
-            w={272}
-            maw="100%"
-            radius="xl"
-            color="green"
-            variant="light"
-            leftSection={<Check size={14} />}
+          <div
+            className="flex items-center justify-center gap-2 rounded-full py-1.5"
+            style={{
+              width: 272,
+              maxWidth: "100%",
+              background: "var(--amp-color-green-light)",
+              color: "var(--amp-color-green-6)",
+            }}
           >
+            <Check size={14} />
             {state === "merged" ? "Matched" : "In sync"}
-          </Button>
+          </div>
         ) : (
-          <Button
-            w={272}
-            maw="100%"
-            radius="xl"
-            color="amber"
-            variant={state === "holding" ? "filled" : "light"}
-            loading={busy}
-            disabled={!runnable}
-            leftSection={<Arrow size={14} />}
-            // Mantine nudges a pressed button down 1px, which reads as the
-            // button slipping inside the ring while held.
-            className="active:transform-none"
+          <div
+            className={`flex items-center justify-center gap-2 rounded-full py-1.5 transition-colors active:transform-none ${
+              !runnable ? "opacity-50" : ""
+            }`}
+            style={{
+              width: 272,
+              maxWidth: "100%",
+              background: state === "holding" ? "var(--accent)" : "var(--accent-soft)",
+              // Paired foregrounds rather than a literal white: the accent is
+              // user-selectable, so a light pick would otherwise render this
+              // label unreadable against it.
+              color:
+                state === "holding" ? "var(--accent-foreground)" : "var(--accent-soft-foreground)",
+            }}
           >
+            {busy ? <Spinner size="sm" /> : <Arrow size={14} />}
             {state === "holding" ? "Keep holding…" : state === "failed" ? retryLabel : idleLabel}
-          </Button>
+          </div>
         )}
       </div>
 
-      <Text size="sm" ta="center" c={color ?? "dimmed"} className="min-w-0">
+      <span
+        className="min-w-0 text-center"
+        style={{
+          fontSize: "var(--amp-font-size-sm)",
+          color: color ? `var(--amp-color-${color}-6)` : "var(--amp-color-dimmed)",
+        }}
+      >
         {text}
-      </Text>
-    </Stack>
+      </span>
+    </div>
   );
 }

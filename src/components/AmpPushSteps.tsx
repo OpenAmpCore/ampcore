@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Group, Loader, Stack, Text } from "@mantine/core";
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { Alert, Spinner } from "@heroui/react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Minus, X } from "lucide-react";
 import { commands, type AmpEditLock, type AmpPushPlan, type PushStage } from "../lib/bindings";
@@ -22,16 +22,16 @@ type StageState = "pending" | "running" | "done" | "failed" | "skipped";
 function StageIcon({ state }: { state: StageState }) {
   switch (state) {
     case "running":
-      return <Loader size={14} color="amber" />;
+      return <Spinner size="sm" style={{ color: "var(--accent)" }} />;
     case "done":
-      return <Check size={14} strokeWidth={3} className="text-[var(--mantine-color-green-filled)]" />;
+      return <Check size={14} strokeWidth={3} className="text-[var(--amp-color-green-filled)]" />;
     case "failed":
-      return <X size={14} strokeWidth={3} className="text-[var(--mantine-color-red-filled)]" />;
+      return <X size={14} strokeWidth={3} className="text-[var(--amp-color-red-filled)]" />;
     case "skipped":
-      return <Minus size={14} className="text-[var(--mantine-color-dimmed)]" />;
+      return <Minus size={14} className="text-[var(--amp-color-dimmed)]" />;
     default:
       return (
-        <span className="block size-[6px] rounded-full bg-[var(--mantine-color-default-border)]" aria-hidden="true" />
+        <span className="block size-[6px] rounded-full bg-[var(--amp-color-default-border)]" aria-hidden="true" />
       );
   }
 }
@@ -40,11 +40,19 @@ function StageIcon({ state }: { state: StageState }) {
 function StageCount({ state, done, total }: { state: StageState; done: number; total: number }) {
   const text =
     state === "running" || (state === "failed" && done > 0) ? `${done}/${total}` : `${total} ${total === 1 ? "write" : "writes"}`;
-  const color = state === "failed" ? "red" : state === "done" ? "green" : "dimmed";
+  const color =
+    state === "failed"
+      ? "var(--amp-color-red-6)"
+      : state === "done"
+        ? "var(--amp-color-green-6)"
+        : "var(--amp-color-dimmed)";
   return (
-    <Text size="xs" c={color} ff="monospace" className="shrink-0 tabular-nums">
+    <span
+      className="shrink-0 tabular-nums font-mono"
+      style={{ fontSize: "var(--amp-font-size-xs)", color }}
+    >
       {text}
-    </Text>
+    </span>
   );
 }
 
@@ -147,8 +155,11 @@ export function AmpPushSteps({
 
   if (planError) {
     return (
-      <Alert color="red" variant="light" title="Can't plan the push">
-        <Text size="sm">{planError}</Text>
+      <Alert status="danger">
+        <Alert.Content>
+          <Alert.Title>Can't plan the push</Alert.Title>
+          <Alert.Description>{planError}</Alert.Description>
+        </Alert.Content>
       </Alert>
     );
   }
@@ -156,9 +167,11 @@ export function AmpPushSteps({
 
   if (plan.stages.length === 0) {
     return (
-      <Text size="sm" c="dimmed" ta="center">
+      <span
+        style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)", textAlign: "center" }}
+      >
         Nothing to write — every setting the amp can take already matches this project amp.
-      </Text>
+      </span>
     );
   }
 
@@ -180,77 +193,90 @@ export function AmpPushSteps({
     return "pending";
   };
 
+  const sectionLabelStyle: CSSProperties = {
+    fontSize: "var(--amp-font-size-xs)",
+    fontWeight: 600,
+    color: "var(--amp-color-dimmed)",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  };
+
   return (
-    <Stack gap="xs" className="min-w-0">
-      <Group justify="space-between" gap="xs" wrap="wrap">
-        <Text size="xs" fw={600} c="dimmed" tt="uppercase" lts={0.5}>
-          Write plan
-        </Text>
-        <Text size="xs" c="dimmed">
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span style={sectionLabelStyle}>Write plan</span>
+        <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
           {plan.stages.length} {plan.stages.length === 1 ? "step" : "steps"} · {plan.packetCount}{" "}
           {plan.packetCount === 1 ? "write" : "writes"}
-        </Text>
-      </Group>
+        </span>
+      </div>
 
       {/* Its own scroll container: a full 4-channel push is ~26 rows, which
           must not stretch the modal on a short window. */}
       <div className="max-h-[320px] min-w-0 overflow-y-auto">
-        <Stack gap={2} className="min-w-0">
+        <div className="flex min-w-0 flex-col gap-0.5">
           {groups.map((group) => (
             <Fragment key={`${group.name}-${group.stages[0].index}`}>
-              <Text size="xs" fw={600} c="dimmed" tt="uppercase" lts={0.5} className="px-2 pt-2">
-                {group.name}
-              </Text>
+              <span style={{ ...sectionLabelStyle, paddingInline: 8, paddingTop: 8 }}>{group.name}</span>
               {group.stages.map(({ stage, index }) => {
                 const state = stateFor(stage, index);
                 const done = progress[stage.id]?.done ?? 0;
                 const tint =
                   state === "failed"
-                    ? "bg-[var(--mantine-color-red-light)]"
+                    ? "bg-[var(--amp-color-red-light)]"
                     : state === "running"
-                      ? "bg-[var(--mantine-color-amber-light)]"
+                      ? "bg-[var(--accent-soft)]"
                       : "";
                 return (
-                  <Group
+                  <div
                     key={stage.id}
-                    gap="xs"
-                    wrap="nowrap"
-                    className={`min-w-0 rounded-[var(--mantine-radius-sm)] px-2 py-1 transition-colors duration-300 ${tint}`}
+                    className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-colors duration-300 ${tint}`}
                   >
                     <span className="flex size-4 shrink-0 items-center justify-center">
                       <StageIcon state={state} />
                     </span>
-                    <Text size="sm" c={state === "skipped" ? "dimmed" : undefined} className="min-w-0 grow truncate">
+                    <span
+                      className="min-w-0 grow truncate"
+                      style={{
+                        fontSize: "var(--amp-font-size-sm)",
+                        color: state === "skipped" ? "var(--amp-color-dimmed)" : undefined,
+                      }}
+                    >
                       {stage.label}
-                    </Text>
+                    </span>
                     <StageCount state={state} done={done} total={stage.packets} />
-                  </Group>
+                  </div>
                 );
               })}
             </Fragment>
           ))}
-        </Stack>
+        </div>
       </div>
 
       {plan.adopted.length > 0 && (
-        <Alert color="amber" variant="light" title="Taken from the amp instead">
-          <Stack gap={4}>
-            <Text size="xs">
-              The amp can't be told to change these — they describe the hardware itself. Pushing updates the project
-              amp to match what the amp reports.
-            </Text>
-            {plan.adopted.map((row) => (
-              <Text key={`${row.group}:${row.label}`} size="xs">
-                <Text span fw={500}>
-                  {row.group} · {row.label}
-                </Text>
-                {" — "}
-                {row.project ?? "—"} → {row.live ?? "—"}
-              </Text>
-            ))}
-          </Stack>
+        <Alert status="accent">
+          <Alert.Content>
+            <Alert.Title>Taken from the amp instead</Alert.Title>
+            <Alert.Description>
+              <div className="flex flex-col gap-1">
+                <span style={{ fontSize: "var(--amp-font-size-xs)" }}>
+                  The amp can't be told to change these — they describe the hardware itself. Pushing updates the
+                  project amp to match what the amp reports.
+                </span>
+                {plan.adopted.map((row) => (
+                  <span key={`${row.group}:${row.label}`} style={{ fontSize: "var(--amp-font-size-xs)" }}>
+                    <span style={{ fontWeight: 500 }}>
+                      {row.group} · {row.label}
+                    </span>
+                    {" — "}
+                    {row.project ?? "—"} → {row.live ?? "—"}
+                  </span>
+                ))}
+              </div>
+            </Alert.Description>
+          </Alert.Content>
         </Alert>
       )}
-    </Stack>
+    </div>
   );
 }

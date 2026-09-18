@@ -307,7 +307,6 @@ fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec<Vec
             let source_code = match kind {
                 SourceKind::Analog => 0,
                 SourceKind::Dante => 1,
-                SourceKind::Aes3 => 2,
                 // Rejected at plan time — FC=11 cannot select backup.
                 SourceKind::Backup => return None,
             };

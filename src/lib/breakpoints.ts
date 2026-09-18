@@ -1,4 +1,24 @@
-import { useMediaQuery } from "@mantine/hooks";
+import { useEffect, useState } from "react";
+
+/** Minimal `useMediaQuery`, replacing `@mantine/hooks`' version — returns
+ * `false` on the very first render (before the listener attaches) and the
+ * live match state after, same contract the callers below already coerce
+ * `?? false` against. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(query).matches : false,
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    setMatches(mql.matches);
+    const listener = (event: MediaQueryListEvent) => setMatches(event.matches);
+    mql.addEventListener("change", listener);
+    return () => mql.removeEventListener("change", listener);
+  }, [query]);
+
+  return matches;
+}
 
 /** App-wide layout breakpoints. Deliberately *window*-relative (media
  * queries), not element-relative: every consumer is reacting to "the whole

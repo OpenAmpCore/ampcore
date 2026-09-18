@@ -5,8 +5,8 @@ import "./ActionFeedback.css";
 const ACCENT: Record<ActionFeedbackStatus, string | undefined> = {
   idle: undefined,
   pending: undefined,
-  success: "var(--mantine-color-green-6)",
-  error: "var(--mantine-color-red-6)",
+  success: "var(--amp-color-green-6)",
+  error: "var(--amp-color-red-6)",
 };
 
 /** The border/wash colour a control should take for `status`, or `undefined`

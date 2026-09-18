@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActionIcon, Box, Stack, Text, ThemeIcon, UnstyledButton } from "@mantine/core";
+import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
@@ -29,6 +29,10 @@ const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
+  /** Configure-tab per open amp. Held here because `AmpConfigureView` is
+   * unmounted whenever you switch to another amp or back to the Workspace —
+   * keeping the tab in the editor itself would lose it every time. */
+  const [configureTabById, setConfigureTabById] = useState<Record<string, string | null>>({});
 
   useEffect(() => {
     commands.ampModelsList().then((result) => {
@@ -45,6 +49,12 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
 
   function closeDevice(assignmentId: string) {
     setOpenDeviceIds((prev) => prev.filter((id) => id !== assignmentId));
+    setConfigureTabById((prev) => {
+      if (!(assignmentId in prev)) return prev;
+      const next = { ...prev };
+      delete next[assignmentId];
+      return next;
+    });
     if (activeTab === deviceTabValue(assignmentId)) {
       onActiveTabChange("workspace");
     }
@@ -95,53 +105,58 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
       <div className="flex min-h-0 flex-1">
         {/* Vertical device rail — Armonia-style, persists across Workspace/Operator View */}
         {openAssignments.length > 0 && (
-          <Stack
-            gap={4}
-            p={4}
-            w={56}
-            className="shrink-0 overflow-y-auto border-r border-[var(--mantine-color-default-border)]"
+          <div
+            className="flex w-14 shrink-0 flex-col gap-1 overflow-y-auto border-r border-[var(--amp-color-default-border)] p-1"
           >
             {openAssignments.map((assignment) => {
               const tabValue = deviceTabValue(assignment.id);
               const isActive = activeTab === tabValue;
               return (
-                <Box key={assignment.id} className="relative">
-                  <UnstyledButton
+                <div key={assignment.id} className="relative">
+                  <button
+                    type="button"
                     onClick={() => onActiveTabChange(tabValue)}
-                    p={4}
-                    className={`w-full rounded-[var(--mantine-radius-sm)] border ${
+                    className={`w-full appearance-none bg-transparent p-1 font-inherit rounded-md border ${
                       isActive
-                        ? "border-[var(--mantine-color-amber-filled)] bg-[var(--mantine-color-amber-light)]"
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
                         : "border-transparent"
                     }`}
                   >
-                    <Stack align="center" gap={2}>
-                      <ThemeIcon variant="light" color="gray" size={28}>
+                    <div className="flex flex-col items-center gap-0.5">
+                      <div
+                        className="flex items-center justify-center rounded-full"
+                        style={{
+                          width: 28,
+                          height: 28,
+                          background: "var(--amp-color-gray-light)",
+                          color: "var(--amp-color-gray-6)",
+                        }}
+                      >
                         <Server size={16} />
-                      </ThemeIcon>
-                      <Text fz={9} ta="center" lineClamp={2} className="max-w-[48px]">
-                        {assignment.label ?? "Amp"}
-                      </Text>
-                    </Stack>
-                  </UnstyledButton>
-                  <ActionIcon
-                    size="xs"
-                    variant="filled"
-                    color="red"
-                    radius="sm"
+                      </div>
+                      <span
+                        className="line-clamp-2 max-w-[48px] text-center"
+                        style={{ fontSize: 9 }}
+                      >
+                        {assignment.deviceName ?? "Amp"}
+                      </span>
+                    </div>
+                  </button>
+                  <Button
+                    isIconOnly
+                    size="sm"
+                    variant="danger"
                     className="absolute -top-1 -right-1"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeDevice(assignment.id);
-                    }}
+                    style={{ width: 18, height: 18, minWidth: 18 }}
+                    onPress={() => closeDevice(assignment.id)}
                     aria-label="Close device"
                   >
                     <X size={10} />
-                  </ActionIcon>
-                </Box>
+                  </Button>
+                </div>
               );
             })}
-          </Stack>
+          </div>
         )}
 
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">
@@ -156,6 +171,10 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
           {activeTab === "operator" && <OperatorView />}
           {activeDevice && (
             <AmpConfigureView
+              activeTab={configureTabById[activeDevice.id] ?? "input"}
+              onActiveTabChange={(tab) =>
+                setConfigureTabById((prev) => ({ ...prev, [activeDevice.id]: tab }))
+              }
               source={{
                 kind: "project",
                 project,

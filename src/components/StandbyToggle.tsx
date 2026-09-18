@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ActionIcon, Tooltip } from "@mantine/core";
-import { notifications } from "@mantine/notifications";
+import { Button, Spinner, Tooltip } from "@heroui/react";
+import { notifications } from "../lib/notify";
 import { Power, PowerOff } from "lucide-react";
 import { commands } from "../lib/bindings";
 
@@ -49,21 +49,31 @@ export function StandbyToggle({
         ? "Wake amp from standby"
         : "Put amp into standby";
 
+  const color = !canToggle
+    ? "var(--amp-color-dimmed)"
+    : standby
+      ? "var(--amp-color-orange-6)"
+      : "var(--amp-color-green-6)";
+
   return (
-    <Tooltip label={label} position="right" withArrow openDelay={300}>
-      <ActionIcon
-        variant="subtle"
-        color={!canToggle ? "gray" : standby ? "orange" : "green"}
-        size="lg"
-        mt="xs"
-        className="self-center"
-        aria-label={label}
-        disabled={!canToggle}
-        loading={pending}
-        onClick={toggle}
-      >
-        {standby ? <PowerOff size={18} /> : <Power size={18} />}
-      </ActionIcon>
+    <Tooltip delay={300}>
+      <Tooltip.Trigger>
+        <Button
+          isIconOnly
+          variant="ghost"
+          size="lg"
+          className="mt-2 self-center"
+          style={{ color }}
+          aria-label={label}
+          isDisabled={!canToggle}
+          onPress={toggle}
+        >
+          {pending ? <Spinner size="sm" /> : standby ? <PowerOff size={18} /> : <Power size={18} />}
+        </Button>
+      </Tooltip.Trigger>
+      <Tooltip.Content placement="right" showArrow>
+        {label}
+      </Tooltip.Content>
     </Tooltip>
   );
 }

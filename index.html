@@ -3,35 +3,46 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      Mantine's ColorSchemeScript, inlined.
+      Applies all three appearance knobs before first paint, so none of them
+      flashes its default on launch: `data-theme` (which HeroUI's `dark:`
+      variant and `design-tokens.css`'s per-scheme blocks both key off), plus
+      `--accent`/`--accent-foreground` and `--radius`, the single CSS
+      properties HeroUI derives its accent and radius scales from.
 
-      `main.tsx` sets `defaultColorScheme="auto"`, which Mantine can only
-      resolve in JS *after* first paint — so without this the app flashes the
-      wrong theme on every launch before snapping to the right one. Because
-      `src/styles/tailwind.css` binds its `dark:` variant to
-      `data-mantine-color-scheme`, that flash hits Tailwind-styled elements too.
-
-      `<ColorSchemeScript />` is a React component and this is a static Vite
-      SPA shell, so it cannot be rendered here. The body below is copied
-      verbatim from @mantine/core's `ColorSchemeScript.mjs` (v9.4.1) with
-      defaultColorScheme "auto" baked in. Two things must stay in sync with
-      Mantine or the attribute silently stops matching:
-        - the storage key "mantine-color-scheme-value"
-        - the "auto" default, which must equal `main.tsx`'s prop
-      Keep this first in <head>, before any stylesheet, so it wins the race.
+      Mirrors `src/lib/appearance.ts`, which owns these afterwards — the three
+      storage keys and the option tables below must stay in sync with it by
+      hand. Keep this first in <head>, before any stylesheet, so it wins the
+      race.
     -->
-    <script data-mantine-script="true">
+    <script>
       try {
-        var _colorScheme = window.localStorage.getItem("mantine-color-scheme-value");
-        var colorScheme =
-          _colorScheme === "light" || _colorScheme === "dark" || _colorScheme === "auto" ? _colorScheme : "auto";
-        var computedColorScheme =
-          colorScheme !== "auto"
-            ? colorScheme
+        var root = document.documentElement;
+        var ls = window.localStorage;
+
+        var stored = ls.getItem("ampcore-color-scheme");
+        var scheme = stored === "light" || stored === "dark" || stored === "auto" ? stored : "auto";
+        var resolved =
+          scheme !== "auto"
+            ? scheme
             : window.matchMedia("(prefers-color-scheme: dark)").matches
               ? "dark"
               : "light";
-        document.documentElement.setAttribute("data-mantine-color-scheme", computedColorScheme);
+        root.setAttribute("data-theme", resolved);
+        // Page background until the stylesheet loads (dark: design-tokens.css
+        // `--background`; light: HeroUI's own). `applyAppearance` clears this
+        // inline value at boot so theme switches afterwards aren't pinned.
+        root.style.background = resolved === "dark" ? "#0a0b0c" : "oklch(97.02% 0 0)";
+
+        // Accent is a single hue (0-359) on a pastel HSL ColorSlider — see
+        // `ACCENT_SATURATION`/`ACCENT_LIGHTNESS`/`DEFAULT_ACCENT_HUE` in
+        // appearance.ts, which these three numbers must stay in sync with.
+        var storedHue = Number(ls.getItem("ampcore-accent"));
+        var hue = ls.getItem("ampcore-accent") !== null && isFinite(storedHue) && storedHue >= 0 && storedHue < 360 ? storedHue : 217;
+        root.style.setProperty("--accent", "hsl(" + hue + " 65% 80%)");
+        root.style.setProperty("--accent-foreground", "oklch(0.32 0 0)");
+
+        var radii = { square: "0rem", small: "0.25rem", default: "0.5rem", large: "0.875rem" };
+        root.style.setProperty("--radius", radii[ls.getItem("ampcore-radius")] || radii.default);
       } catch (e) {}
     </script>
     <link rel="icon" type="image/png" href="/icon.png" />

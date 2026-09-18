@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ActionIcon, Tooltip } from "@mantine/core";
-import { notifications } from "@mantine/notifications";
+import { Button, Spinner, Tooltip } from "@heroui/react";
+import { notifications } from "../lib/notify";
 import { Lock, LockOpen } from "lucide-react";
 import { commands } from "../lib/bindings";
 
@@ -30,22 +30,27 @@ export function RotaryLockToggle({
   }
 
   const label = !known ? "Front panel lock unavailable" : rotaryLocked ? "Unlock front panel" : "Lock front panel";
+  const color = !known ? "var(--amp-color-dimmed)" : rotaryLocked ? "var(--amp-color-red-6)" : "var(--amp-color-green-6)";
 
   return (
-    <Tooltip label={label} position="right" withArrow openDelay={300}>
-      <ActionIcon
-        variant="subtle"
-        color={!known ? "gray" : rotaryLocked ? "red" : "green"}
-        size="lg"
-        mt="xs"
-        className="self-center"
-        aria-label={label}
-        disabled={!known}
-        loading={pending}
-        onClick={toggle}
-      >
-        {rotaryLocked ? <Lock size={18} /> : <LockOpen size={18} />}
-      </ActionIcon>
+    <Tooltip delay={300}>
+      <Tooltip.Trigger>
+        <Button
+          isIconOnly
+          variant="ghost"
+          size="lg"
+          className="mt-2 self-center"
+          style={{ color }}
+          aria-label={label}
+          isDisabled={!known}
+          onPress={toggle}
+        >
+          {pending ? <Spinner size="sm" /> : rotaryLocked ? <Lock size={18} /> : <LockOpen size={18} />}
+        </Button>
+      </Tooltip.Trigger>
+      <Tooltip.Content placement="right" showArrow>
+        {label}
+      </Tooltip.Content>
     </Tooltip>
   );
 }

@@ -171,14 +171,36 @@ pub struct SourceTrim {
     pub delay_ms: f64,
 }
 
-/// Per-source gain matching (vendor `Ana/Dante/AES_gain_matching`) — each
-/// source kind feeding a channel has its own trim and delay.
+/// Per-source gain matching (vendor `Ana/Dante_gain_matching`) — each source
+/// kind feeding a channel has its own trim and delay, independent of which
+/// source is currently selected.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceTrims {
     pub analog: SourceTrim,
     pub dante: SourceTrim,
-    pub aes3: SourceTrim,
+}
+
+/// Partial update for one `SourceTrim` — same bundling rationale as
+/// `EqBandPatch`. Either half may be omitted, but the wire has no partial
+/// form (FC=62 always carries both), so a writer that sets one must re-send
+/// the sibling's current value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTrimPatch {
+    pub trim_db: Option<f64>,
+    pub delay_ms: Option<f64>,
+}
+
+/// Partial update for a `BackupPriority` — same bundling rationale as
+/// `EqBandPatch`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPriorityPatch {
+    pub enabled: Option<bool>,
+    pub first: Option<u8>,
+    pub second: Option<u8>,
+    pub threshold_db: Option<i32>,
 }
 
 /// Backup source switching for one channel (vendor `StruPriority`). `first`/
@@ -202,8 +224,7 @@ pub struct AmpChannel {
     pub ohms: f64,
     /// Which physical source feeds this channel's input — Routing tab.
     /// Always set: a physical input always has a source. New channels
-    /// default to Analog N (1:1); older files are backfilled on load (see
-    /// `CURRENT_PROJECT_SCHEMA_VERSION`).
+    /// default to Analog N (1:1).
     pub source: ChannelSource,
     /// One crosspoint per possible matrix source (0..matrix_input_count) —
     /// Matrix tab. Grown/shrunk alongside `channels` whenever the assigned
@@ -279,17 +300,19 @@ pub struct AmpChannel {
     /// FIR filter bypass. Read back, not yet editable here.
     #[serde(default)]
     pub fir_bypassed: bool,
-    /// Per-source trim/delay. Read back, not yet editable here.
+    /// Per-source trim/delay — each source keeps its own pair, independent of
+    /// which one is currently selected. Routing tab.
     #[serde(default)]
     pub source_trims: SourceTrims,
-    /// Backup source switching. Read back, not yet editable here.
+    /// Backup source switching — Routing tab, offered only on amps with a
+    /// second source to fail over to (`AmpModelCatalogEntry.is_dante`).
     #[serde(default)]
     pub backup_priority: BackupPriority,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
 /// a slot's configuration survives a physical unit swap. `mac` starts unset
-/// at creation time — a slot is planned by model/label alone; linking it to
+/// at creation time — a slot is planned by model/name alone; linking it to
 /// a physical unit's MAC happens later via live network discovery, not by
 /// manual entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -297,7 +320,6 @@ pub struct AmpChannel {
 pub struct AmpAssignment {
     pub id: String,
     pub mac: Option<String>,
-    pub label: Option<String>,
     pub amp_model_id: Option<String>,
     /// Firmware version this slot is being planned for (e.g. "1.1.8",
     /// "1.1.9") — declared by the user at planning time, not detected, since
@@ -308,9 +330,20 @@ pub struct AmpAssignment {
     pub firmware_version: Option<String>,
     pub channels: Vec<AmpChannel>,
     /// The amp's user-set name (FC=60 `CUSTOMER_NAME_MODIFY`, read back via FC=0
-    /// BASIC_INFO). Not yet editable here.
+    /// BASIC_INFO). Editable offline here, or live via
+    /// `live_control_set_device_name` — the one name an amp has, whether
+    /// planned or connected.
     #[serde(default)]
     pub device_name: Option<String>,
+    /// Manual override: this amp is linked to hardware that may well be
+    /// online, but the user has deliberately stepped out of the live session.
+    /// The plan then edits exactly as it does for an offline amp, and nothing
+    /// is written to the amp. Persisted here rather than held in the UI so it
+    /// survives the amp dropping offline and coming back — the Offline banner
+    /// takes over while it is away, and the Disengaged one returns with it.
+    /// See `edit_lock::AmpEditLockState::Disengaged`.
+    #[serde(default)]
+    pub live_disengaged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -325,37 +358,14 @@ pub struct Project {
     pub amp_assignments: Vec<AmpAssignment>,
 }
 
-/// Bumped to 11 when speaker planning was removed: `AmpChannel`'s
-/// `speaker_library_id`, `way_index` and `join_group_id` are gone, along with
-/// the Speaker Library itself. Older files still load — serde ignores the
-/// leftover fields — and `ProjectDataState::load` rewrites any file below this
-/// version once, which strips them from disk.
-///
-/// Bumped to 12 when `AmpChannel.source` became required: files below 12 with
-/// a missing/`null` source load as Analog `channelIndex` (see
-/// `store::backfill_channel_sources`) and are rewritten once.
-///
-/// Bumped to 13 for full FC=27 coverage: limiter auto/max, and
-/// `AmpChannel`/`AmpAssignment` fields for FIR bypass, per-source trims,
-/// backup priority and device name. All default via serde
-/// (off/zero/empty); files below 13 are rewritten once.
-///
-/// Bumped to 14 when dynamic EQ was dropped for all models: the schema-13
-/// `AmpChannel.dynamic_eq` is gone. serde ignores the leftover field, and files
-/// below 14 are rewritten once, which strips it from disk.
-///
-/// Bumped to 15 when the schema-13 `ChannelEq.bypassed` was dropped: CVR amps
-/// have no whole-EQ bypass, only per-band active/bypassed. Same leftover-field
-/// handling as 14.
-///
-/// Bumped to 16 when input/output channel linking was dropped for all models:
-/// the schema-13 `AmpAssignment.link_input`/`link_output` are gone. Same
-/// leftover-field handling as 14.
-///
-/// Bumped to 17 when the schema-13 `AmpChannel.knob_gain_db` was dropped: CVR
-/// amps have no per-channel knob gain setting. Same leftover-field handling
-/// as 14.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 17;
+/// A version stamp only — nothing reads it to gate behavior. There are no
+/// released builds yet, so there is no old-file compatibility to preserve and
+/// no migration functions exist; a struct change that would otherwise break
+/// deserialization is just made directly. New fields still need
+/// `#[serde(default = ...)]` (see this file's module doc) purely so a
+/// project file saved earlier this session keeps loading after a field is
+/// added mid-development, not for any long-term compatibility guarantee.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 1;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -379,7 +389,7 @@ impl Project {
 impl AmpAssignment {
     pub fn new(
         mac: Option<String>,
-        label: Option<String>,
+        device_name: Option<String>,
         channel_count: u32,
         amp_model_id: Option<String>,
         firmware_version: Option<String>,
@@ -388,11 +398,11 @@ impl AmpAssignment {
         Self {
             id: new_id(),
             mac,
-            label,
             amp_model_id,
             firmware_version,
             channels,
-            device_name: None,
+            device_name,
+            live_disengaged: false,
         }
     }
 

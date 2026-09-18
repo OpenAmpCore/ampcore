@@ -42,6 +42,7 @@ pub const FC_FIR_BYPASS: u8 = 44;
 pub const FC_RMS_LIMITER_AUTO: u8 = 48;
 pub const FC_CUSTOMER_NAME: u8 = 60;
 pub const FC_SOURCE_DATA: u8 = 62;
+pub const FC_PRIORITY_INPUTS: u8 = 80;
 
 /// The device's per-channel name field is a fixed 16-byte null-padded ASCII
 /// buffer — half the width of the 32-byte *preset* name field, so the two
@@ -561,9 +562,10 @@ pub fn build_set_device_name(name: &str) -> Vec<u8> {
 /// struct (`Struct_test.cs:1462-1471`).
 ///
 /// The `segment` header field selects *which* source family the pair applies
-/// to: 0=Analog, 1=Dante, 2=AES3, matching the read side's
-/// `analog_/dante_/aes3_` trim+delay offsets. One function code serves all six
-/// values.
+/// to: 0=Analog, 1=Dante (2 was AES3, which this app no longer supports —
+/// `SourceTrimFamily` leaves the gap rather than renumbering a device-side
+/// value), matching the read side's `analog_`/`dante_` trim+delay offsets.
+/// One function code serves every value.
 ///
 /// Trim and delay always travel together — there is no partial form, so the
 /// vendor re-reads the sibling value and re-sends it
@@ -573,6 +575,35 @@ pub fn build_set_source_trim(channel_index: u8, segment: u8, trim_db: f32, delay
     body[..4].copy_from_slice(&trim_db.to_le_bytes());
     body[4..].copy_from_slice(&delay_ms.to_le_bytes());
     build_control_packet(FC_SOURCE_DATA, channel_index, segment, 0, IN_OUT_FLAG_INPUT, &body)
+}
+
+/// FC=80 PRIORITY_INPUTS, `in_out_flag=0` (input). Wire body (4 bytes):
+/// `[first u8][second u8][enabled u8][threshold i8]` — the vendor's
+/// `StruPriority`, built at `Variable\Channels.cs:794-803`.
+///
+/// `first`/`second` are source codes in the **same space as
+/// `FC_SOURCE_SELECT`** (0=Analog, 1=Dante), and `enabled` is a plain 0/1,
+/// not a mode. `threshold_db` is signed and negative in practice (-80..0),
+/// hence `i8` — the one field where a sign error would be silent.
+///
+/// There is deliberately no hold/revert time: the vendor's struct and UI have
+/// no such field, so the amp's own hysteresis is all there is.
+///
+/// **Only the 3-source `StruPriority` form is emitted.** The vendor switches
+/// to a shorter `PriorityDD` payload when the device reports flow letter "K"
+/// (`Channels.cs:683-690`); no supported model is known to do so, and that
+/// form's `mode`/`sourceIden` fields are used inconsistently between the
+/// vendor's own read and write paths, so it is not guessed at here. If a
+/// flow-K device ever turns up, this needs revisiting rather than extending.
+pub fn build_set_backup_priority(
+    channel_index: u8,
+    first: u8,
+    second: u8,
+    enabled: bool,
+    threshold_db: i8,
+) -> Vec<u8> {
+    let body = [first, second, u8::from(enabled), threshold_db as u8];
+    build_control_packet(FC_PRIORITY_INPUTS, channel_index, 0, 0, IN_OUT_FLAG_INPUT, &body)
 }
 
 #[cfg(test)]
@@ -660,16 +691,35 @@ mod tests {
     }
 
     /// The source family is the `segment` field, not part of the body — the
-    /// one detail that makes all six trims share a single function code.
+    /// one detail that makes every trim share a single function code.
+    /// Segment 2 was AES3 and is no longer produced by any caller
+    /// (`SourceTrimFamily` has no such variant), so only 0/1 are exercised.
     #[test]
     fn source_trim_frame_carries_family_in_segment() {
-        for (segment, trim, delay) in [(0u8, 1.5f32, 0.25f32), (1, 0.0, 0.0), (2, -2.0, 3.5)] {
+        for (segment, trim, delay) in [(0u8, 1.5f32, 0.25f32), (1, -2.0, 3.5)] {
             let (header, body) = decode(&build_set_source_trim(3, segment, trim, delay));
             assert_eq!(header, (62, 1, 3, segment, 0));
             assert_eq!(body.len(), 8);
             assert_eq!(f32::from_le_bytes(body[..4].try_into().unwrap()), trim);
             assert_eq!(f32::from_le_bytes(body[4..].try_into().unwrap()), delay);
         }
+    }
+
+    /// Pins the FC=80 frame. The threshold is the field worth a test of its
+    /// own: it is signed and negative in normal use, so encoding it as a
+    /// plain `u8` would send 176 for -80 and the amp would read a threshold
+    /// it never offers.
+    #[test]
+    fn backup_priority_frame_encodes_signed_threshold() {
+        let (header, body) = decode(&build_set_backup_priority(2, 0, 1, true, -80));
+        assert_eq!(header, (80, 1, 2, 0, 0));
+        assert_eq!(body, vec![0, 1, 1, 0xB0]);
+        assert_eq!(body[3] as i8, -80);
+
+        // Disabled, reversed priority, and a 0 dB threshold — the other end
+        // of each field's range.
+        let (_, body) = decode(&build_set_backup_priority(0, 1, 0, false, 0));
+        assert_eq!(body, vec![1, 0, 0, 0]);
     }
 
     fn chain_band(type_code: u8, active: bool) -> EqChainBand {

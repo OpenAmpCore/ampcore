@@ -1,9 +1,7 @@
-import { Center, Text } from "@mantine/core";
-
 export function OperatorView() {
   return (
-    <Center h="100%">
-      <Text c="dimmed">Operator View — coming soon</Text>
-    </Center>
+    <div className="flex h-full items-center justify-center">
+      <span style={{ color: "var(--amp-color-dimmed)" }}>Operator View — coming soon</span>
+    </div>
   );
 }

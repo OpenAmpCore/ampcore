@@ -1,20 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import {
-  Alert,
-  Badge,
-  Button,
-  Card,
-  Divider,
-  Group,
-  Loader,
-  Modal,
-  ScrollArea,
-  SimpleGrid,
-  Stack,
-  Text,
-  ThemeIcon,
-  UnstyledButton,
-} from "@mantine/core";
+import { Alert, Button, Card, Chip, Modal, Spinner } from "@heroui/react";
 import { Check, Link, Network, Server, X } from "lucide-react";
 import {
   commands,
@@ -49,36 +34,40 @@ const CHECK_LABELS: Record<AmpLinkCheckKind, string> = {
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <Text size="xs" fw={600} c="dimmed" tt="uppercase" lts={0.5}>
+    <span
+      style={{
+        fontSize: "var(--amp-font-size-xs)",
+        fontWeight: 600,
+        color: "var(--amp-color-dimmed)",
+        textTransform: "uppercase",
+        letterSpacing: 0.5,
+      }}
+    >
       {children}
-    </Text>
+    </span>
   );
 }
 
 /** Same dot as the Workspace amp cards, plus a text label. */
 function StatusDot({ color, label }: { color: string; label: string }) {
   return (
-    <Group gap={6} wrap="nowrap" className="shrink-0">
+    <div className="flex shrink-0 flex-nowrap items-center gap-1.5">
       <span
         className="size-2 shrink-0 rounded-full"
-        style={{ backgroundColor: `var(--mantine-color-${color}-filled)` }}
+        style={{ backgroundColor: `var(--amp-color-${color}-filled)` }}
       />
-      <Text size="xs" c="dimmed">
-        {label}
-      </Text>
-    </Group>
+      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{label}</span>
+    </div>
   );
 }
 
 function Field({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="min-w-0">
-      <Text size="xs" c="dimmed">
-        {label}
-      </Text>
-      <Text size="sm" ff={mono ? "monospace" : undefined} truncate>
+      <div style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>{label}</div>
+      <div className="truncate" style={{ fontSize: "var(--amp-font-size-sm)", fontFamily: mono ? "monospace" : undefined }}>
         {value}
-      </Text>
+      </div>
     </div>
   );
 }
@@ -115,38 +104,64 @@ type StripState = "idle" | "validating" | "compatible" | "incompatible";
 /** `[project amp] ——— node ——— [network amp]`. On a compatible result the
  * connector fills green left→right and a check pops in; `animationKey`
  * replays that whenever a different device is validated. */
+function ThemeIcon({
+  color,
+  size,
+  className,
+  children,
+}: {
+  color: string;
+  size: number;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`flex shrink-0 items-center justify-center rounded-full ${className ?? ""}`}
+      style={{
+        width: size,
+        height: size,
+        background: `var(--amp-color-${color}-light)`,
+        color: `var(--amp-color-${color}-6)`,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function LinkMatchStrip({ state, animationKey }: { state: StripState; animationKey: string }) {
   const compatible = state === "compatible";
   const iconColor = compatible ? "green" : "gray";
 
   return (
     <div className="flex min-w-0 items-center gap-3">
-      <ThemeIcon variant="light" color={iconColor} size={36} className="shrink-0 transition-colors">
+      <ThemeIcon color={iconColor} size={36} className="transition-colors">
         <Server size={18} />
       </ThemeIcon>
 
       <div className="relative h-7 min-w-0 flex-1">
         <div
           className={`absolute inset-x-0 top-1/2 -translate-y-1/2 overflow-hidden ${
-            state === "idle" ? "" : "h-0.5 rounded-full bg-[var(--mantine-color-default-border)]"
+            state === "idle" ? "" : "h-0.5 rounded-full bg-[var(--amp-color-default-border)]"
           }`}
           // Full shorthand, not `border-t-2 border-dashed`: without Tailwind's preflight the
           // other sides would fall back to a `medium` width and draw a second dashed line.
-          style={state === "idle" ? { borderTop: "2px dashed var(--mantine-color-default-border)" } : undefined}
+          style={state === "idle" ? { borderTop: "2px dashed var(--amp-color-default-border)" } : undefined}
         >
           {state === "validating" && (
             <div
               className="absolute inset-y-0 left-0 w-1/4 animate-[link-shimmer_1.1s_linear_infinite] motion-reduce:animate-none"
-              style={{ background: "linear-gradient(90deg, transparent, var(--mantine-color-gray-5), transparent)" }}
+              style={{ background: "linear-gradient(90deg, transparent, var(--amp-color-gray-5), transparent)" }}
             />
           )}
           {compatible && (
             <div
               key={animationKey}
-              className="absolute inset-0 origin-left animate-[link-fill_500ms_ease-out_both] bg-[var(--mantine-color-green-filled)] motion-reduce:animate-none"
+              className="absolute inset-0 origin-left animate-[link-fill_500ms_ease-out_both] bg-[var(--amp-color-green-filled)] motion-reduce:animate-none"
             />
           )}
-          {state === "incompatible" && <div className="absolute inset-0 bg-[var(--mantine-color-red-filled)]" />}
+          {state === "incompatible" && <div className="absolute inset-0 bg-[var(--amp-color-red-filled)]" />}
         </div>
 
         {(compatible || state === "incompatible") && (
@@ -155,8 +170,8 @@ function LinkMatchStrip({ state, animationKey }: { state: StripState; animationK
               key={animationKey}
               className={`flex size-7 items-center justify-center rounded-full motion-reduce:animate-none ${
                 compatible
-                  ? "animate-[link-pop_320ms_ease-out_450ms_both] bg-[var(--mantine-color-green-filled)]"
-                  : "animate-[link-pop_240ms_ease-out_both] bg-[var(--mantine-color-red-filled)]"
+                  ? "animate-[link-pop_320ms_ease-out_450ms_both] bg-[var(--amp-color-green-filled)]"
+                  : "animate-[link-pop_240ms_ease-out_both] bg-[var(--amp-color-red-filled)]"
               }`}
             >
               {compatible ? <Check size={16} strokeWidth={3} color="white" /> : <X size={16} strokeWidth={3} color="white" />}
@@ -165,7 +180,7 @@ function LinkMatchStrip({ state, animationKey }: { state: StripState; animationK
         )}
       </div>
 
-      <ThemeIcon variant="light" color={iconColor} size={36} className="shrink-0 transition-colors">
+      <ThemeIcon color={iconColor} size={36} className="transition-colors">
         <Network size={18} />
       </ThemeIcon>
     </div>
@@ -296,163 +311,178 @@ export function AmpLinkModal({
   }
 
   return (
-    <Modal opened={assignment !== null} onClose={onClose} title="Link Amp" size="xl" centered fullScreen={compact}>
-      <div className={`flex min-w-0 ${tight ? "flex-col gap-4" : "flex-row items-stretch gap-5"}`}>
-        {/* Project amp */}
-        <Stack gap="sm" className="min-w-0 flex-1 basis-0">
-          <SectionLabel>Project Amp</SectionLabel>
-          <Card withBorder padding="md">
-            <Group wrap="nowrap" gap="sm">
-              <ThemeIcon variant="light" color="gray" size={40}>
-                <Server size={20} />
-              </ThemeIcon>
-              <div className="min-w-0 flex-1">
-                <Text fw={600} truncate>
-                  {displayName}
-                </Text>
-                <Text size="xs" c="dimmed" truncate>
-                  {modelName ?? "No model"}
-                </Text>
+    <Modal.Backdrop isOpen={assignment !== null} onOpenChange={(open) => !open && onClose()}>
+      <Modal.Container placement="center" size={compact ? "full" : "lg"}>
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>Link Amp</Modal.Heading>
+            <Modal.CloseTrigger />
+          </Modal.Header>
+          <Modal.Body>
+            <div className={`flex min-w-0 ${tight ? "flex-col gap-4" : "flex-row items-stretch gap-5"}`}>
+              {/* Project amp */}
+              <div className="flex min-w-0 flex-1 basis-0 flex-col gap-2">
+                <SectionLabel>Project Amp</SectionLabel>
+                <Card className="p-[var(--amp-spacing-md)]">
+                  <div className="flex flex-nowrap items-center gap-2">
+                    <ThemeIcon color="gray" size={40}>
+                      <Server size={20} />
+                    </ThemeIcon>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate" style={{ fontWeight: 600 }}>
+                        {displayName}
+                      </div>
+                      <div className="truncate" style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
+                        {modelName ?? "No model"}
+                      </div>
+                    </div>
+                    <StatusDot color={status.color} label={status.label} />
+                  </div>
+                  <hr className="my-3 border-t border-[var(--amp-color-default-border)]" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Firmware" value={assignment?.firmwareVersion ?? "—"} />
+                    <Field label="Outputs" value={assignment?.channels.length ?? "—"} />
+                    <Field label="MAC" value={assignment?.mac ?? "Not linked"} mono={!!assignment?.mac} />
+                    <Field label="IP" value={linkedDevice?.ip ?? "—"} mono={!!linkedDevice} />
+                  </div>
+                </Card>
               </div>
-              <StatusDot color={status.color} label={status.label} />
-            </Group>
-            <Divider my="md" />
-            <SimpleGrid cols={2} spacing="md" verticalSpacing="md">
-              <Field label="Firmware" value={assignment?.firmwareVersion ?? "—"} />
-              <Field label="Outputs" value={assignment?.channels.length ?? "—"} />
-              <Field label="MAC" value={assignment?.mac ?? "Not linked"} mono={!!assignment?.mac} />
-              <Field label="IP" value={linkedDevice?.ip ?? "—"} mono={!!linkedDevice} />
-            </SimpleGrid>
-          </Card>
-        </Stack>
 
-        <Divider orientation={tight ? "horizontal" : "vertical"} />
+              <hr
+                className={
+                  tight
+                    ? "m-0 w-full border-t border-[var(--amp-color-default-border)]"
+                    : "m-0 h-auto self-stretch border-l border-t-0 border-[var(--amp-color-default-border)]"
+                }
+              />
 
-        {/* Network amps */}
-        <Stack gap="sm" className="min-w-0 flex-1 basis-0">
-          <Group justify="space-between" wrap="nowrap" gap="xs">
-            <SectionLabel>Network Amps</SectionLabel>
-            {devices.length > 0 && (
-              <Badge variant="default" size="sm" radius="sm">
-                {devices.length}
-              </Badge>
-            )}
-          </Group>
-          {devices.length === 0 ? (
-            <Stack
-              align="center"
-              justify="center"
-              gap="xs"
-              mih={140}
-              className="rounded-[var(--mantine-radius-sm)] border border-dashed border-[var(--mantine-color-default-border)]"
-            >
-              <Loader size="xs" />
-              <Text c="dimmed" size="sm" ta="center">
-                {devicesReady ? "Scanning the network…" : "Starting discovery…"}
-              </Text>
-            </Stack>
-          ) : (
-            <ScrollArea.Autosize mah={compact ? undefined : 360}>
-              <Stack gap="xs">
-                {devices.map((d) => {
-                  const isLinked = d.id === linkedDevice?.id;
-                  const isSelected = d.id === selectedId;
-                  const detected = detectedModels[d.id];
-                  const modelLabel =
-                    detected === undefined ? "Detecting…" : detected ? `${detected.brand} ${detected.model}` : "Unknown model";
-                  return (
-                    <UnstyledButton
-                      key={d.id}
-                      onClick={() => selectDevice(d.id)}
-                      aria-pressed={isSelected}
-                      className="block w-full"
-                    >
-                      <Card
-                        withBorder
-                        padding="sm"
-                        className={`transition-colors ${
-                          isSelected
-                            ? "border-[var(--mantine-color-amber-filled)] bg-[var(--mantine-color-amber-light)]"
-                            : "hover:border-[var(--mantine-color-gray-6)]"
-                        }`}
-                      >
-                        <Group justify="space-between" wrap="nowrap" gap="sm">
-                          <div className="min-w-0 flex-1">
-                            <Group gap={6} wrap="nowrap">
-                              <Text fw={500} size="sm" truncate>
-                                {d.name || d.mac}
-                              </Text>
-                              {isLinked && (
-                                <Badge size="xs" variant="light" color="green" className="shrink-0">
-                                  Linked
-                                </Badge>
-                              )}
-                            </Group>
-                            <Text size="xs" c="dimmed" truncate>
-                              {modelLabel} · {d.ip} · {d.firmwareFamily ?? "unknown"}
-                            </Text>
-                          </div>
-                          <StatusDot color={d.online ? "green" : "red"} label={d.online ? "Online" : "Offline"} />
-                        </Group>
-                      </Card>
-                    </UnstyledButton>
-                  );
-                })}
-              </Stack>
-            </ScrollArea.Autosize>
-          )}
-        </Stack>
-      </div>
+              {/* Network amps */}
+              <div className="flex min-w-0 flex-1 basis-0 flex-col gap-2">
+                <div className="flex flex-nowrap items-center justify-between gap-2">
+                  <SectionLabel>Network Amps</SectionLabel>
+                  {devices.length > 0 && <Chip size="sm">{devices.length}</Chip>}
+                </div>
+                {devices.length === 0 ? (
+                  <div
+                    className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--amp-color-default-border)]"
+                    style={{ minHeight: 140 }}
+                  >
+                    <Spinner size="sm" />
+                    <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)", textAlign: "center" }}>
+                      {devicesReady ? "Scanning the network…" : "Starting discovery…"}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="overflow-y-auto" style={{ maxHeight: compact ? undefined : 360 }}>
+                    <div className="flex flex-col gap-2">
+                      {devices.map((d) => {
+                        const isLinked = d.id === linkedDevice?.id;
+                        const isSelected = d.id === selectedId;
+                        const detected = detectedModels[d.id];
+                        const modelLabel =
+                          detected === undefined ? "Detecting…" : detected ? `${detected.brand} ${detected.model}` : "Unknown model";
+                        return (
+                          <button
+                            type="button"
+                            key={d.id}
+                            onClick={() => selectDevice(d.id)}
+                            aria-pressed={isSelected}
+                            className="block w-full appearance-none bg-transparent p-0 text-left font-inherit"
+                          >
+                            <Card
+                              className={`p-[var(--amp-spacing-sm)] transition-colors ${
+                                isSelected
+                                  ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                                  : "hover:border-[var(--amp-color-gray-6)]"
+                              }`}
+                            >
+                              <div className="flex flex-nowrap items-center justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-nowrap items-center gap-1.5">
+                                    <span className="truncate" style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)" }}>
+                                      {d.name || d.mac}
+                                    </span>
+                                    {isLinked && (
+                                      <Chip size="sm" color="success" className="shrink-0">
+                                        Linked
+                                      </Chip>
+                                    )}
+                                  </div>
+                                  <div className="truncate" style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
+                                    {modelLabel} · {d.ip} · {d.firmwareFamily ?? "unknown"}
+                                  </div>
+                                </div>
+                                <StatusDot color={d.online ? "green" : "red"} label={d.online ? "Online" : "Offline"} />
+                              </div>
+                            </Card>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
 
-      {/* Match row */}
-      <Divider my="md" />
-      <Stack gap="sm" className="min-w-0">
-        <LinkMatchStrip state={stripState} animationKey={`${selectedId}:${stripState}`} />
-        <Text size="sm" fw={500} ta="center" c={captionColor}>
-          {caption}
-        </Text>
+            {/* Match row */}
+            <hr className="my-3 border-t border-[var(--amp-color-default-border)]" />
+            <div className="flex min-w-0 flex-col gap-2">
+              <LinkMatchStrip state={stripState} animationKey={`${selectedId}:${stripState}`} />
+              <span
+                style={{
+                  fontSize: "var(--amp-font-size-sm)",
+                  fontWeight: 500,
+                  textAlign: "center",
+                  color: captionColor === "dimmed" ? "var(--amp-color-dimmed)" : `var(--amp-color-${captionColor}-6)`,
+                }}
+              >
+                {caption}
+              </span>
 
-        {result && (
-          <Stack gap={6} className="min-w-0">
-            {result.checks.map((check) => (
-              <Group key={check.kind} gap={8} wrap="nowrap" align="flex-start" className="min-w-0">
-                <ThemeIcon size={16} radius="xl" variant="light" color={check.passed ? "green" : "red"} className="mt-px shrink-0">
-                  {check.passed ? <Check size={10} strokeWidth={3} /> : <X size={10} strokeWidth={3} />}
-                </ThemeIcon>
-                <Text size="xs" fw={500} w={104} className="shrink-0">
-                  {CHECK_LABELS[check.kind]}
-                </Text>
-                <Text size="xs" c="dimmed" className="min-w-0">
-                  {check.detail}
-                </Text>
-              </Group>
-            ))}
-          </Stack>
-        )}
+              {result && (
+                <div className="flex min-w-0 flex-col gap-1.5">
+                  {result.checks.map((check) => (
+                    <div key={check.kind} className="flex min-w-0 flex-nowrap items-start gap-2">
+                      <ThemeIcon color={check.passed ? "green" : "red"} size={16} className="mt-px">
+                        {check.passed ? <Check size={10} strokeWidth={3} /> : <X size={10} strokeWidth={3} />}
+                      </ThemeIcon>
+                      <span className="shrink-0" style={{ fontSize: "var(--amp-font-size-xs)", fontWeight: 500, width: 104 }}>
+                        {CHECK_LABELS[check.kind]}
+                      </span>
+                      <span className="min-w-0" style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)" }}>
+                        {check.detail}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-        {(validationError || actionError) && (
-          <Alert color="red" variant="light">
-            {actionError ?? validationError}
-          </Alert>
-        )}
+              {(validationError || actionError) && <Alert status="danger">{actionError ?? validationError}</Alert>}
 
-        <Group justify="flex-end" gap="xs" wrap="wrap">
-          {assignment?.mac && (
-            <Button variant="default" loading={busy === "unlink"} disabled={busy === "link"} onClick={handleUnlink}>
-              Unlink
-            </Button>
-          )}
-          <Button
-            color="green"
-            leftSection={alreadyLinked ? <Check size={14} /> : <Link size={14} />}
-            loading={busy === "link"}
-            disabled={stripState !== "compatible" || alreadyLinked || busy === "unlink"}
-            onClick={handleAssign}
-          >
-            {alreadyLinked ? "Linked" : "Assign"}
-          </Button>
-        </Group>
-      </Stack>
-    </Modal>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {assignment?.mac && (
+                  <Button variant="secondary" isDisabled={busy === "link" || busy === "unlink"} onPress={handleUnlink}>
+                    {busy === "unlink" ? <Spinner size="sm" /> : "Unlink"}
+                  </Button>
+                )}
+                <Button
+                  variant="primary"
+                  isDisabled={stripState !== "compatible" || alreadyLinked || busy === "unlink" || busy === "link"}
+                  onPress={handleAssign}
+                >
+                  {busy === "link" ? (
+                    <Spinner size="sm" />
+                  ) : (
+                    <>
+                      {alreadyLinked ? <Check size={14} /> : <Link size={14} />} {alreadyLinked ? "Linked" : "Assign"}
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }

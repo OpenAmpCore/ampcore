@@ -1,4 +1,4 @@
-import { notifications } from "@mantine/notifications";
+import { notifications } from "./notify";
 
 import {
   commands,
@@ -105,7 +105,6 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
     sourceTrims: {
       analog: { trimDb: config.analogTrimDb ?? 0, delayMs: config.analogDelayMs ?? 0 },
       dante: { trimDb: config.danteTrimDb ?? 0, delayMs: config.danteDelayMs ?? 0 },
-      aes3: { trimDb: config.aes3TrimDb ?? 0, delayMs: config.aes3DelayMs ?? 0 },
     },
     backupPriority: config.backupPriority,
   };
@@ -135,7 +134,6 @@ export function buildLiveAssignmentViewModel(
   return {
     id: device.id,
     mac: device.mac,
-    label: device.name || device.mac,
     ampModelId: null,
     firmwareVersion: device.firmwareVersion,
     channels,
@@ -200,7 +198,7 @@ async function reportWrite(
  *
  * Rolling goes through `showRollingNotification` rather than a stable `id`,
  * because `notifications.show()` silently *ignores* a repeated id instead of
- * replacing it — see that helper's doc for the two Mantine behaviours involved.
+ * replacing it — see that helper's doc for why.
  *
  * Two deliberate silences:
  * - a command whose packets were *all* coalesced never reached the wire; the
@@ -252,8 +250,23 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     async setChannelOutputMute(channelIndex, muted) {
       return reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
     },
+    async setChannelFirBypass(channelIndex, bypassed) {
+      return reportWrite("Set FIR bypass", commands.liveControlSetFirBypass(deviceId, channelIndex, bypassed));
+    },
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
+    },
+    async setSourceTrim(channelIndex, kind, trimDb, delayMs) {
+      return reportWrite(
+        "Set source trim/delay",
+        commands.liveControlSetSourceTrim(deviceId, channelIndex, kind, trimDb, delayMs),
+      );
+    },
+    async setBackupPriority(channelIndex, first, second, enabled, thresholdDb) {
+      return reportWrite(
+        "Set backup priority",
+        commands.liveControlSetBackupPriority(deviceId, channelIndex, first, second, enabled, thresholdDb),
+      );
     },
     async setEqBand(channelIndex, direction, bandIndex, patch) {
       return reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
@@ -287,6 +300,9 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
      * `live_control_set_channel_source`). */
     async setChannelSource(channelIndex, kind, index) {
       return reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind, index));
+    },
+    async setDeviceName(name) {
+      return reportWrite("Set device name", commands.liveControlSetDeviceName(deviceId, name ?? ""));
     },
   };
 }

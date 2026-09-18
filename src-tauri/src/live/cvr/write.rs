@@ -316,8 +316,8 @@ pub fn build_set_device_name(firmware_family: Option<&str>, name: &str) -> Optio
     }
 }
 
-/// `segment` selects the source family: 0=Analog, 1=Dante, 2=AES3. Trim and
-/// delay have no partial form and must both be supplied.
+/// `segment` selects the source family: 0=Analog, 1=Dante. Trim and delay
+/// have no partial form and must both be supplied.
 pub fn build_set_source_trim(
     firmware_family: Option<&str>,
     channel_index: u8,
@@ -328,6 +328,29 @@ pub fn build_set_source_trim(
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
         Some("1.1.9") => Some(super::write_v119::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
+        _ => None,
+    }
+}
+
+/// `first`/`second` are `FC_SOURCE_SELECT` source codes (0=Analog, 1=Dante)
+/// and `threshold_db` is signed — see
+/// `write_v118::build_set_backup_priority`, including why only the 3-source
+/// payload form is emitted.
+pub fn build_set_backup_priority(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    first: u8,
+    second: u8,
+    enabled: bool,
+    threshold_db: i8,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => {
+            Some(super::write_v118::build_set_backup_priority(channel_index, first, second, enabled, threshold_db))
+        }
+        Some("1.1.9") => {
+            Some(super::write_v119::build_set_backup_priority(channel_index, first, second, enabled, threshold_db))
+        }
         _ => None,
     }
 }

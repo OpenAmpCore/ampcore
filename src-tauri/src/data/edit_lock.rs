@@ -2,7 +2,9 @@
 //! is linked to an online network amp is locked while the two fingerprints
 //! disagree (or can't be compared yet) — editing the plan would only widen a
 //! gap between plan and hardware that nothing can resolve yet. Unlinked and
-//! offline amps are always editable.
+//! offline amps are always editable, as is one the user has manually
+//! disengaged from its amp (`AmpAssignment.live_disengaged`) — that override
+//! is the deliberate way out of a lock, and out of a live session.
 
 use serde::Serialize;
 use specta::Type;
@@ -32,6 +34,12 @@ pub enum AmpEditLockState {
     Mismatch,
     /// A fingerprint couldn't be fully computed — locked.
     Unreadable,
+    /// Online and readable, but the user has deliberately stepped out of the
+    /// live session (`AmpAssignment.live_disengaged`) — editable, and nothing
+    /// is written to the amp. Only ever resolved against a *reachable* amp:
+    /// an unlinked or offline amp keeps its own state, since that is the
+    /// honest reason it is editable.
+    Disengaged,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -67,6 +75,38 @@ pub struct LiveAmpReading {
 }
 
 pub fn resolve_edit_lock(
+    project: &Project,
+    assignment: &AmpAssignment,
+    models: &[AmpModelCatalogEntry],
+    links: &[DeviceModelLink],
+    reading: Option<&LiveAmpReading>,
+) -> AmpEditLock {
+    let mut lock = resolve_engaged_lock(project, assignment, models, links, reading);
+
+    // Applied over the finished verdict rather than short-circuiting the
+    // resolution: `rows`/`project`/`live` stay populated, so the comparison
+    // still opens while disengaged and can show how far the plan has drifted
+    // — which is the information needed before re-engaging. Only the state
+    // and the lock itself are overridden.
+    //
+    // Unlinked and offline amps keep their own state so their own banner
+    // shows: disengaging, losing the amp, and getting it back must land on
+    // Offline and then back on Disengaged, not on Disengaged throughout.
+    if assignment.live_disengaged
+        && !matches!(
+            lock.state,
+            AmpEditLockState::Unlinked | AmpEditLockState::Offline
+        )
+    {
+        lock.state = AmpEditLockState::Disengaged;
+        lock.locked = false;
+    }
+
+    lock
+}
+
+/// The ordinary verdict, as if `live_disengaged` were never set.
+fn resolve_engaged_lock(
     project: &Project,
     assignment: &AmpAssignment,
     models: &[AmpModelCatalogEntry],

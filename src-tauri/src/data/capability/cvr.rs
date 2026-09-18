@@ -9,10 +9,6 @@ use super::{AmpCapability, ParamRange, PowerMode, SourceKind};
 /// Ported from the old app's fixed 10-band layout.
 const EQ_BANDS_PER_CHANNEL: u32 = 10;
 
-/// V_num threshold for extended EQ.
-pub const VNUM_EXTENDED_EQ: u32 = 116;
-/// V_num threshold for the "Phonic" variant.
-pub const VNUM_PHONIC_VARIANT: u32 = 117;
 /// V_num threshold for speaker management + FIR filters (current baseline).
 pub const VNUM_118: u32 = 118;
 /// V_num threshold for noise gate thresholds and extended delay.
@@ -30,8 +26,6 @@ pub const VNUM_119: u32 = 119;
 #[serde(rename_all = "camelCase")]
 pub struct CvrFirmwareCapability {
     pub v_num: Option<u32>,
-    pub extended_eq: bool,
-    pub phonic_variant: bool,
     pub speaker_management: bool,
     pub fir_filters: bool,
     pub noise_gate_threshold: bool,
@@ -44,8 +38,6 @@ impl CvrFirmwareCapability {
         let at_least = |min: u32| v_num.map(|v| v >= min).unwrap_or(false);
         Self {
             v_num,
-            extended_eq: at_least(VNUM_EXTENDED_EQ),
-            phonic_variant: at_least(VNUM_PHONIC_VARIANT),
             speaker_management: at_least(VNUM_118),
             fir_filters: at_least(VNUM_118),
             noise_gate_threshold: at_least(VNUM_119),
@@ -131,6 +123,16 @@ pub struct AmpParamRanges {
     pub peak_limiter_hold_ms: ParamRange,
     pub peak_limiter_release_ms: ParamRange,
     pub noise_gate_threshold_dbu: ParamRange,
+    /// Per-source input trim. The vendor allows a wider swing on a digital
+    /// source than on analog, so these are two separate bounds rather than
+    /// one shared with `output_trim_db`.
+    pub source_trim_analog_db: ParamRange,
+    pub source_trim_digital_db: ParamRange,
+    /// Per-source input delay — distinct from `delay_in_ms`, which is the
+    /// channel's own post-selection delay.
+    pub source_delay_ms: ParamRange,
+    /// Signal-loss threshold for backup/auto-source switching.
+    pub backup_threshold_db: ParamRange,
     /// Max byte length for `AmpChannel.input_name`/`output_name` — a plain
     /// scalar, not a `ParamRange`, since it's a single bound, not a min/max.
     pub channel_name_max_length: u32,
@@ -207,6 +209,32 @@ pub fn cvr_param_ranges() -> AmpParamRanges {
             min: 0.0,
             max: 1000.0,
         },
+        // Vendor `MyControls1\SoundSoure_All1.xaml`, which is authoritative
+        // here: analog trim is +/-18 dB but a digital source gets -30..+21.
+        // (The old web app's 0..18 for both is simply wrong — it cannot even
+        // express the -12 dB its own screenshots show.)
+        source_trim_analog_db: ParamRange {
+            min: -18.0,
+            max: 18.0,
+        },
+        source_trim_digital_db: ParamRange {
+            min: -30.0,
+            max: 21.0,
+        },
+        // The vendor XAML default. It narrows this to 10 ms for flows
+        // D/E/VN117 and widens it to 200 ms for flow G, but the flow letter
+        // comes from live BASIC_INFO and `resolve` only has the catalog model
+        // plus a firmware string, so the per-flow override is not expressible
+        // here yet — see this module's `builtin_topology` note about the same
+        // gap for source availability.
+        source_delay_ms: ParamRange {
+            min: 0.0,
+            max: 30.0,
+        },
+        backup_threshold_db: ParamRange {
+            min: -80.0,
+            max: 0.0,
+        },
         noise_gate_threshold_dbu: ParamRange {
             min: -50.0,
             max: 20.0,
@@ -275,9 +303,10 @@ pub fn rated_rms_voltage_from_firmware_string(firmware_version: &str) -> Option<
 /// analog inputs *and*, if Dante-equipped, 4 Dante inputs — not a combined
 /// pool), but only Analog is freely patchable to any digital input — Dante
 /// channel N always feeds digital input N (see `SourceChannelCount`).
-/// AES3/backup source availability has no offline equivalent in this catalog
-/// yet (the old app derived it from a live "line mode" digit) — deliberately
-/// not fabricated here.
+/// Backup source availability has no offline equivalent in this catalog yet
+/// (the old app derived it from a live "line mode" digit) — deliberately not
+/// fabricated here. Backup is offered on the strength of `is_dante` instead,
+/// since a Dante-equipped amp always has a second source to fail over to.
 pub fn builtin_topology(model: &str, channel_count: u32, is_dante: bool) -> AmpDspTopology {
     AmpDspTopology {
         matrix_input_count: channel_count,

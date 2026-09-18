@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Menu, Select, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { Dropdown, Tooltip, dropdownVariants } from "@heroui/react";
 import { CommitNumberInput } from "./CommitNumberInput";
+import { SimpleSelect } from "./SimpleSelect";
 import { buildBandResponseCurve, buildResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
 import {
   type AmpAssignment,
@@ -91,6 +92,7 @@ const GRAPH_HEIGHT = 420;
  * edge, rather than the graph (self-limited by its own aspect ratio) ending
  * up narrower than the full-width strip on large windows. */
 const EDITOR_MAX_WIDTH = 1500;
+const DROPDOWN_SLOTS = dropdownVariants();
 /** Narrowest a band/crossover column can get before its inputs stop being
  * readable — the strip scrolls horizontally rather than going below it. */
 const STRIP_MIN_WIDTH = 96;
@@ -309,6 +311,7 @@ function ResponseGraph({
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const [contextMenu, setContextMenu] = useState<{ ref: EqStageRef; x: number; y: number } | null>(null);
+  const contextMenuAnchorRef = useRef<HTMLDivElement>(null);
 
   const zeroDbY = yForDb(0);
   const fillPath = `${pathFor(points)} L ${GRAPH_WIDTH} ${zeroDbY} L 0 ${zeroDbY} Z`;
@@ -428,9 +431,9 @@ function ResponseGraph({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
-        className="rounded-[var(--mantine-radius-sm)]"
+        className="rounded-lg"
         style={{
-          backgroundColor: "var(--mantine-color-dark-8)",
+          backgroundColor: "var(--amp-color-dark-8)",
           display: "block",
           width: "100%",
           height: "auto",
@@ -456,7 +459,7 @@ function ResponseGraph({
             x2={xForFreq(hz)}
             y1={0}
             y2={GRAPH_HEIGHT}
-            stroke="var(--mantine-color-dark-5)"
+            stroke="var(--amp-color-dark-5)"
             strokeWidth={1}
           />
         ))}
@@ -467,29 +470,29 @@ function ResponseGraph({
             x2={GRAPH_WIDTH}
             y1={yForDb(db)}
             y2={yForDb(db)}
-            stroke="var(--mantine-color-dark-5)"
+            stroke="var(--amp-color-dark-5)"
             strokeWidth={1}
           />
         ))}
-        <line x1={0} x2={GRAPH_WIDTH} y1={zeroDbY} y2={zeroDbY} stroke="var(--mantine-color-dark-3)" strokeWidth={1} />
-        <path d={fillPath} fill="var(--mantine-color-dark-4)" opacity={0.35} stroke="none" />
-        <path d={pathFor(points)} fill="none" stroke="var(--mantine-color-amber-filled)" strokeWidth={2} />
+        <line x1={0} x2={GRAPH_WIDTH} y1={zeroDbY} y2={zeroDbY} stroke="var(--amp-color-dark-3)" strokeWidth={1} />
+        <path d={fillPath} fill="var(--amp-color-dark-4)" opacity={0.35} stroke="none" />
+        <path d={pathFor(points)} fill="none" stroke="var(--accent)" strokeWidth={2} />
         {isolatedCurve && (
           <path
             d={pathFor(isolatedCurve)}
             fill="none"
-            stroke="var(--mantine-color-blue-5)"
+            stroke="var(--amp-color-blue-5)"
             strokeWidth={1.5}
             strokeDasharray="4 3"
           />
         )}
         {GRID_FREQS_HZ.map((hz) => (
-          <text key={hz} x={xForFreq(hz) + 3} y={GRAPH_HEIGHT - 4} fontSize={9} fill="var(--mantine-color-dimmed)">
+          <text key={hz} x={xForFreq(hz) + 3} y={GRAPH_HEIGHT - 4} fontSize={9} fill="var(--amp-color-dimmed)">
             {freqLabel(hz)}
           </text>
         ))}
         {GRID_DB.map((db) => (
-          <text key={db} x={3} y={yForDb(db) - 3} fontSize={9} fill="var(--mantine-color-dimmed)">
+          <text key={db} x={3} y={yForDb(db) - 3} fontSize={9} fill="var(--amp-color-dimmed)">
             {db > 0 ? `+${db}` : db}
           </text>
         ))}
@@ -530,13 +533,13 @@ function ResponseGraph({
                 cx={cx}
                 cy={cy}
                 r={5}
-                fill={selected ? "var(--mantine-color-amber-light)" : "var(--mantine-color-body)"}
-                stroke={selected ? "var(--mantine-color-amber-filled)" : "var(--mantine-color-text)"}
+                fill={selected ? "var(--accent-soft)" : "var(--amp-color-body)"}
+                stroke={selected ? "var(--accent)" : "var(--amp-color-text)"}
                 strokeWidth={1.5}
                 pointerEvents="none"
               />
               {!selected && (
-                <text x={cx} y={cy + 18} fontSize={11} textAnchor="middle" fill="var(--mantine-color-text)" pointerEvents="none">
+                <text x={cx} y={cy + 18} fontSize={11} textAnchor="middle" fill="var(--amp-color-text)" pointerEvents="none">
                   {label}
                 </text>
               )}
@@ -558,8 +561,8 @@ function ResponseGraph({
                     style={{ cursor: axisCursor }}
                     onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
                   />
-                  <circle cx={cx - axisOffset} cy={cy} r={3} fill="var(--mantine-color-body)" stroke="var(--mantine-color-amber-filled)" strokeWidth={1} pointerEvents="none" />
-                  <circle cx={cx + axisOffset} cy={cy} r={3} fill="var(--mantine-color-body)" stroke="var(--mantine-color-amber-filled)" strokeWidth={1} pointerEvents="none" />
+                  <circle cx={cx - axisOffset} cy={cy} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
+                  <circle cx={cx + axisOffset} cy={cy} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
 
                   {info.supportsGain && (
                     <>
@@ -579,14 +582,14 @@ function ResponseGraph({
                         style={{ cursor: gainCursor }}
                         onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
                       />
-                      <circle cx={cx} cy={cy - axisOffset} r={3} fill="var(--mantine-color-body)" stroke="var(--mantine-color-amber-filled)" strokeWidth={1} pointerEvents="none" />
-                      <circle cx={cx} cy={cy + axisOffset} r={3} fill="var(--mantine-color-body)" stroke="var(--mantine-color-amber-filled)" strokeWidth={1} pointerEvents="none" />
+                      <circle cx={cx} cy={cy - axisOffset} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
+                      <circle cx={cx} cy={cy + axisOffset} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
                     </>
                   )}
 
                   {info.supportsQ && (
                     <>
-                      <line x1={qLeftX} y1={cy} x2={qRightX} y2={cy} stroke="var(--mantine-color-blue-5)" strokeWidth={1} opacity={0.5} />
+                      <line x1={qLeftX} y1={cy} x2={qRightX} y2={cy} stroke="var(--amp-color-blue-5)" strokeWidth={1} opacity={0.5} />
                       <circle
                         cx={qLeftX}
                         cy={cy}
@@ -603,8 +606,8 @@ function ResponseGraph({
                         style={{ cursor: axisCursor }}
                         onPointerDown={(e) => beginDragIfActivated(e, ref, "qRight")}
                       />
-                      <circle cx={qLeftX} cy={cy} r={2.6} fill="var(--mantine-color-blue-5)" pointerEvents="none" />
-                      <circle cx={qRightX} cy={cy} r={2.6} fill="var(--mantine-color-blue-5)" pointerEvents="none" />
+                      <circle cx={qLeftX} cy={cy} r={2.6} fill="var(--amp-color-blue-5)" pointerEvents="none" />
+                      <circle cx={qRightX} cy={cy} r={2.6} fill="var(--amp-color-blue-5)" pointerEvents="none" />
                     </>
                   )}
                 </g>
@@ -614,38 +617,44 @@ function ResponseGraph({
         })}
       </svg>
 
-      <Menu opened={contextMenu !== null} onClose={() => setContextMenu(null)} position="bottom-start" withinPortal shadow="md">
-        <Menu.Target>
-          <div style={{ position: "absolute", left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0, width: 1, height: 1 }} />
-        </Menu.Target>
-        <Menu.Dropdown>
+      <div
+        ref={contextMenuAnchorRef}
+        style={{ position: "absolute", left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0, width: 1, height: 1 }}
+      />
+      {/* Slot classes passed explicitly: this menu is anchored to a bare ref
+          rather than a `<Dropdown>` root, and without that root HeroUI's
+          context lookup yields no classes at all — see the note beside
+          `DROPDOWN_SLOTS` in `AmpConfigureView.tsx`. */}
+      <Dropdown.Popover
+        className={DROPDOWN_SLOTS.popover()}
+        triggerRef={contextMenuAnchorRef}
+        isOpen={contextMenu !== null}
+        onOpenChange={(open) => !open && setContextMenu(null)}
+        placement="bottom start"
+      >
+        <Dropdown.Menu
+          className={DROPDOWN_SLOTS.menu()}
+          onAction={(key) => {
+            if (!contextMenu) return;
+            if (key === "toggle") onToggleActive(contextMenu.ref);
+            else if (key === "resetGain") onResetGain(contextMenu.ref);
+            setContextMenu(null);
+          }}
+        >
           {contextMenu &&
             (() => {
               const info = stageInfo(eq, contextMenu.ref, capsByType);
               return (
                 <>
-                  <Menu.Item
-                    onClick={() => {
-                      onToggleActive(contextMenu.ref);
-                      setContextMenu(null);
-                    }}
-                  >
-                    {info.active ? "Bypass" : "Enable"}
-                  </Menu.Item>
-                  <Menu.Item
-                    disabled={!info.supportsGain}
-                    onClick={() => {
-                      onResetGain(contextMenu.ref);
-                      setContextMenu(null);
-                    }}
-                  >
+                  <Dropdown.Item id="toggle">{info.active ? "Bypass" : "Enable"}</Dropdown.Item>
+                  <Dropdown.Item id="resetGain" isDisabled={!info.supportsGain}>
                     Reset Gain
-                  </Menu.Item>
+                  </Dropdown.Item>
                 </>
               );
             })()}
-        </Menu.Dropdown>
-      </Menu>
+        </Dropdown.Menu>
+      </Dropdown.Popover>
     </div>
   );
 }
@@ -750,20 +759,20 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   }
 
   return (
-    <Stack
-      gap="md"
-      p="md"
-      className="min-w-0"
+    <div
+      className="flex min-w-0 flex-col gap-4 p-4"
       style={{
         maxWidth: EDITOR_MAX_WIDTH,
         margin: "0 auto",
       }}
     >
       {!interactive && (
-        <Text size="xs" c="dimmed" ta="center">
+        <span
+          style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}
+        >
           Read-only — EQ can't be edited here right now. Click a band to select it (highlights its column below) and
           see its isolated response; freq, gain, and Q are display-only.
-        </Text>
+        </span>
       )}
       <ResponseGraph
         points={points}
@@ -829,7 +838,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
           />
         </div>
       </div>
-    </Stack>
+    </div>
   );
 }
 
@@ -841,24 +850,27 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
  * the tooltip so nothing is actually lost. */
 function ActiveDotToggle({ active, onClick }: { active: boolean; onClick: () => void }) {
   return (
-    <Tooltip label={active ? "Enabled — click to bypass" : "Bypassed — click to enable"} openDelay={400} withArrow>
-      <UnstyledButton
-        onClick={onClick}
-        h={20}
-        className="flex w-full cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--mantine-color-amber-filled)]"
-        aria-pressed={active}
-        aria-label={active ? "Enabled" : "Bypassed"}
-      >
-        <span
-          style={{
-            width: 10,
-            height: 10,
-            borderRadius: "50%",
-            border: `1px solid ${active ? "var(--mantine-color-green-6)" : "var(--mantine-color-dimmed)"}`,
-            background: active ? "var(--mantine-color-green-6)" : "transparent",
-          }}
-        />
-      </UnstyledButton>
+    <Tooltip delay={400}>
+      <Tooltip.Trigger>
+        <button
+          type="button"
+          onClick={onClick}
+          className="flex h-5 w-full cursor-pointer appearance-none items-center justify-center border-0 bg-transparent p-0 font-inherit focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          aria-pressed={active}
+          aria-label={active ? "Enabled" : "Bypassed"}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              border: `1px solid ${active ? "var(--amp-color-green-6)" : "var(--amp-color-dimmed)"}`,
+              background: active ? "var(--amp-color-green-6)" : "transparent",
+            }}
+          />
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Content showArrow>{active ? "Enabled — click to bypass" : "Bypassed — click to enable"}</Tooltip.Content>
     </Tooltip>
   );
 }
@@ -870,9 +882,12 @@ function ActiveDotToggle({ active, onClick }: { active: boolean; onClick: () => 
 function EmptyParamSlot() {
   return (
     <div style={{ height: 36 }} className="flex items-center justify-center">
-      <Text size="sm" c="dimmed" className="opacity-40">
+      <span
+        className="opacity-40"
+        style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}
+      >
         &middot;
-      </Text>
+      </span>
     </div>
   );
 }
@@ -896,23 +911,29 @@ function StripShell({
   children: React.ReactNode;
 }) {
   return (
-    <Stack
-      gap={4}
-      p={6}
-      bdrs="sm"
-      bd={`1px solid ${selected ? "var(--mantine-color-amber-filled)" : "var(--mantine-color-default-border)"}`}
-      bg={selected ? "var(--mantine-color-amber-light)" : undefined}
-      className={`min-w-0 transition-opacity duration-150 ${
+    <div
+      className={`flex min-w-0 flex-col gap-1 rounded-lg border p-1.5 transition-opacity duration-150 ${
         dimmed && !selected ? "opacity-[0.55] hover:opacity-100" : ""
       }`}
+      style={{
+        borderColor: selected ? "var(--accent)" : "var(--amp-color-default-border)",
+        background: selected ? "var(--accent-soft)" : undefined,
+        cursor: "pointer",
+      }}
       onClick={onSelect}
-      style={{ cursor: "pointer" }}
     >
-      <Text size="sm" fw={700} c="dimmed" ta="center">
+      <span
+        style={{
+          fontSize: "var(--amp-font-size-sm)",
+          fontWeight: 700,
+          color: "var(--amp-color-dimmed)",
+          textAlign: "center",
+        }}
+      >
         {label}
-      </Text>
+      </span>
       {children}
-    </Stack>
+    </div>
   );
 }
 
@@ -935,15 +956,12 @@ function CrossoverStrip({
 }) {
   return (
     <StripShell label={label} selected={selected} dimmed={!slot.active} onSelect={onSelect}>
-      <Select
-        size="sm"
+      <SimpleSelect
         data={CROSSOVER_FILTER_OPTIONS}
         value={slot.filterType}
         onChange={(value) => value && onChange({ filterType: value as CrossoverFilterType })}
-        allowDeselect={false}
       />
       <CommitNumberInput
-        size="sm"
         suffix=" Hz"
         min={freqMin ?? undefined}
         max={freqMax ?? undefined}
@@ -989,15 +1007,12 @@ function BandStrip({
   const caps = capsByType[band.filterType];
   return (
     <StripShell label={label} selected={selected} dimmed={!band.active} onSelect={onSelect}>
-      <Select
-        size="sm"
+      <SimpleSelect
         data={EQ_FILTER_OPTIONS}
         value={band.filterType}
         onChange={(value) => value && onChange({ filterType: value as EqFilterType })}
-        allowDeselect={false}
       />
       <CommitNumberInput
-        size="sm"
         suffix=" Hz"
         min={freqMin ?? undefined}
         max={freqMax ?? undefined}
@@ -1006,7 +1021,6 @@ function BandStrip({
       />
       {caps.supportsGain ? (
         <CommitNumberInput
-          size="sm"
           suffix=" dB"
           step={0.5}
           min={gainMin ?? undefined}
@@ -1019,7 +1033,6 @@ function BandStrip({
       )}
       {caps.supportsQ ? (
         <CommitNumberInput
-          size="sm"
           suffix=" Q"
           step={0.1}
           min={qMin ?? undefined}

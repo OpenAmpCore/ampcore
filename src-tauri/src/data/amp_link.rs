@@ -62,7 +62,7 @@ fn find_model<'a>(models: &'a [AmpModelCatalogEntry], id: Option<&str>) -> Optio
 /// Same fallback chain the Workspace uses for a card's name.
 fn assignment_name(assignment: &AmpAssignment, models: &[AmpModelCatalogEntry]) -> String {
     assignment
-        .label
+        .device_name
         .clone()
         .or_else(|| find_model(models, assignment.amp_model_id.as_deref()).map(model_label))
         .unwrap_or_else(|| "Unnamed".to_string())

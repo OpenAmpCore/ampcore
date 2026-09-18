@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import { ActionIcon, Button, Card, Group, Modal, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
-import { useForm } from "@mantine/form";
+import { useEffect, useState, type FormEvent } from "react";
+import { Button, Card, Input, Label, Modal, TextArea, TextField } from "@heroui/react";
 import { Pencil } from "lucide-react";
 import { ProjectEditModal } from "./ProjectEditModal";
 import { commands, type Project } from "../lib/bindings";
@@ -13,16 +12,11 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
-
-  const form = useForm({
-    initialValues: { name: "", description: "" },
-    validate: {
-      name: (value) => (value.trim().length === 0 ? "Name is required" : null),
-    },
-  });
 
   async function loadProjects() {
     setLoading(true);
@@ -37,12 +31,24 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
     loadProjects();
   }, []);
 
-  async function handleCreate(values: typeof form.values) {
+  function resetForm() {
+    setName("");
+    setDescription("");
+    setNameError(null);
     setCreateError(null);
-    const result = await commands.projectsCreate(values.name.trim(), values.description.trim());
+  }
+
+  async function handleCreate(event: FormEvent) {
+    event.preventDefault();
+    if (name.trim().length === 0) {
+      setNameError("Name is required");
+      return;
+    }
+    setCreateError(null);
+    const result = await commands.projectsCreate(name.trim(), description.trim());
     if (result.status === "ok") {
       setModalOpen(false);
-      form.reset();
+      resetForm();
       onSelect(result.data);
     } else {
       setCreateError(result.error.message);
@@ -54,89 +60,115 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
      * `Center` alone cuts off both ends of taller-than-viewport content. */
     <div className="h-full overflow-y-auto">
       <div className="flex min-h-full flex-col items-center justify-center p-4">
-        <Stack w="100%" maw={420}>
-          <Title order={2} ta="center">
-            Select a Project
-          </Title>
+        <div className="flex w-full flex-col gap-3" style={{ maxWidth: 420 }}>
+          <h2 className="m-0 text-center text-2xl font-semibold">Select a Project</h2>
 
           {!loading && projects.length === 0 && (
-            <Text c="dimmed" ta="center">
+            <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
               No projects yet — create one to get started.
-            </Text>
+            </span>
           )}
 
-          <Stack gap="xs">
+          <div className="flex flex-col gap-2">
             {projects.map((project) => (
               <Card
                 key={project.id}
-                withBorder
-                padding="sm"
                 onClick={() => onSelect(project)}
-                onMouseEnter={() => setHoveredId(project.id)}
-                onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
-                className="cursor-pointer"
+                className="group cursor-pointer p-[var(--amp-spacing-sm)]"
               >
-                <Group justify="space-between" wrap="nowrap">
+                <div className="flex flex-nowrap items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <Text fw={500}>{project.name}</Text>
+                    <div style={{ fontWeight: 500 }}>{project.name}</div>
                     {project.description && (
-                      <Text size="sm" c="dimmed">
+                      <div style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
                         {project.description}
-                      </Text>
+                      </div>
                     )}
                   </div>
-                  <ActionIcon
-                    variant="subtle"
-                    color="gray"
-                    className={hoveredId === project.id ? "visible" : "invisible"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditingProject(project);
-                    }}
+                  <Button
+                    isIconOnly
+                    variant="ghost"
+                    // Reveals on hover, on keyboard focus, and always on a
+                    // pointer that can't hover — it used to be `invisible`
+                    // on anything but hover, which both hid it on touch and
+                    // left it sitting there tappable but unseen.
+                    className={
+                      "opacity-0 transition-opacity group-hover:opacity-100 " +
+                      "group-focus-within:opacity-100 focus-visible:opacity-100 " +
+                      "[@media(hover:none)]:opacity-100"
+                    }
+                    onPress={() => setEditingProject(project)}
                     aria-label="Edit project"
                   >
                     <Pencil size={16} />
-                  </ActionIcon>
-                </Group>
+                  </Button>
+                </div>
               </Card>
             ))}
-          </Stack>
+          </div>
 
-          <Button onClick={() => setModalOpen(true)}>New Project</Button>
-        </Stack>
+          <Button variant="primary" onPress={() => setModalOpen(true)}>
+            New Project
+          </Button>
+        </div>
       </div>
 
-      <Modal
-        opened={modalOpen}
-        onClose={() => {
-          setModalOpen(false);
-          setCreateError(null);
+      <Modal.Backdrop
+        isOpen={modalOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setModalOpen(false);
+            setCreateError(null);
+          }
         }}
-        title="New Project"
       >
-        <form onSubmit={form.onSubmit(handleCreate)}>
-          <Stack>
-            <TextInput
-              label="Name"
-              placeholder="Project name"
-              required
-              data-autofocus
-              {...form.getInputProps("name")}
-            />
-            <Textarea
-              label="Description"
-              placeholder="Optional description"
-              {...form.getInputProps("description")}
-            />
-            {createError && (
-              <Text c="red" size="sm">
-                {createError}
-              </Text>
-            )}
-            <Button type="submit">Create</Button>
-          </Stack>
-        </form>
-      </Modal>
+        <Modal.Container placement="center">
+          <Modal.Dialog>
+            <Modal.Header>
+              <Modal.Heading>New Project</Modal.Heading>
+              <Modal.CloseTrigger />
+            </Modal.Header>
+            <Modal.Body>
+              <form onSubmit={handleCreate}>
+                <div className="flex flex-col gap-3">
+                  <TextField isRequired isInvalid={nameError !== null} autoFocus>
+                    <Label>Name</Label>
+                    <Input
+                      placeholder="Project name"
+                      value={name}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        setNameError(null);
+                      }}
+                    />
+                    {nameError && (
+                      <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-red-6)" }}>
+                        {nameError}
+                      </span>
+                    )}
+                  </TextField>
+                  <TextField>
+                    <Label>Description</Label>
+                    <TextArea
+                      placeholder="Optional description"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                    />
+                  </TextField>
+                  {createError && (
+                    <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-sm)" }}>
+                      {createError}
+                    </span>
+                  )}
+                  <Button type="submit" variant="primary">
+                    Create
+                  </Button>
+                </div>
+              </form>
+            </Modal.Body>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
 
       <ProjectEditModal
         project={editingProject}
