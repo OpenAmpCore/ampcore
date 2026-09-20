@@ -1,9 +1,10 @@
-//! Shared lookup/validation logic for live write commands: resolving a
-//! device's write target, tallying packet acknowledgements, and merging a
-//! partial parameter write against the most recently polled channel config.
-//! Pulled out of the (Tauri command) layer because none of it actually
-//! needs `tauri::State` — just `&LiveDeviceState`, which this crate already
-//! owns.
+//! Shared lookup/validation logic for live commands, used by both the desktop
+//! and mobile apps: resolving a device's write target, sending one built
+//! packet, on-demand reads (preset fetch), tallying acknowledgements, and
+//! merging a partial parameter write against the most recently polled channel
+//! config. Pulled out of the (Tauri command) layer because none of it
+//! actually needs `tauri::State` — just `&LiveDeviceState`, which this crate
+//! already owns.
 
 use std::net::Ipv4Addr;
 
@@ -12,8 +13,11 @@ use tokio::sync::mpsc;
 use crate::data::project::{CrossoverSlot, CrossoverSlotKind, EqBand, EqDirection};
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
-use crate::live::cvr::request::{WriteOutcome, WriteSpec};
-use crate::live::state::{LiveDeviceState, LiveWriteAck};
+use crate::data::common::now_millis;
+use crate::live::cvr::preset::{self, DevicePresetsSnapshot};
+use crate::live::cvr::request::{RequestError, RequestSpec, ResultSink, WriteOutcome, WriteSpec};
+use crate::live::cvr::write;
+use crate::live::state::{LiveDeviceState, LiveEventSink, LiveWriteAck};
 
 /// Shared lookup for every write command below: resolves `device_id` to its
 /// current `firmware_family`, parsed IP, and the running driver's write
@@ -84,8 +88,12 @@ pub fn unknown_firmware_error(device_id: &str) -> AppError {
 /// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
 /// only rather than guessing it also works there, matching this app's
 /// "no generic fallback encoding" write philosophy.
+pub fn presets_supported(firmware_family: Option<&str>) -> bool {
+    firmware_family == Some("1.1.8")
+}
+
 pub fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if firmware_family != Some("1.1.8") {
+    if !presets_supported(firmware_family) {
         return Err(AppError::from(format!(
             "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
             device_id, firmware_family
@@ -93,6 +101,117 @@ pub fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> 
     }
     Ok(())
 }
+
+/// Resolve the device, build one packet for its firmware, send it through the
+/// driver's socket. The amp's new state comes back via the next FC=27 poll.
+pub async fn send_write(
+    state: &LiveDeviceState,
+    device_id: &str,
+    build: impl FnOnce(Option<&str>) -> Option<Vec<u8>>,
+) -> Result<(), AppError> {
+    let (firmware, ip, write_tx) = resolve_write_target(state, device_id)?;
+    let packet = build(firmware.as_deref()).ok_or_else(|| unknown_firmware_error(device_id))?;
+    write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
+/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
+/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
+/// comfortably outlasts one poll cycle without adding noticeable latency to
+/// the common case (which succeeds on the first attempt). Shared by every
+/// `send_request_with_retry` caller, which is why it is no longer named
+/// after presets.
+const REQUEST_BUSY_MAX_RETRIES: u32 = 10;
+const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
+
+/// Sends one request through the driver's request registry with an
+/// `External` sink and awaits its resolved frame — the one place every
+/// on-demand read goes through (presets, bridge). Not reusable across an
+/// `.await` point with a second call in flight for the same device and
+/// function code: `RequestRegistry` keys pending requests by `(ip,
+/// function_code)` only, so a second request under the same code sent before
+/// the first resolves would supersede/fail it (see
+/// `live/cvr/request.rs`'s `RequestRegistry::register`) — callers must fully
+/// await one call before making the next.
+///
+/// Transparently retries `RequestError::Busy` (the driver rejects a new
+/// request outright when it would clash with an exchange already in flight
+/// for this ip — see `RequestRegistry::conflicts_with`). Without this retry,
+/// a fetch racing the poll tick (most likely right after mount, when several
+/// things fire close together) would surface a raw "Busy" error instead of
+/// just quietly succeeding a moment later.
+///
+/// `expects_fragments` and `in_out_flag` are passed straight through to the
+/// spec — see their docs for why a single-datagram read must declare itself as
+/// one, and why an output-side query has to say so.
+pub async fn send_request_with_retry(
+    request_tx: &mpsc::UnboundedSender<RequestSpec>,
+    ip: &str,
+    function_code: u8,
+    chx: u8,
+    body: Vec<u8>,
+    expects_fragments: bool,
+    in_out_flag: u8,
+) -> Result<Vec<u8>, AppError> {
+    let mut last_err = AppError::from(format!("device {} request never attempted", ip));
+    for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spec = RequestSpec {
+            ip: ip.to_string(),
+            function_code,
+            chx,
+            body: body.clone(),
+            expects_fragments,
+            in_out_flag,
+            sink: ResultSink::External(tx),
+        };
+        request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
+        match rx.await.map_err(|_| AppError::from("live control driver dropped the request"))? {
+            Ok(frame) => return Ok(frame),
+            Err(RequestError::Busy) => {
+                last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
+                if attempt < REQUEST_BUSY_MAX_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_millis(REQUEST_BUSY_RETRY_DELAY_MS)).await;
+                }
+            }
+            Err(e) => return Err(AppError::from(format!("{:?}", e))),
+        }
+    }
+    Err(last_err)
+}
+
+/// Fetches the full preset slot-name list (FC=59 mode=0) and the currently
+/// active preset's name (mode=4) as one call — deliberately not two
+/// independently-callable ones, since both share the same FC=59 request
+/// registry key and must not overlap (see `send_request_with_retry`'s doc). The
+/// mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
+/// the result and emits it through `sink` (`live_presets:updated`), same
+/// pattern as `parse_and_store_sync_data`.
+pub async fn fetch_presets(sink: &LiveEventSink, device_id: &str) -> Result<DevicePresetsSnapshot, AppError> {
+    let (ip, firmware_family, request_tx) = {
+        let inner = sink.state.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, device.firmware_family, request_tx)
+    };
+    require_v118_firmware(device_id, firmware_family.as_deref())?;
+
+    let list_frame =
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true, 0).await?;
+    let slots = preset::parse_preset_list(&list_frame)
+        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
+
+    let current_frame =
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true, 0).await?;
+    let active_preset_name = preset::parse_preset_current(&current_frame)
+        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
+
+    let snapshot = DevicePresetsSnapshot { slots, active_preset_name: Some(active_preset_name), received_at: now_millis() };
+    sink.set_presets(device_id.to_string(), snapshot.clone());
+    Ok(snapshot)
+}
+
 
 /// FC=43 FIR_datas is confirmed against 1.1.8, and 1.1.9 is accepted on the
 /// same basis `write.rs` already accepts it for FC=44 FIR bypass: the two
@@ -190,4 +309,16 @@ pub fn current_channel(
         .find(|c| c.channel_index == u32::from(channel_index))
         .cloned()
         .ok_or_else(|| AppError::from(format!("device {} has no channel {}", device_id, channel_index)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_are_gated_to_1_1_8_only() {
+        assert!(presets_supported(Some("1.1.8")));
+        assert!(!presets_supported(Some("1.1.9")));
+        assert!(!presets_supported(None));
+    }
 }
