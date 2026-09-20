@@ -7,6 +7,8 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+.claude
+
 node_modules
 dist
 dist-ssr
@@ -23,12 +25,24 @@ dist-ssr
 *.sln
 *.sw?
 
-# Cargo workspace build output (cargo now builds at the workspace root)
+# Cargo workspace build output — every crate (including both src-tauri
+# crates) builds here, not into its own target/ subfolder, since this is a
+# workspace. (A stale apps/desktop/src-tauri/target/ from before the
+# workspace existed was deleted — don't recreate a per-crate ignore rule
+# for it; a workspace build never writes one.)
 /target/
 
 # Tauri build output
-/src-tauri/target/
-/src-tauri/gen/
+/apps/desktop/src-tauri/gen/
+
+# apps/mobile/src-tauri/gen/android and gen/apple (once ios exists) are
+# committed, not ignored: unlike desktop's gen/ (pure schema dump, safe to
+# regenerate from nothing), a mobile gen/ project carries real, otherwise-
+# unrecoverable customization (AndroidManifest.xml permissions, Gradle
+# config) and ships its own nested .gitignore for the actual build output
+# (gradle caches, local.properties, keystores). Only gen/schemas here is
+# the same ephemeral capabilities dump desktop has.
+/apps/mobile/src-tauri/gen/schemas/
 
 # TypeScript incremental build state (tsconfig.node.json is a composite
 # project, so `tsc -b` drops a .tsbuildinfo next to it)
