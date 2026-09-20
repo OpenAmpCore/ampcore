@@ -16,19 +16,19 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::data::amp_link::normalize_mac;
-use crate::data::amp_push::{adopt_device_facts, plan_push, AmpPushPlan, PushAction, PushPlan};
-use crate::data::capability::SourceKind;
-use crate::data::edit_lock::LiveAmpReading;
-use crate::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
-use crate::data::project::{ChannelEq, EqDirection, Project};
+use ampcore_core::data::amp_link::normalize_mac;
+use ampcore_core::data::amp_push::{adopt_device_facts, plan_push, AmpPushPlan, PushAction, PushPlan};
+use ampcore_core::data::capability::SourceKind;
+use ampcore_core::data::edit_lock::LiveAmpReading;
+use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
+use ampcore_core::data::project::{ChannelEq, EqDirection, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
 use crate::error::AppError;
-use crate::live::cvr::channel_config::{ChannelConfigSnapshot, EqChainWire};
-use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use crate::live::cvr::write;
-use crate::live::cvr::write_v118::{EqChainBand, EQ_CHAIN_BANDS};
-use crate::live::state::LiveDeviceState;
+use ampcore_core::live::cvr::channel_config::{ChannelConfigSnapshot, EqChainWire};
+use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use ampcore_core::live::cvr::write;
+use ampcore_core::live::cvr::write_v118::{EqChainBand, EQ_CHAIN_BANDS};
+use ampcore_core::live::state::LiveDeviceState;
 
 use super::amp_links::read_linked_amp;
 use super::live_control::{resolve_write_target, unknown_firmware_error, WriteTally};
@@ -513,7 +513,7 @@ pub async fn projects_push_amp_to_live(
     // and pass off pre-push data as the verification. See
     // `WRITE_SETTLE_DELAY`.
     tokio::time::sleep(WRITE_SETTLE_DELAY).await;
-    let settled_at = crate::data::common::now_millis();
+    let settled_at = ampcore_core::data::common::now_millis();
     let fresh = wait_for_fresh_snapshot(&live, &context.device_id, settled_at).await;
     let bridge = {
         let inner = live.0.lock().map_err(|e| e.to_string())?;

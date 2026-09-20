@@ -3,21 +3,21 @@ use std::net::Ipv4Addr;
 use tauri::{AppHandle, State};
 use tokio::sync::mpsc;
 
-use crate::data::capability::{PowerMode, SourceKind};
-use crate::data::common::now_millis;
-use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection, LimiterPatch};
+use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::common::now_millis;
+use ampcore_core::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection, LimiterPatch};
 use crate::error::AppError;
-use crate::live::cvr::channel_config::ChannelConfig;
-use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use crate::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
-use crate::live::cvr::fir;
-use crate::live::cvr::preset;
-use crate::live::cvr::request::{WriteOutcome, WriteSpec};
-use crate::live::cvr::write;
-use crate::live::driver::all_drivers;
-use crate::live::state::{
+use ampcore_core::live::cvr::channel_config::ChannelConfig;
+use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
+use ampcore_core::live::cvr::fir;
+use ampcore_core::live::cvr::preset;
+use ampcore_core::live::cvr::request::{WriteOutcome, WriteSpec};
+use ampcore_core::live::cvr::write;
+use ampcore_core::live::driver::all_drivers;
+use ampcore_core::live::state::{
     DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
-    LiveEventSink, LiveWriteAck,
+    LiveWriteAck,
 };
 
 /// Shared lookup for every write command below: resolves `device_id` to its
@@ -179,10 +179,7 @@ pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Resu
     // across the call deadlocks the very first `live_control_start`
     // invocation, which fires when the first live-aware view mounts (see
     // `useLiveDriver`).
-    let sink = LiveEventSink {
-        app,
-        state: state.0.clone(),
-    };
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
     let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone())).collect();
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     inner.handles.extend(handles);
@@ -284,15 +281,15 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let spec = crate::live::cvr::request::RequestSpec {
+    let spec = ampcore_core::live::cvr::request::RequestSpec {
         ip: ip.clone(),
-        function_code: crate::live::cvr::protocol::FC_SYNC_DATA,
+        function_code: ampcore_core::live::cvr::protocol::FC_SYNC_DATA,
         chx: 0,
         body: Vec::new(),
         // FC=27 is always fragmented.
         expects_fragments: true,
         in_out_flag: 0,
-        sink: crate::live::cvr::request::ResultSink::External(tx),
+        sink: ampcore_core::live::cvr::request::ResultSink::External(tx),
     };
     request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
     let frame = rx
@@ -300,8 +297,8 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
         .map_err(|_| AppError::from("live control driver dropped the request"))?
         .map_err(|e| AppError::from(format!("{:?}", e)))?;
 
-    let sink = LiveEventSink { app, state: state.0.clone() };
-    let config = crate::live::cvr::driver::parse_and_store_sync_data(&ip, &frame, &sink).map_err(AppError::from)?;
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
+    let config = ampcore_core::live::cvr::driver::parse_and_store_sync_data(&ip, &frame, &sink).map_err(AppError::from)?;
     Ok(DeviceChannelConfig { device_id, config })
 }
 
@@ -340,7 +337,7 @@ const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 /// spec — see their docs for why a single-datagram read must declare itself as
 /// one, and why an output-side query has to say so.
 async fn send_request_with_retry(
-    request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
+    request_tx: &tokio::sync::mpsc::UnboundedSender<ampcore_core::live::cvr::request::RequestSpec>,
     ip: &str,
     function_code: u8,
     chx: u8,
@@ -351,19 +348,19 @@ async fn send_request_with_retry(
     let mut last_err = AppError::from(format!("device {} request never attempted", ip));
     for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let spec = crate::live::cvr::request::RequestSpec {
+        let spec = ampcore_core::live::cvr::request::RequestSpec {
             ip: ip.to_string(),
             function_code,
             chx,
             body: body.clone(),
             expects_fragments,
             in_out_flag,
-            sink: crate::live::cvr::request::ResultSink::External(tx),
+            sink: ampcore_core::live::cvr::request::ResultSink::External(tx),
         };
         request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
         match rx.await.map_err(|_| AppError::from("live control driver dropped the request"))? {
             Ok(frame) => return Ok(frame),
-            Err(crate::live::cvr::request::RequestError::Busy) => {
+            Err(ampcore_core::live::cvr::request::RequestError::Busy) => {
                 last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
                 if attempt < REQUEST_BUSY_MAX_RETRIES {
                     tokio::time::sleep(std::time::Duration::from_millis(REQUEST_BUSY_RETRY_DELAY_MS)).await;
@@ -406,7 +403,7 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
 
     let snapshot = preset::DevicePresetsSnapshot { slots, active_preset_name: Some(active_preset_name), received_at: now_millis() };
-    let sink = LiveEventSink { app, state: state.0.clone() };
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
     sink.set_presets(device_id.clone(), snapshot.clone());
     Ok(DevicePresets { device_id, presets: snapshot })
 }
@@ -452,12 +449,12 @@ pub async fn live_control_fetch_bridge(
         (device.ip, request_tx)
     };
 
-    let sink = LiveEventSink { app, state: state.0.clone() };
-    for pair_index in 0..crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
+    for pair_index in 0..ampcore_core::live::cvr::bridge::BRIDGE_PAIR_COUNT {
         let frame = send_request_with_retry(
             &request_tx,
             &ip,
-            crate::live::cvr::bridge::FC_BRIDGE,
+            ampcore_core::live::cvr::bridge::FC_BRIDGE,
             pair_index,
             Vec::new(),
             false,
@@ -466,7 +463,7 @@ pub async fn live_control_fetch_bridge(
         .await?;
         // The pair comes from the reply's own header, not from what was
         // asked — see `parse_bridge_reply`.
-        if let Some((pair, bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
+        if let Some((pair, bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
             sink.set_bridge_pair(device_id.clone(), pair, bridged);
         }
     }
@@ -477,7 +474,7 @@ pub async fn live_control_fetch_bridge(
             .bridge
             .get(&device_id)
             .cloned()
-            .unwrap_or_else(crate::live::cvr::bridge::DeviceBridgeSnapshot::empty)
+            .unwrap_or_else(ampcore_core::live::cvr::bridge::DeviceBridgeSnapshot::empty)
     };
     Ok(DeviceBridge { device_id, bridge })
 }
@@ -502,7 +499,7 @@ pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, devic
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let mut tally = WriteTally::default();
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
-    tally.record(write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
+    tally.record(write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
 }
 
@@ -782,7 +779,7 @@ pub async fn live_control_set_output_bridge(
         )));
     }
     let pair_index = channel_index / 2;
-    if pair_index >= crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+    if pair_index >= ampcore_core::live::cvr::bridge::BRIDGE_PAIR_COUNT {
         return Err(AppError::from(format!("channel {} is outside the bridgeable pairs", channel_index)));
     }
 
@@ -810,7 +807,7 @@ pub async fn live_control_set_output_bridge(
         let frame = send_request_with_retry(
             &request_tx,
             &ip.to_string(),
-            crate::live::cvr::bridge::FC_BRIDGE,
+            ampcore_core::live::cvr::bridge::FC_BRIDGE,
             pair_index,
             Vec::new(),
             false,
@@ -818,8 +815,8 @@ pub async fn live_control_set_output_bridge(
         )
         .await;
         if let Ok(frame) = frame {
-            if let Some((pair, is_bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
-                let sink = LiveEventSink { app, state: state.0.clone() };
+            if let Some((pair, is_bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
+                let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
                 sink.set_bridge_pair(device_id, pair, is_bridged);
             }
         }
@@ -866,7 +863,7 @@ pub async fn live_control_store_preset(
 
     let mut tally = WriteTally::default();
     tally.record(
-        write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_store_packet(slot_index, trimmed))
+        write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_store_packet(slot_index, trimmed))
             .await
             .map_err(|e| e.to_string())?,
     );

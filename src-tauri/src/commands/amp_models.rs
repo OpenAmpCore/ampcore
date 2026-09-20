@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-use crate::data::common::now_millis;
+use ampcore_core::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
+use ampcore_core::data::common::now_millis;
 use crate::data::store::{save_amp_models, ProjectDataState};
 use crate::error::AppError;
 

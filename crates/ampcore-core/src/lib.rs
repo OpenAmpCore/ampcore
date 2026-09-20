@@ -4,3 +4,6 @@
 //! desktop app (`src-tauri`) and, eventually, a mobile app. Anything that
 //! needs `tauri::` types (commands, AppHandle, event emission, desktop
 //! project-file persistence) stays in the app crates, not here.
+
+pub mod data;
+pub mod live;

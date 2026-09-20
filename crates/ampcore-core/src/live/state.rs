@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use specta::Type;
-use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use crate::data::common::now_millis;
@@ -198,9 +197,30 @@ pub struct DeviceChannelFir {
     pub fir: ChannelFirSnapshot,
 }
 
+/// What each `LiveEventSink` mutator emits once it has decided something is
+/// worth telling the frontend about. One app-specific `EventEmitter` impl
+/// turns this into the actual desktop event (`app.emit(name, payload)`); a
+/// future mobile app would implement its own.
+pub enum LiveEvent {
+    Telemetry(DeviceTelemetry),
+    ChannelConfig(DeviceChannelConfig),
+    Presets(DevicePresets),
+    Bridge(DeviceBridge),
+    /// The full device list, re-broadcast whenever any device's snapshot
+    /// changes (see `upsert`/`touch_by_ip`/`mark_stale_offline` below).
+    Devices(Vec<DiscoveredDevice>),
+}
+
+/// Delivers a `LiveEvent` to whatever's listening. Kept as a plain trait
+/// (not tied to `tauri::Emitter`) so this crate stays Tauri-free — the
+/// desktop app's impl wraps `AppHandle::emit`.
+pub trait EventEmitter: Send + Sync {
+    fn emit(&self, event: LiveEvent);
+}
+
 #[derive(Clone)]
 pub struct LiveEventSink {
-    pub app: AppHandle,
+    pub emitter: Arc<dyn EventEmitter>,
     pub state: Arc<Mutex<LiveDeviceInner>>,
 }
 
@@ -212,7 +232,7 @@ impl LiveEventSink {
             let mut inner = self.state.lock().unwrap();
             inner.telemetry.insert(device_id.clone(), telemetry.clone());
         }
-        self.app.emit("live_telemetry:updated", &DeviceTelemetry { device_id, telemetry }).ok();
+        self.emitter.emit(LiveEvent::Telemetry(DeviceTelemetry { device_id, telemetry }));
     }
 
     /// Records one device's freshly parsed FC=27 channel config and emits it
@@ -223,7 +243,7 @@ impl LiveEventSink {
             let mut inner = self.state.lock().unwrap();
             inner.channel_config.insert(device_id.clone(), config.clone());
         }
-        self.app.emit("live_channel_config:updated", &DeviceChannelConfig { device_id, config }).ok();
+        self.emitter.emit(LiveEvent::ChannelConfig(DeviceChannelConfig { device_id, config }));
     }
 
     /// Records one device's freshly fetched FC=59 preset snapshot and emits
@@ -235,7 +255,7 @@ impl LiveEventSink {
             let mut inner = self.state.lock().unwrap();
             inner.presets.insert(device_id.clone(), presets.clone());
         }
-        self.app.emit("live_presets:updated", &DevicePresets { device_id, presets }).ok();
+        self.emitter.emit(LiveEvent::Presets(DevicePresets { device_id, presets }));
     }
 
     /// Merges one pair's FC=50 result into the device's snapshot, leaving
@@ -253,7 +273,7 @@ impl LiveEventSink {
             entry.received_at = now_millis();
             entry.clone()
         };
-        self.app.emit("live_bridge:updated", &DeviceBridge { device_id, bridge: snapshot }).ok();
+        self.emitter.emit(LiveEvent::Bridge(DeviceBridge { device_id, bridge: snapshot }));
     }
 
     /// Records a discovery reply. Emits **only when something actually
@@ -282,7 +302,7 @@ impl LiveEventSink {
             }
             inner.devices.values().cloned().collect::<Vec<_>>()
         };
-        self.app.emit("live_device:updated", &snapshot).ok();
+        self.emitter.emit(LiveEvent::Devices(snapshot));
     }
 
     /// Refresh liveness for a device already known by ip (e.g. on a heartbeat
@@ -305,7 +325,7 @@ impl LiveEventSink {
             }
             inner.devices.values().cloned().collect::<Vec<_>>()
         };
-        self.app.emit("live_device:updated", &snapshot).ok();
+        self.emitter.emit(LiveEvent::Devices(snapshot));
     }
 
     pub fn mark_stale_offline(&self, timeout_ms: f64) {
@@ -324,6 +344,6 @@ impl LiveEventSink {
             }
             inner.devices.values().cloned().collect::<Vec<_>>()
         };
-        self.app.emit("live_device:updated", &snapshot).ok();
+        self.emitter.emit(LiveEvent::Devices(snapshot));
     }
 }

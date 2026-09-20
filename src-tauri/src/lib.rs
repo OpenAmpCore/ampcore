@@ -40,8 +40,8 @@ use commands::projects::{
     projects_set_matrix_crosspoint, projects_set_output_bridge, projects_update,
     projects_set_source_trim, projects_set_backup_priority,
 };
+use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
-use live::state::LiveDeviceState;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]

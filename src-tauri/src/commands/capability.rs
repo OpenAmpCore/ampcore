@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::data::capability::{resolve, AmpCapability};
+use ampcore_core::data::capability::{resolve, AmpCapability};
 use crate::data::store::ProjectDataState;
 use crate::error::AppError;
 

@@ -1,8 +1,8 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::data::amp_model::AmpModelCatalogEntry;
-use crate::data::capability::{PowerMode, SourceKind};
-use crate::data::project::{
+use ampcore_core::data::amp_model::AmpModelCatalogEntry;
+use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::project::{
     AmpAssignment, BackupPriorityPatch, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection,
     LimiterPatch, Project, SourceTrimPatch,
 };
