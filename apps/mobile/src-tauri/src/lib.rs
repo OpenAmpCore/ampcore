@@ -1,27 +1,34 @@
-//! AmpCore Mobile — amp discovery on top of `ampcore-core`'s CVR driver, plus
-//! two writes (standby, output mute) and the poll subscription they need.
+//! AmpCore Mobile — thin Tauri commands over `ampcore-core`: discovery, live
+//! polling, a few writes and presets. All device logic (packets, gates,
+//! request sequencing) lives in core; nothing here builds wire bytes itself.
 //! Mirrors desktop's `live_control_*` commands (see
 //! apps/desktop/src-tauri/src/commands/live_control.rs).
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use ampcore_core::live::cvr::write;
+use ampcore_core::live::cvr::{preset, write};
 use ampcore_core::live::driver::all_drivers;
 use ampcore_core::live::state::{DiscoveredDevice, EventEmitter, LiveDeviceState, LiveEvent, LiveEventSink};
-use ampcore_core::live::write_helpers::resolve_write_target;
+use ampcore_core::live::write_helpers::{self, send_write};
 
-/// Forwards the device list and per-device channel config (what the controls
-/// panel reads); telemetry/presets/bridge are never consumed here.
+/// Forwards everything the mobile screens read; bridge state is never consumed.
 struct MobileEmitter(AppHandle);
 
 impl EventEmitter for MobileEmitter {
     fn emit(&self, event: LiveEvent) {
         match event {
-            LiveEvent::Devices(devices) => self.0.emit("live_device:updated", &devices).ok(),
-            LiveEvent::ChannelConfig(config) => self.0.emit("live_channel_config:updated", &config).ok(),
-            _ => None,
-        };
+            LiveEvent::Devices(p) => self.0.emit("live_device:updated", &p),
+            LiveEvent::ChannelConfig(p) => self.0.emit("live_channel_config:updated", &p),
+            LiveEvent::Telemetry(p) => self.0.emit("live_telemetry:updated", &p),
+            LiveEvent::Presets(p) => self.0.emit("live_presets:updated", &p),
+            LiveEvent::Bridge(_) => Ok(()),
+        }
+        .ok();
     }
+}
+
+fn sink(app: AppHandle, state: &LiveDeviceState) -> LiveEventSink {
+    LiveEventSink { emitter: std::sync::Arc::new(MobileEmitter(app)), state: state.0.clone() }
 }
 
 #[tauri::command]
@@ -31,7 +38,7 @@ fn discovery_start(app: AppHandle, state: State<LiveDeviceState>) -> Result<(), 
     }
     // Lock is released before `start()`: the driver locks the same mutex
     // itself (to store its request/write channels) and it isn't reentrant.
-    let sink = LiveEventSink { emitter: std::sync::Arc::new(MobileEmitter(app)), state: state.0.clone() };
+    let sink = sink(app, &state);
     let runtime = tauri::async_runtime::handle().inner().clone();
     let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone(), &runtime)).collect();
     state.0.lock().map_err(|e| e.to_string())?.handles.extend(handles);
@@ -56,8 +63,8 @@ fn discovery_list(state: State<LiveDeviceState>) -> Result<Vec<DiscoveredDevice>
     Ok(inner.devices.values().cloned().collect())
 }
 
-/// Which devices get the heavy polls (FC=27 config), keyed by subscription
-/// token; an empty list removes the token. Same as desktop's
+/// Which devices get the heavy polls (FC=27 config + heartbeat), keyed by
+/// subscription token; an empty list removes the token. Same as desktop's
 /// `live_control_set_poll_subscription`.
 #[tauri::command]
 fn poll_subscribe(state: State<LiveDeviceState>, token: String, device_ids: Vec<String>) -> Result<(), String> {
@@ -70,22 +77,11 @@ fn poll_subscribe(state: State<LiveDeviceState>, token: String, device_ids: Vec<
     Ok(())
 }
 
-/// Resolve the device, build one packet for its firmware, send it through the
-/// driver's socket. The amp's new state comes back via the next FC=27 poll.
-async fn send(
-    state: &LiveDeviceState,
-    device_id: &str,
-    build: impl FnOnce(Option<&str>) -> Option<Vec<u8>>,
-) -> Result<(), String> {
-    let (firmware, ip, write_tx) = resolve_write_target(state, device_id).map_err(|e| e.message)?;
-    let packet = build(firmware.as_deref()).ok_or("unrecognized firmware — cannot build write packet")?;
-    write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
-}
+// Writes: the amp's new state comes back via the next FC=27 poll.
 
 #[tauri::command]
 async fn set_standby(state: State<'_, LiveDeviceState>, device_id: String, standby: bool) -> Result<(), String> {
-    send(&state, &device_id, |fw| write::build_set_standby(fw, standby)).await
+    send_write(&state, &device_id, |fw| write::build_set_standby(fw, standby)).await.map_err(|e| e.message)
 }
 
 #[tauri::command]
@@ -95,7 +91,41 @@ async fn set_output_mute(
     channel_index: u8,
     muted: bool,
 ) -> Result<(), String> {
-    send(&state, &device_id, |fw| write::build_set_output_mute(fw, channel_index, muted)).await
+    send_write(&state, &device_id, |fw| write::build_set_output_mute(fw, channel_index, muted)).await.map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn set_input_mute(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    muted: bool,
+) -> Result<(), String> {
+    send_write(&state, &device_id, |fw| write::build_set_input_mute(fw, channel_index, muted)).await.map_err(|e| e.message)
+}
+
+// Presets (FC=59, firmware 1.1.8 only — the gate is core's `presets_supported`).
+
+#[tauri::command]
+fn amp_presets_supported(state: State<LiveDeviceState>, device_id: String) -> Result<bool, String> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.devices.get(&device_id).is_some_and(|d| write_helpers::presets_supported(d.firmware_family.as_deref())))
+}
+
+#[tauri::command]
+async fn fetch_presets(
+    app: AppHandle,
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+) -> Result<preset::DevicePresetsSnapshot, String> {
+    write_helpers::fetch_presets(&sink(app, &state), &device_id).await.map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<(), String> {
+    send_write(&state, &device_id, |fw| write_helpers::presets_supported(fw).then(|| preset::build_recall_packet(slot_index)))
+        .await
+        .map_err(|e| e.message)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -111,7 +141,11 @@ pub fn run() {
             discovery_list,
             poll_subscribe,
             set_standby,
-            set_output_mute
+            set_output_mute,
+            set_input_mute,
+            amp_presets_supported,
+            fetch_presets,
+            recall_preset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

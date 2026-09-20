@@ -1,84 +1,101 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { Accordion, AppShell, Badge, Group, Loader, Text, Title } from "@mantine/core";
-import { DeviceControls } from "./DeviceControls";
+import { AppShell, Badge, Burger, Card, Group, Loader, NavLink, Text, Title, UnstyledButton } from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
+import { AmpScreen } from "./AmpScreen";
+import { go, useDevices, useRoute, type Device } from "./lib";
 
-// ponytail: hand-written subset of ampcore_core::live::state::DiscoveredDevice
-// (camelCase). Move to tauri-specta bindings if mobile's command count grows.
-interface Device {
-  id: string;
-  name: string;
-  brand: string;
-  ip: string;
-  mac: string;
-  firmwareVersion: string;
-  analogInputChannels: number;
-  digitalInputChannels: number;
-  outputChannels: number;
-  online: boolean;
+const Dot = ({ online }: { online: boolean }) => (
+  <span
+    style={{ width: 10, height: 10, borderRadius: "50%", background: online ? "var(--mantine-color-green-6)" : "var(--mantine-color-gray-5)" }}
+  />
+);
+
+function AmpCard({ d }: { d: Device }) {
+  return (
+    <UnstyledButton w="100%" onClick={() => go(d.id)}>
+      <Card withBorder radius="md" mih={64}>
+        <Group justify="space-between" wrap="nowrap">
+          <div>
+            <Text fw={600}>{d.name || d.mac}</Text>
+            <Text size="sm" c="dimmed">
+              {d.brand} · {d.ip} · fw {d.firmwareVersion}
+            </Text>
+            <Text size="sm" c="dimmed">
+              {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
+            </Text>
+          </div>
+          <Badge color={d.online ? "green" : "gray"}>{d.online ? "online" : "offline"}</Badge>
+        </Group>
+      </Card>
+    </UnstyledButton>
+  );
 }
 
 export function App() {
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [open, setOpen] = useState<string | null>(null);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
-      const off = await listen<Device[]>("live_device:updated", (e) => setDevices(e.payload));
-      if (cancelled) return off();
-      unlisten = off;
-      setDevices(await invoke<Device[]>("discovery_list"));
-      await invoke("discovery_start"); // idempotent; discovery runs for the app's lifetime
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  // The backend hands over HashMap order, which reshuffles between events.
-  const sorted = [...devices].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+  const devices = useDevices();
+  const { id, tab } = useRoute();
+  const [menu, { toggle, close }] = useDisclosure(false);
+  const amp = id ? devices.find((d) => d.id === id) : undefined;
 
   return (
-    // viewport-fit=cover (index.html) draws under the system bars, so the bar
+    // viewport-fit=cover (index.html) draws under the system bars, so the bars
     // and the content end pad with the safe-area insets.
-    <AppShell header={{ height: "calc(56px + env(safe-area-inset-top))" }} padding="md">
+    <AppShell
+      header={{ height: "calc(56px + env(safe-area-inset-top))" }}
+      footer={amp ? { height: "calc(56px + env(safe-area-inset-bottom))" } : undefined}
+      navbar={{ width: 280, breakpoint: 0, collapsed: { mobile: !menu, desktop: !menu } }}
+      padding="md"
+    >
       <AppShell.Header style={{ paddingTop: "env(safe-area-inset-top)" }}>
-        <Group h={56} px="md" justify="space-between">
-          <Title order={3}>AmpCore</Title>
-          {sorted.length === 0 ? <Loader size="sm" /> : <Text c="dimmed">{sorted.length} found</Text>}
+        <Group h={56} px="md" justify="space-between" wrap="nowrap">
+          <Group wrap="nowrap">
+            <Burger opened={menu} onClick={toggle} aria-label="Menu" />
+            <Title order={3}>{amp ? amp.name || amp.mac : "AmpCore"}</Title>
+          </Group>
+          {!amp && (devices.length === 0 ? <Loader size="sm" /> : <Text c="dimmed">{devices.length} found</Text>)}
         </Group>
       </AppShell.Header>
-      <AppShell.Main style={{ paddingBottom: "calc(var(--mantine-spacing-md) + env(safe-area-inset-bottom))" }}>
-        {sorted.length === 0 ? (
+
+      <AppShell.Navbar p="md" style={{ paddingTop: "calc(var(--mantine-spacing-md) + env(safe-area-inset-top))" }}>
+        <NavLink
+          label="All amps"
+          active={!id}
+          onClick={() => {
+            go(null);
+            close();
+          }}
+        />
+        {devices.map((d) => (
+          <NavLink
+            key={d.id}
+            label={d.name || d.mac}
+            description={d.ip}
+            leftSection={<Dot online={d.online} />}
+            active={d.id === id}
+            onClick={() => {
+              go(d.id, tab); // amp → amp keeps the current section
+              close();
+            }}
+          />
+        ))}
+      </AppShell.Navbar>
+
+      <AppShell.Main style={amp ? undefined : { paddingBottom: "calc(var(--mantine-spacing-md) + env(safe-area-inset-bottom))" }}>
+        {amp ? (
+          <AmpScreen key={amp.id} device={amp} tab={tab} />
+        ) : id ? (
+          <Text c="dimmed" ta="center" mt="xl">
+            Looking for this amp…
+          </Text>
+        ) : devices.length === 0 ? (
           <Text c="dimmed" ta="center" mt="xl">
             Searching for amps on your Wi-Fi…
           </Text>
         ) : (
-          <Accordion variant="separated" radius="md" value={open} onChange={setOpen}>
-            {sorted.map((d) => (
-              <Accordion.Item key={d.id} value={d.id}>
-                <Accordion.Control mih={64}>
-                  <Group justify="space-between" wrap="nowrap" pr="xs">
-                    <div>
-                      <Text fw={600}>{d.name || d.mac}</Text>
-                      <Text size="sm" c="dimmed">
-                        {d.brand} · {d.ip} · fw {d.firmwareVersion}
-                      </Text>
-                      <Text size="sm" c="dimmed">
-                        {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
-                      </Text>
-                    </div>
-                    <Badge color={d.online ? "green" : "gray"}>{d.online ? "online" : "offline"}</Badge>
-                  </Group>
-                </Accordion.Control>
-                <Accordion.Panel>{open === d.id && <DeviceControls id={d.id} online={d.online} />}</Accordion.Panel>
-              </Accordion.Item>
+          <div style={{ display: "grid", gap: "var(--mantine-spacing-sm)" }} aria-live="polite">
+            {devices.map((d) => (
+              <AmpCard key={d.id} d={d} />
             ))}
-          </Accordion>
+          </div>
         )}
       </AppShell.Main>
     </AppShell>
