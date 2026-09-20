@@ -1,0 +1,19 @@
+[package]
+name = "ampcore-mobile"
+version = "0.1.0"
+description = "AmpCore Mobile"
+authors = ["scalli007YT"]
+edition = "2021"
+
+[lib]
+name = "ampcore_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ampcore-core = { path = "../../../crates/ampcore-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

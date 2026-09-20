@@ -29,6 +29,7 @@ dist-ssr
 # Tauri build output
 /src-tauri/target/
 /src-tauri/gen/
+/apps/mobile/src-tauri/gen/
 
 # TypeScript incremental build state (tsconfig.node.json is a composite
 # project, so `tsc -b` drops a .tsbuildinfo next to it)
