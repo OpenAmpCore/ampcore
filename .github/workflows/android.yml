@@ -48,6 +48,15 @@ jobs:
 
       - name: setup android sdk
         uses: android-actions/setup-android@v3
+        with:
+          # Default packages ("tools platform-tools") fail outright: the
+          # legacy "tools" package no longer exists in Google's SDK repo
+          # (confirmed via a real CI run — sdkmanager errors "Failed to
+          # find package 'tools'" and the action throws). We only need
+          # platform-tools (adb); build-tools/platforms come from Gradle
+          # per the generated project's compileSdk/targetSdk, and the NDK
+          # is installed explicitly in the next step.
+          packages: platform-tools
 
       # Gradle fails the build otherwise (confirmed locally): unaccepted
       # SDK licenses aren't a warning, they're a hard stop.
