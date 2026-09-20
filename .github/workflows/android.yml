@@ -1,0 +1,80 @@
+name: 'android'
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'crates/ampcore-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'crates/ampcore-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+jobs:
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'pnpm'
+
+      - name: setup java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: setup android sdk
+        uses: android-actions/setup-android@v3
+
+      # Gradle fails the build otherwise (confirmed locally): unaccepted
+      # SDK licenses aren't a warning, they're a hard stop.
+      - name: accept android sdk licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: install NDK
+        run: sdkmanager --install "ndk;29.0.13846066"
+
+      - name: install frontend dependencies
+        run: pnpm install
+
+      # apps/mobile has no package.json (no bundler yet — see its src/index.html),
+      # so the Tauri CLI comes from the root workspace's devDependency instead.
+      - name: init android project
+        working-directory: apps/mobile
+        run: ../../node_modules/.bin/tauri android init --ci
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.13846066
+
+      # Debug build only: catches compile/link breakage on every push, same
+      # spirit as the frontend/Rust checks elsewhere. Not a release — no
+      # signing, no publish. See .github/workflows/release.yml for the
+      # signed-release pattern this would extend if/when there's an actual
+      # mobile release to ship.
+      - name: build debug apk
+        working-directory: apps/mobile
+        run: ../../node_modules/.bin/tauri android build --debug --target aarch64
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.13846066
