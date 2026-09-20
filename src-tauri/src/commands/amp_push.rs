@@ -23,7 +23,7 @@ use ampcore_core::data::edit_lock::LiveAmpReading;
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
 use ampcore_core::data::project::{ChannelEq, EqDirection, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config::{ChannelConfigSnapshot, EqChainWire};
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write;
@@ -31,7 +31,7 @@ use ampcore_core::live::cvr::write_v118::{EqChainBand, EQ_CHAIN_BANDS};
 use ampcore_core::live::state::LiveDeviceState;
 
 use super::amp_links::read_linked_amp;
-use super::live_control::{resolve_write_target, unknown_firmware_error, WriteTally};
+use ampcore_core::live::write_helpers::{resolve_write_target, unknown_firmware_error, WriteTally};
 
 /// How long to wait for an FC=27 poll that postdates the last write before
 /// giving up on verifying the push.

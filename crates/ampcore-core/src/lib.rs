@@ -6,4 +6,5 @@
 //! project-file persistence) stays in the app crates, not here.
 
 pub mod data;
+pub mod error;
 pub mod live;

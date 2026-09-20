@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use ampcore_core::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use ampcore_core::data::common::now_millis;
 use crate::data::store::{save_amp_models, ProjectDataState};
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 
 #[tauri::command]
 #[specta::specta]

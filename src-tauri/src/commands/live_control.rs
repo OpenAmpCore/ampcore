@@ -1,168 +1,23 @@
-use std::net::Ipv4Addr;
-
 use tauri::{AppHandle, State};
-use tokio::sync::mpsc;
 
 use ampcore_core::data::capability::{PowerMode, SourceKind};
 use ampcore_core::data::common::now_millis;
-use ampcore_core::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection, LimiterPatch};
-use crate::error::AppError;
-use ampcore_core::live::cvr::channel_config::ChannelConfig;
+use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
+use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
 use ampcore_core::live::cvr::preset;
-use ampcore_core::live::cvr::request::{WriteOutcome, WriteSpec};
 use ampcore_core::live::cvr::write;
 use ampcore_core::live::driver::all_drivers;
 use ampcore_core::live::state::{
     DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
     LiveWriteAck,
 };
-
-/// Shared lookup for every write command below: resolves `device_id` to its
-/// current `firmware_family`, parsed IP, and the running driver's write
-/// channel in one pass, so each command body is just "build a packet or
-/// error, then send it". The channel is resolved here rather than at each
-/// send so a command against a stopped driver fails before building anything.
-pub(crate) fn resolve_write_target(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-) -> Result<(Option<String>, Ipv4Addr, mpsc::UnboundedSender<WriteSpec>), AppError> {
-    let (device, write_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let device = inner
-            .devices
-            .get(device_id)
-            .cloned()
-            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let write_tx = inner.write_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
-        (device, write_tx)
-    };
-    let ip: Ipv4Addr = device
-        .ip
-        .parse()
-        .map_err(|_| AppError::from(format!("device {} has an unparseable ip {}", device_id, device.ip)))?;
-    Ok((device.firmware_family, ip, write_tx))
-}
-
-/// Accumulates the per-packet `WriteOutcome`s of one command into the single
-/// `LiveWriteAck` it returns. Every write command uses this, including the
-/// single-packet ones, so the shape the frontend receives never depends on
-/// how many packets a given parameter happens to require.
-#[derive(Default)]
-pub(crate) struct WriteTally {
-    packets: u32,
-    attempts: u32,
-    elapsed_ms: u32,
-    coalesced: u32,
-}
-
-impl WriteTally {
-    pub(crate) fn record(&mut self, outcome: WriteOutcome) {
-        self.packets += 1;
-        if outcome.attempts == 0 {
-            // Coalesced: never transmitted, so it contributes no latency and
-            // must not drag the reported attempt count down to 0.
-            self.coalesced += 1;
-        } else {
-            self.attempts = self.attempts.max(outcome.attempts as u32);
-            self.elapsed_ms += outcome.elapsed_ms as u32;
-        }
-    }
-
-    pub(crate) fn finish(self) -> LiveWriteAck {
-        LiveWriteAck {
-            packets: self.packets,
-            attempts: self.attempts,
-            elapsed_ms: self.elapsed_ms,
-            coalesced: self.coalesced,
-        }
-    }
-}
-
-pub(crate) fn unknown_firmware_error(device_id: &str) -> AppError {
-    AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
-}
-
-/// FC=59 preset fetch/recall has no confirmed 1.1.9 spec in either reference
-/// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
-/// only rather than guessing it also works there, matching this app's
-/// "no generic fallback encoding" write philosophy.
-fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if firmware_family != Some("1.1.8") {
-        return Err(AppError::from(format!(
-            "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
-            device_id, firmware_family
-        )));
-    }
-    Ok(())
-}
-
-/// FC=43 FIR_datas is confirmed against 1.1.8, and 1.1.9 is accepted on the
-/// same basis `write.rs` already accepts it for FC=44 FIR bypass: the two
-/// firmwares share the v118 encoder for every FIR command, and
-/// `capability::cvr` gates the whole feature on vNum >= 118 (`fir_filters`).
-/// Anything older — or an unrecognized firmware — is refused rather than
-/// guessed at, matching this app's no-fallback-encoding rule.
-fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if !matches!(firmware_family, Some("1.1.8") | Some("1.1.9")) {
-        return Err(AppError::from(format!(
-            "device {} FIR data requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
-            device_id, firmware_family
-        )));
-    }
-    Ok(())
-}
-
-/// FC=30 FILTER_TYPE's wire body encodes `filter_type` and `active`
-/// (bypass) together in one byte — writing one field without knowing the
-/// other's current value would silently clobber it. Reads the most recent
-/// FC=27 poll result already cached in `LiveDeviceState` (refreshed every
-/// ~200ms, see `driver.rs`) rather than querying the device directly.
-/// `None` when nothing has been polled for this device/channel yet — the
-/// caller must treat that as an honest "can't merge yet" error, not guess.
-fn current_eq_band(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-    direction: EqDirection,
-    band_index: usize,
-) -> Result<Option<EqBand>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(inner.channel_config.get(device_id).and_then(|snapshot| {
-        snapshot.channels.iter().find(|c| c.channel_index == channel_index as u32).and_then(|c| {
-            let eq = match direction {
-                EqDirection::Input => &c.input_eq,
-                EqDirection::Output => &c.output_eq,
-            };
-            eq.bands.get(band_index).copied()
-        })
-    }))
-}
-
-/// Same merge problem as `current_eq_band`, for a crossover (HP/LP) slot.
-fn current_crossover_slot(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-    direction: EqDirection,
-    slot: CrossoverSlotKind,
-) -> Result<Option<CrossoverSlot>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(inner.channel_config.get(device_id).and_then(|snapshot| {
-        snapshot.channels.iter().find(|c| c.channel_index == channel_index as u32).map(|c| {
-            let eq = match direction {
-                EqDirection::Input => &c.input_eq,
-                EqDirection::Output => &c.output_eq,
-            };
-            match slot {
-                CrossoverSlotKind::Hp => eq.hp,
-                CrossoverSlotKind::Lp => eq.lp,
-            }
-        })
-    }))
-}
+use ampcore_core::live::write_helpers::{
+    current_channel, current_crossover_slot, current_eq_band, require_fir_firmware, require_v118_firmware, resolve_write_target,
+    unknown_firmware_error, WriteTally,
+};
 
 #[tauri::command]
 #[specta::specta]
@@ -501,39 +356,6 @@ pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, devic
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
     tally.record(write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
-}
-
-/// Reads one channel out of the last FC=27 snapshot.
-///
-/// Several Tier-A writes are whole-record packets — the matrix crosspoint
-/// carries gain *and* active, each limiter stage carries all four of its
-/// parameters — while this app's commands take partial patches. Merging the
-/// patch onto the device's last-known state is what keeps a partial update
-/// from zeroing the fields it doesn't mention. (The reference's `matrixActive`
-/// action does exactly that: it hardcodes 0 dB when toggling a crosspoint,
-/// silently discarding a configured gain.)
-///
-/// Erroring when no snapshot exists yet is deliberate: without it there is no
-/// honest value for the untouched fields, and inventing defaults would push
-/// silent wrong values to a live amp. The FC=27 poll runs continuously for
-/// every discovered device, so this is only reachable in the first moments
-/// after startup.
-fn current_channel(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-) -> Result<ChannelConfig, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    let snapshot = inner
-        .channel_config
-        .get(device_id)
-        .ok_or_else(|| AppError::from(format!("device {} has no channel data yet — wait for the first poll", device_id)))?;
-    snapshot
-        .channels
-        .iter()
-        .find(|c| c.channel_index == u32::from(channel_index))
-        .cloned()
-        .ok_or_else(|| AppError::from(format!("device {} has no channel {}", device_id, channel_index)))
 }
 
 /// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted

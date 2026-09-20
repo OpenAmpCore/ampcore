@@ -4,7 +4,7 @@ use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::common::now_millis;
 use ampcore_core::data::device_link::{match_catalog_model, DeviceModelLink};
 use crate::data::store::{save_device_model_links, ProjectDataState};
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 
 /// Resolves which catalog model a live device (identified by `mac`) should
 /// be configured as. An existing manual pick (`auto_matched: false`) always

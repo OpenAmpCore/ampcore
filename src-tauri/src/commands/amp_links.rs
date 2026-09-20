@@ -6,7 +6,7 @@ use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, LiveAmpReadi
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp};
 use ampcore_core::data::project::Project;
 use crate::data::store::{save_project_file, ProjectDataState};
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 use ampcore_core::live::state::{DiscoveredDevice, LiveDeviceState};
 
 /// Clones the device out of the live store and releases that lock before the

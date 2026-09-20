@@ -1,6 +1,5 @@
 mod commands;
 mod data;
-mod error;
 mod live;
 
 use tauri::Manager;
