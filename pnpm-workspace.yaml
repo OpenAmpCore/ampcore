@@ -1,2 +1,6 @@
+packages:
+  - apps/desktop
+  - apps/mobile
+
 allowBuilds:
   esbuild: true

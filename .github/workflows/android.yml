@@ -44,7 +44,7 @@ jobs:
       - name: install rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: setup android sdk
         uses: android-actions/setup-android@v3
@@ -60,11 +60,9 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install
 
-      # apps/mobile has no package.json (no bundler yet — see its src/index.html),
-      # so the Tauri CLI comes from the root workspace's devDependency instead.
       - name: init android project
         working-directory: apps/mobile
-        run: ../../node_modules/.bin/tauri android init --ci
+        run: pnpm exec tauri android init --ci
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.13846066
 
@@ -75,6 +73,6 @@ jobs:
       # mobile release to ship.
       - name: build debug apk
         working-directory: apps/mobile
-        run: ../../node_modules/.bin/tauri android build --debug --target aarch64
+        run: pnpm exec tauri android build --debug --target aarch64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.13846066
