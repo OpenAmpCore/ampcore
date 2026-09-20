@@ -4,10 +4,10 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 
-use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-use super::capability::cvr::builtin_topology;
-use super::device_link::DeviceModelLink;
-use super::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
+use ampcore_core::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
+use ampcore_core::data::capability::cvr::builtin_topology;
+use ampcore_core::data::device_link::DeviceModelLink;
+use ampcore_core::data::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
 
 /// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
 /// here are infrequent and user-paced (not a polling loop), so a single

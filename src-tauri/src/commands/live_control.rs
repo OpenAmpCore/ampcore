@@ -1,168 +1,23 @@
-use std::net::Ipv4Addr;
-
 use tauri::{AppHandle, State};
-use tokio::sync::mpsc;
 
-use crate::data::capability::{PowerMode, SourceKind};
-use crate::data::common::now_millis;
-use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection, LimiterPatch};
-use crate::error::AppError;
-use crate::live::cvr::channel_config::ChannelConfig;
-use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use crate::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
-use crate::live::cvr::fir;
-use crate::live::cvr::preset;
-use crate::live::cvr::request::{WriteOutcome, WriteSpec};
-use crate::live::cvr::write;
-use crate::live::driver::all_drivers;
-use crate::live::state::{
+use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::common::now_millis;
+use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
+use ampcore_core::error::AppError;
+use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
+use ampcore_core::live::cvr::fir;
+use ampcore_core::live::cvr::preset;
+use ampcore_core::live::cvr::write;
+use ampcore_core::live::driver::all_drivers;
+use ampcore_core::live::state::{
     DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
-    LiveEventSink, LiveWriteAck,
+    LiveWriteAck,
 };
-
-/// Shared lookup for every write command below: resolves `device_id` to its
-/// current `firmware_family`, parsed IP, and the running driver's write
-/// channel in one pass, so each command body is just "build a packet or
-/// error, then send it". The channel is resolved here rather than at each
-/// send so a command against a stopped driver fails before building anything.
-pub(crate) fn resolve_write_target(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-) -> Result<(Option<String>, Ipv4Addr, mpsc::UnboundedSender<WriteSpec>), AppError> {
-    let (device, write_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let device = inner
-            .devices
-            .get(device_id)
-            .cloned()
-            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let write_tx = inner.write_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
-        (device, write_tx)
-    };
-    let ip: Ipv4Addr = device
-        .ip
-        .parse()
-        .map_err(|_| AppError::from(format!("device {} has an unparseable ip {}", device_id, device.ip)))?;
-    Ok((device.firmware_family, ip, write_tx))
-}
-
-/// Accumulates the per-packet `WriteOutcome`s of one command into the single
-/// `LiveWriteAck` it returns. Every write command uses this, including the
-/// single-packet ones, so the shape the frontend receives never depends on
-/// how many packets a given parameter happens to require.
-#[derive(Default)]
-pub(crate) struct WriteTally {
-    packets: u32,
-    attempts: u32,
-    elapsed_ms: u32,
-    coalesced: u32,
-}
-
-impl WriteTally {
-    pub(crate) fn record(&mut self, outcome: WriteOutcome) {
-        self.packets += 1;
-        if outcome.attempts == 0 {
-            // Coalesced: never transmitted, so it contributes no latency and
-            // must not drag the reported attempt count down to 0.
-            self.coalesced += 1;
-        } else {
-            self.attempts = self.attempts.max(outcome.attempts as u32);
-            self.elapsed_ms += outcome.elapsed_ms as u32;
-        }
-    }
-
-    pub(crate) fn finish(self) -> LiveWriteAck {
-        LiveWriteAck {
-            packets: self.packets,
-            attempts: self.attempts,
-            elapsed_ms: self.elapsed_ms,
-            coalesced: self.coalesced,
-        }
-    }
-}
-
-pub(crate) fn unknown_firmware_error(device_id: &str) -> AppError {
-    AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
-}
-
-/// FC=59 preset fetch/recall has no confirmed 1.1.9 spec in either reference
-/// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
-/// only rather than guessing it also works there, matching this app's
-/// "no generic fallback encoding" write philosophy.
-fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if firmware_family != Some("1.1.8") {
-        return Err(AppError::from(format!(
-            "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
-            device_id, firmware_family
-        )));
-    }
-    Ok(())
-}
-
-/// FC=43 FIR_datas is confirmed against 1.1.8, and 1.1.9 is accepted on the
-/// same basis `write.rs` already accepts it for FC=44 FIR bypass: the two
-/// firmwares share the v118 encoder for every FIR command, and
-/// `capability::cvr` gates the whole feature on vNum >= 118 (`fir_filters`).
-/// Anything older — or an unrecognized firmware — is refused rather than
-/// guessed at, matching this app's no-fallback-encoding rule.
-fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if !matches!(firmware_family, Some("1.1.8") | Some("1.1.9")) {
-        return Err(AppError::from(format!(
-            "device {} FIR data requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
-            device_id, firmware_family
-        )));
-    }
-    Ok(())
-}
-
-/// FC=30 FILTER_TYPE's wire body encodes `filter_type` and `active`
-/// (bypass) together in one byte — writing one field without knowing the
-/// other's current value would silently clobber it. Reads the most recent
-/// FC=27 poll result already cached in `LiveDeviceState` (refreshed every
-/// ~200ms, see `driver.rs`) rather than querying the device directly.
-/// `None` when nothing has been polled for this device/channel yet — the
-/// caller must treat that as an honest "can't merge yet" error, not guess.
-fn current_eq_band(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-    direction: EqDirection,
-    band_index: usize,
-) -> Result<Option<EqBand>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(inner.channel_config.get(device_id).and_then(|snapshot| {
-        snapshot.channels.iter().find(|c| c.channel_index == channel_index as u32).and_then(|c| {
-            let eq = match direction {
-                EqDirection::Input => &c.input_eq,
-                EqDirection::Output => &c.output_eq,
-            };
-            eq.bands.get(band_index).copied()
-        })
-    }))
-}
-
-/// Same merge problem as `current_eq_band`, for a crossover (HP/LP) slot.
-fn current_crossover_slot(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-    direction: EqDirection,
-    slot: CrossoverSlotKind,
-) -> Result<Option<CrossoverSlot>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(inner.channel_config.get(device_id).and_then(|snapshot| {
-        snapshot.channels.iter().find(|c| c.channel_index == channel_index as u32).map(|c| {
-            let eq = match direction {
-                EqDirection::Input => &c.input_eq,
-                EqDirection::Output => &c.output_eq,
-            };
-            match slot {
-                CrossoverSlotKind::Hp => eq.hp,
-                CrossoverSlotKind::Lp => eq.lp,
-            }
-        })
-    }))
-}
+use ampcore_core::live::write_helpers::{
+    current_channel, current_crossover_slot, current_eq_band, require_fir_firmware, require_v118_firmware, resolve_write_target,
+    unknown_firmware_error, WriteTally,
+};
 
 #[tauri::command]
 #[specta::specta]
@@ -179,11 +34,9 @@ pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Resu
     // across the call deadlocks the very first `live_control_start`
     // invocation, which fires when the first live-aware view mounts (see
     // `useLiveDriver`).
-    let sink = LiveEventSink {
-        app,
-        state: state.0.clone(),
-    };
-    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone())).collect();
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
+    let runtime = tauri::async_runtime::handle().inner().clone();
+    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone(), &runtime)).collect();
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     inner.handles.extend(handles);
     Ok(())
@@ -284,15 +137,15 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let spec = crate::live::cvr::request::RequestSpec {
+    let spec = ampcore_core::live::cvr::request::RequestSpec {
         ip: ip.clone(),
-        function_code: crate::live::cvr::protocol::FC_SYNC_DATA,
+        function_code: ampcore_core::live::cvr::protocol::FC_SYNC_DATA,
         chx: 0,
         body: Vec::new(),
         // FC=27 is always fragmented.
         expects_fragments: true,
         in_out_flag: 0,
-        sink: crate::live::cvr::request::ResultSink::External(tx),
+        sink: ampcore_core::live::cvr::request::ResultSink::External(tx),
     };
     request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
     let frame = rx
@@ -300,8 +153,8 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
         .map_err(|_| AppError::from("live control driver dropped the request"))?
         .map_err(|e| AppError::from(format!("{:?}", e)))?;
 
-    let sink = LiveEventSink { app, state: state.0.clone() };
-    let config = crate::live::cvr::driver::parse_and_store_sync_data(&ip, &frame, &sink).map_err(AppError::from)?;
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
+    let config = ampcore_core::live::cvr::driver::parse_and_store_sync_data(&ip, &frame, &sink).map_err(AppError::from)?;
     Ok(DeviceChannelConfig { device_id, config })
 }
 
@@ -340,7 +193,7 @@ const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 /// spec — see their docs for why a single-datagram read must declare itself as
 /// one, and why an output-side query has to say so.
 async fn send_request_with_retry(
-    request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
+    request_tx: &tokio::sync::mpsc::UnboundedSender<ampcore_core::live::cvr::request::RequestSpec>,
     ip: &str,
     function_code: u8,
     chx: u8,
@@ -351,19 +204,19 @@ async fn send_request_with_retry(
     let mut last_err = AppError::from(format!("device {} request never attempted", ip));
     for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let spec = crate::live::cvr::request::RequestSpec {
+        let spec = ampcore_core::live::cvr::request::RequestSpec {
             ip: ip.to_string(),
             function_code,
             chx,
             body: body.clone(),
             expects_fragments,
             in_out_flag,
-            sink: crate::live::cvr::request::ResultSink::External(tx),
+            sink: ampcore_core::live::cvr::request::ResultSink::External(tx),
         };
         request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
         match rx.await.map_err(|_| AppError::from("live control driver dropped the request"))? {
             Ok(frame) => return Ok(frame),
-            Err(crate::live::cvr::request::RequestError::Busy) => {
+            Err(ampcore_core::live::cvr::request::RequestError::Busy) => {
                 last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
                 if attempt < REQUEST_BUSY_MAX_RETRIES {
                     tokio::time::sleep(std::time::Duration::from_millis(REQUEST_BUSY_RETRY_DELAY_MS)).await;
@@ -406,7 +259,7 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
 
     let snapshot = preset::DevicePresetsSnapshot { slots, active_preset_name: Some(active_preset_name), received_at: now_millis() };
-    let sink = LiveEventSink { app, state: state.0.clone() };
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
     sink.set_presets(device_id.clone(), snapshot.clone());
     Ok(DevicePresets { device_id, presets: snapshot })
 }
@@ -452,12 +305,12 @@ pub async fn live_control_fetch_bridge(
         (device.ip, request_tx)
     };
 
-    let sink = LiveEventSink { app, state: state.0.clone() };
-    for pair_index in 0..crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+    let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
+    for pair_index in 0..ampcore_core::live::cvr::bridge::BRIDGE_PAIR_COUNT {
         let frame = send_request_with_retry(
             &request_tx,
             &ip,
-            crate::live::cvr::bridge::FC_BRIDGE,
+            ampcore_core::live::cvr::bridge::FC_BRIDGE,
             pair_index,
             Vec::new(),
             false,
@@ -466,7 +319,7 @@ pub async fn live_control_fetch_bridge(
         .await?;
         // The pair comes from the reply's own header, not from what was
         // asked — see `parse_bridge_reply`.
-        if let Some((pair, bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
+        if let Some((pair, bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
             sink.set_bridge_pair(device_id.clone(), pair, bridged);
         }
     }
@@ -477,7 +330,7 @@ pub async fn live_control_fetch_bridge(
             .bridge
             .get(&device_id)
             .cloned()
-            .unwrap_or_else(crate::live::cvr::bridge::DeviceBridgeSnapshot::empty)
+            .unwrap_or_else(ampcore_core::live::cvr::bridge::DeviceBridgeSnapshot::empty)
     };
     Ok(DeviceBridge { device_id, bridge })
 }
@@ -502,41 +355,8 @@ pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, devic
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let mut tally = WriteTally::default();
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
-    tally.record(write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
+    tally.record(write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
-}
-
-/// Reads one channel out of the last FC=27 snapshot.
-///
-/// Several Tier-A writes are whole-record packets — the matrix crosspoint
-/// carries gain *and* active, each limiter stage carries all four of its
-/// parameters — while this app's commands take partial patches. Merging the
-/// patch onto the device's last-known state is what keeps a partial update
-/// from zeroing the fields it doesn't mention. (The reference's `matrixActive`
-/// action does exactly that: it hardcodes 0 dB when toggling a crosspoint,
-/// silently discarding a configured gain.)
-///
-/// Erroring when no snapshot exists yet is deliberate: without it there is no
-/// honest value for the untouched fields, and inventing defaults would push
-/// silent wrong values to a live amp. The FC=27 poll runs continuously for
-/// every discovered device, so this is only reachable in the first moments
-/// after startup.
-fn current_channel(
-    state: &State<'_, LiveDeviceState>,
-    device_id: &str,
-    channel_index: u8,
-) -> Result<ChannelConfig, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    let snapshot = inner
-        .channel_config
-        .get(device_id)
-        .ok_or_else(|| AppError::from(format!("device {} has no channel data yet — wait for the first poll", device_id)))?;
-    snapshot
-        .channels
-        .iter()
-        .find(|c| c.channel_index == u32::from(channel_index))
-        .cloned()
-        .ok_or_else(|| AppError::from(format!("device {} has no channel {}", device_id, channel_index)))
 }
 
 /// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
@@ -782,7 +602,7 @@ pub async fn live_control_set_output_bridge(
         )));
     }
     let pair_index = channel_index / 2;
-    if pair_index >= crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+    if pair_index >= ampcore_core::live::cvr::bridge::BRIDGE_PAIR_COUNT {
         return Err(AppError::from(format!("channel {} is outside the bridgeable pairs", channel_index)));
     }
 
@@ -810,7 +630,7 @@ pub async fn live_control_set_output_bridge(
         let frame = send_request_with_retry(
             &request_tx,
             &ip.to_string(),
-            crate::live::cvr::bridge::FC_BRIDGE,
+            ampcore_core::live::cvr::bridge::FC_BRIDGE,
             pair_index,
             Vec::new(),
             false,
@@ -818,8 +638,8 @@ pub async fn live_control_set_output_bridge(
         )
         .await;
         if let Ok(frame) = frame {
-            if let Some((pair, is_bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
-                let sink = LiveEventSink { app, state: state.0.clone() };
+            if let Some((pair, is_bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
+                let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
                 sink.set_bridge_pair(device_id, pair, is_bridged);
             }
         }
@@ -866,7 +686,7 @@ pub async fn live_control_store_preset(
 
     let mut tally = WriteTally::default();
     tally.record(
-        write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_store_packet(slot_index, trimmed))
+        write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_store_packet(slot_index, trimmed))
             .await
             .map_err(|e| e.to_string())?,
     );

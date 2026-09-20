@@ -1,13 +1,13 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::data::amp_model::AmpModelCatalogEntry;
-use crate::data::capability::{PowerMode, SourceKind};
-use crate::data::project::{
+use ampcore_core::data::amp_model::AmpModelCatalogEntry;
+use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::project::{
     AmpAssignment, BackupPriorityPatch, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection,
     LimiterPatch, Project, SourceTrimPatch,
 };
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 
 fn find_amp_model<'a>(models: &'a [AmpModelCatalogEntry], id: &str) -> Option<&'a AmpModelCatalogEntry> {
     models.iter().find(|m| m.id == id)

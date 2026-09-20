@@ -1,11 +1,11 @@
 use tauri::State;
 
-use crate::data::amp_model::AmpModelCatalogEntry;
-use crate::data::device_link::DeviceModelLink;
-use crate::data::fingerprint::{self as fp, AmpFingerprint};
+use ampcore_core::data::amp_model::AmpModelCatalogEntry;
+use ampcore_core::data::device_link::DeviceModelLink;
+use ampcore_core::data::fingerprint::{self as fp, AmpFingerprint};
 use crate::data::store::ProjectDataState;
-use crate::error::AppError;
-use crate::live::state::LiveDeviceState;
+use ampcore_core::error::AppError;
+use ampcore_core::live::state::LiveDeviceState;
 
 use super::live_control::live_control_fetch_channel_fir;
 

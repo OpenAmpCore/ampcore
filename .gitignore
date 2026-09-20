@@ -23,6 +23,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# Cargo workspace build output (cargo now builds at the workspace root)
+/target/
+
 # Tauri build output
 /src-tauri/target/
 /src-tauri/gen/

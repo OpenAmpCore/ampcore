@@ -1,8 +1,8 @@
 use tauri::State;
 
-use crate::data::capability::{resolve, AmpCapability};
+use ampcore_core::data::capability::{resolve, AmpCapability};
 use crate::data::store::ProjectDataState;
-use crate::error::AppError;
+use ampcore_core::error::AppError;
 
 /// Resolves what can be configured, and within what ranges, for a given amp
 /// model + firmware version — purely offline, no live device involved.

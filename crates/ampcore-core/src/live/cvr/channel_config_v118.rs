@@ -124,7 +124,7 @@ fn crossover_filter_type(code: u8) -> CrossoverFilterType {
 /// next to the read-side mapping (not duplicated in the write module) so
 /// read and write can never silently drift into disagreeing about which
 /// code means what.
-pub(crate) fn eq_filter_type_code(filter_type: EqFilterType) -> u8 {
+pub fn eq_filter_type_code(filter_type: EqFilterType) -> u8 {
     match filter_type {
         EqFilterType::Peaking => 0,
         EqFilterType::LowShelf => 1,
@@ -141,7 +141,7 @@ pub(crate) fn eq_filter_type_code(filter_type: EqFilterType) -> u8 {
 }
 
 /// Inverse of `crossover_filter_type` — see `eq_filter_type_code`.
-pub(crate) fn crossover_filter_type_code(filter_type: CrossoverFilterType) -> u8 {
+pub fn crossover_filter_type_code(filter_type: CrossoverFilterType) -> u8 {
     match filter_type {
         CrossoverFilterType::Butterworth12 => 0,
         CrossoverFilterType::Bessel12 => 1,
