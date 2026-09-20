@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Badge, Card, Container, Group, Loader, Stack, Text, Title } from "@mantine/core";
+import { Accordion, AppShell, Badge, Group, Loader, Text, Title } from "@mantine/core";
+import { DeviceControls } from "./DeviceControls";
 
 // ponytail: hand-written subset of ampcore_core::live::state::DiscoveredDevice
 // (camelCase). Move to tauri-specta bindings if mobile's command count grows.
@@ -20,6 +21,7 @@ interface Device {
 
 export function App() {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -37,34 +39,48 @@ export function App() {
     };
   }, []);
 
+  // The backend hands over HashMap order, which reshuffles between events.
+  const sorted = [...devices].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+
   return (
-    <Container size="sm" py="md" style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}>
-      <Title order={2} mb="md">
-        AmpCore
-      </Title>
-      {devices.length === 0 ? (
-        <Group justify="center" gap="sm" mt="xl">
-          <Loader size="sm" />
-          <Text c="dimmed">Searching for amps on your Wi-Fi…</Text>
+    // viewport-fit=cover (index.html) draws under the system bars, so the bar
+    // and the content end pad with the safe-area insets.
+    <AppShell header={{ height: "calc(56px + env(safe-area-inset-top))" }} padding="md">
+      <AppShell.Header style={{ paddingTop: "env(safe-area-inset-top)" }}>
+        <Group h={56} px="md" justify="space-between">
+          <Title order={3}>AmpCore</Title>
+          {sorted.length === 0 ? <Loader size="sm" /> : <Text c="dimmed">{sorted.length} found</Text>}
         </Group>
-      ) : (
-        <Stack>
-          {devices.map((d) => (
-            <Card key={d.id} withBorder radius="md">
-              <Group justify="space-between" mb={4}>
-                <Text fw={600}>{d.name || d.mac}</Text>
-                <Badge color={d.online ? "green" : "gray"}>{d.online ? "online" : "offline"}</Badge>
-              </Group>
-              <Text size="sm" c="dimmed">
-                {d.brand} · {d.ip} · fw {d.firmwareVersion}
-              </Text>
-              <Text size="sm" c="dimmed">
-                {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
-              </Text>
-            </Card>
-          ))}
-        </Stack>
-      )}
-    </Container>
+      </AppShell.Header>
+      <AppShell.Main style={{ paddingBottom: "calc(var(--mantine-spacing-md) + env(safe-area-inset-bottom))" }}>
+        {sorted.length === 0 ? (
+          <Text c="dimmed" ta="center" mt="xl">
+            Searching for amps on your Wi-Fi…
+          </Text>
+        ) : (
+          <Accordion variant="separated" radius="md" value={open} onChange={setOpen}>
+            {sorted.map((d) => (
+              <Accordion.Item key={d.id} value={d.id}>
+                <Accordion.Control mih={64}>
+                  <Group justify="space-between" wrap="nowrap" pr="xs">
+                    <div>
+                      <Text fw={600}>{d.name || d.mac}</Text>
+                      <Text size="sm" c="dimmed">
+                        {d.brand} · {d.ip} · fw {d.firmwareVersion}
+                      </Text>
+                      <Text size="sm" c="dimmed">
+                        {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
+                      </Text>
+                    </div>
+                    <Badge color={d.online ? "green" : "gray"}>{d.online ? "online" : "offline"}</Badge>
+                  </Group>
+                </Accordion.Control>
+                <Accordion.Panel>{open === d.id && <DeviceControls id={d.id} online={d.online} />}</Accordion.Panel>
+              </Accordion.Item>
+            ))}
+          </Accordion>
+        )}
+      </AppShell.Main>
+    </AppShell>
   );
 }
