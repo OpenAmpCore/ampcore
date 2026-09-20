@@ -1,0 +1,14 @@
+[package]
+name = "ampcore-core"
+version = "0.1.0"
+description = "Shared amp device/protocol/DSP domain logic for AmpCore (no Tauri dependency)"
+authors = ["scalli007YT"]
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+specta = { version = "2.0.0-rc.22", features = ["derive"] }
+uuid = { version = "1.23.4", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["net", "time", "macros", "sync"] }
+if-addrs = "0.13"
