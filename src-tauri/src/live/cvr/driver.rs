@@ -163,7 +163,7 @@ impl AmpDriver for CvrDriver {
         }
         let protocol_slug = self.protocol().slug();
         let brand = self.brand();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = run(sink, stop_rx, request_rx, write_rx, protocol_slug, brand).await {
                 eprintln!("[cvr driver] exited with error: {e}");
             }
