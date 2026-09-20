@@ -152,7 +152,7 @@ impl AmpDriver for CvrDriver {
         "CVR"
     }
 
-    fn start(&self, sink: LiveEventSink) -> DriverHandle {
+    fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHandle {
         let (stop_tx, stop_rx) = oneshot::channel();
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
@@ -163,7 +163,7 @@ impl AmpDriver for CvrDriver {
         }
         let protocol_slug = self.protocol().slug();
         let brand = self.brand();
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             if let Err(e) = run(sink, stop_rx, request_rx, write_rx, protocol_slug, brand).await {
                 eprintln!("[cvr driver] exited with error: {e}");
             }

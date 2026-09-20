@@ -22,7 +22,13 @@ pub trait AmpDriver: Send + Sync {
     fn protocol(&self) -> AmpProtocol;
     /// Human-facing brand label, e.g. "CVR".
     fn brand(&self) -> &'static str;
-    fn start(&self, sink: LiveEventSink) -> DriverHandle;
+    /// `runtime` is the handle to spawn the driver's background task(s) on.
+    /// Threaded in explicitly (rather than calling `tokio::spawn` directly)
+    /// because `start` is called from a synchronous command handler that
+    /// isn't itself running inside a tokio task — bare `tokio::spawn` would
+    /// panic with "no reactor running". The desktop app gets its handle from
+    /// `tauri::async_runtime::handle()`; this crate only sees plain tokio.
+    fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHandle;
 }
 
 /// Every amp driver currently supported by the app — the single centralized

@@ -35,7 +35,8 @@ pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Resu
     // invocation, which fires when the first live-aware view mounts (see
     // `useLiveDriver`).
     let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
-    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone())).collect();
+    let runtime = tauri::async_runtime::handle().inner().clone();
+    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone(), &runtime)).collect();
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     inner.handles.extend(handles);
     Ok(())
