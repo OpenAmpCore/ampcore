@@ -77,11 +77,21 @@ jobs:
 
       # Debug build only: catches compile/link breakage on every push, same
       # spirit as the frontend/Rust checks elsewhere. Not a release — no
-      # signing, no publish. See .github/workflows/release.yml for the
-      # signed-release pattern this would extend if/when there's an actual
-      # mobile release to ship.
+      # signing, no publish. See .github/workflows/release-desktop.yml for
+      # the signed-release pattern this would extend if/when there's an
+      # actual mobile release to ship.
       - name: build debug apk
         working-directory: apps/mobile
         run: pnpm exec tauri android build --debug --target aarch64
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.13846066
+
+      # Not a release artifact (see above) — just keeps the APK downloadable
+      # from the run for a spot-check, instead of it only ever proving the
+      # build succeeded and then disappearing with the runner.
+      - name: upload debug apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ampcore-mobile-debug-apk
+          path: apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          retention-days: 14

@@ -1,4 +1,4 @@
-name: 'release'
+name: 'release-desktop'
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  release:
+  release-desktop:
     permissions:
       contents: write
     strategy:
