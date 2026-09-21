@@ -50,16 +50,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ampcore-mobile"
-version = "0.1.0"
-dependencies = [
- "ampcore-core",
- "tauri",
- "tauri-build",
-]
-
-[[package]]
-name = "ampcore-tauri"
+name = "ampcore-desktop"
 version = "0.2.0"
 dependencies = [
  "ampcore-core",
@@ -76,6 +67,15 @@ dependencies = [
  "tauri-specta",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "ampcore-mobile"
+version = "0.1.0"
+dependencies = [
+ "ampcore-core",
+ "tauri",
+ "tauri-build",
 ]
 
 [[package]]

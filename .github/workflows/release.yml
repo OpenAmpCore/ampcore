@@ -1,7 +1,8 @@
 name: 'release'
 
-# Every push/PR to main: read the version of each crate/app, open a draft
-# release listing them, then build the installers and attach them to it.
+# PR to main: checks only. Push/merge to main: read the version of each
+# crate/app, open a draft release listing them, then build the installers and
+# attach them to it.
 # Publishing the draft is manual. Versions are bumped by hand in Cargo.toml +
 # tauri.conf.json + package.json (there is no auto-bump).
 on:
@@ -19,7 +20,40 @@ permissions:
   contents: write
 
 jobs:
+  # PRs: checks only, no installers, no release.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'pnpm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: pnpm install
+
+      # Typechecks both frontends; also creates the dist/ that Tauri's
+      # generate_context! needs in order to compile.
+      - run: pnpm -r build
+
+      # Compiles the whole workspace, so no separate cargo check.
+      - run: cargo test --workspace
+
+  # main (push/merge): draft release + installers.
   version:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.v.outputs.tag }}
@@ -35,7 +69,7 @@ jobs:
         run: |
           # One line per workspace crate: "<name> <version>".
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "\(.name) \(.version)"')
-          DESKTOP=$(echo "$V" | awk '$1=="ampcore-tauri"{print $2}')
+          DESKTOP=$(echo "$V" | awk '$1=="ampcore-desktop"{print $2}')
           MOBILE=$(echo "$V" | awk '$1=="ampcore-mobile"{print $2}')
           TABLE=$(echo "$V" | awk 'BEGIN{print "| crate / app | version |\n|---|---|"} {print "| "$1" | "$2" |"}')
           TAG="v$DESKTOP-${SHA::7}"

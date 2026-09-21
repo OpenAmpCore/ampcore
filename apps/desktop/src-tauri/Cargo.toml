@@ -1,5 +1,5 @@
 [package]
-name = "ampcore-tauri"
+name = "ampcore-desktop"
 version = "0.2.0"
 description = "AmpCore"
 authors = ["scalli007YT"]
