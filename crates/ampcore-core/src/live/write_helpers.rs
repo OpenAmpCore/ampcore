@@ -119,14 +119,13 @@ pub async fn send_write(
     Ok(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?)
 }
 
-/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
-/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
-/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
-/// comfortably outlasts one poll cycle without adding noticeable latency to
-/// the common case (which succeeds on the first attempt). Shared by every
-/// `send_request_with_retry` caller, which is why it is no longer named
-/// after presets.
-const REQUEST_BUSY_MAX_RETRIES: u32 = 10;
+/// Retry budget for `RequestError::Busy`. Must outlast one stalled request
+/// (`REQUEST_TIMEOUT_MS` + `REQUEST_RETRY_TIMEOUT_MS` = 4.2s): an unanswered
+/// poll parks the whole per-IP line for that long, since a fragmented read
+/// conflicts with anything in flight (see `RequestRegistry::conflicts_with`).
+/// The old ~300ms budget made the post-recall FC=59 re-fetch fail every time.
+/// Cost: an unreachable device reports Busy after ~6s.
+const REQUEST_BUSY_MAX_RETRIES: u32 = 200;
 const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 
 /// Sends one request through the driver's request registry with an
@@ -318,6 +317,13 @@ pub fn current_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_retry_budget_outlasts_a_stalled_request() {
+        use crate::live::cvr::request::{REQUEST_RETRY_TIMEOUT_MS, REQUEST_TIMEOUT_MS};
+        let budget_ms = u64::from(REQUEST_BUSY_MAX_RETRIES) * REQUEST_BUSY_RETRY_DELAY_MS;
+        assert!(budget_ms > REQUEST_TIMEOUT_MS + REQUEST_RETRY_TIMEOUT_MS, "busy budget {budget_ms}ms is too short");
+    }
 
     #[test]
     fn presets_are_gated_to_1_1_8_only() {
