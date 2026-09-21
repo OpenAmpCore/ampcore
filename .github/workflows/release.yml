@@ -1,0 +1,167 @@
+name: 'release'
+
+# Every push/PR to main: read the version of each crate/app, open a draft
+# release listing them, then build the installers and attach them to it.
+# Publishing the draft is manual. Versions are bumped by hand in Cargo.toml +
+# tauri.conf.json + package.json (there is no auto-bump).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      mobile_version: ${{ steps.v.outputs.mobile_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PR runs check out a merge commit; the head sha is the real one.
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # One line per workspace crate: "<name> <version>".
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "\(.name) \(.version)"')
+          DESKTOP=$(echo "$V" | awk '$1=="ampcore-tauri"{print $2}')
+          MOBILE=$(echo "$V" | awk '$1=="ampcore-mobile"{print $2}')
+          TABLE=$(echo "$V" | awk 'BEGIN{print "| crate / app | version |\n|---|---|"} {print "| "$1" | "$2" |"}')
+          TAG="v$DESKTOP-${SHA::7}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --draft --target "$SHA" --title "AmpCore $TAG" --notes "$TABLE"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "mobile_version=$MOBILE" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'windows-latest'
+            args: ''
+          - platform: 'macos-latest'
+            args: '--target universal-apple-darwin'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'pnpm'
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install frontend dependencies
+        run: pnpm install
+
+      # Bundles: Windows NSIS + MSI; macOS universal .dmg + .app.tar.gz (the
+      # compressed .app, unpack-and-run). The draft already exists, so
+      # tauri-action just uploads into it.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ needs.version.outputs.tag }}
+          releaseDraft: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+  # Unsigned debug APK: no Android keystore yet. Swap for a signed release
+  # build once there is one.
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 29.0.13846066
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'pnpm'
+
+      - name: setup java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: setup android sdk
+        uses: android-actions/setup-android@v3
+        with:
+          # Default packages ("tools platform-tools") fail outright: the
+          # legacy "tools" package no longer exists in Google's SDK repo.
+          # build-tools/platforms come from Gradle; the NDK is installed below.
+          packages: platform-tools
+
+      # Unaccepted SDK licenses are a hard Gradle failure, not a warning.
+      - name: accept android sdk licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: install NDK
+        run: sdkmanager --install "ndk;$NDK_VERSION"
+
+      - name: install frontend dependencies
+        run: pnpm install
+
+      - name: init android project
+        working-directory: apps/mobile
+        run: pnpm exec tauri android init --ci
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+
+      - name: build debug apk
+        working-directory: apps/mobile
+        run: pnpm exec tauri android build --debug --target aarch64
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+
+      - name: upload apk to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="AmpCore-mobile-${{ needs.version.outputs.mobile_version }}-debug.apk"
+          cp apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk "$APK"
+          gh release upload "${{ needs.version.outputs.tag }}" "$APK" --clobber --repo "${{ github.repository }}"
