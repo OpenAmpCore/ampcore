@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "preview": "tauri dev",
-    "preview:android": "tauri android build --debug --target aarch64 && \"%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb\" install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk && \"%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb\" shell am start -n com.scalli.ampcore.mobile/.MainActivity",
+    "preview:android": "tauri android build --debug --target aarch64 && \"%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb\" install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk",
     "build": "tsc && vite build",
     "tauri": "tauri"
   },
