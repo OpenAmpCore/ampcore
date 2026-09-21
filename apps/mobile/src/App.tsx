@@ -1,103 +1,104 @@
-import { AppShell, Badge, Burger, Card, Group, Loader, NavLink, Text, Title, UnstyledButton } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
+import { useState } from "react";
+import { Card, Chip, Link, List, ListItem, Navbar, Page, Panel, Preloader } from "konsta/react";
 import { AmpScreen } from "./AmpScreen";
-import { go, useDevices, useRoute, type Device } from "./lib";
+import { Settings } from "./sections";
+import { chipColors, go, goSettings, useDevices, useRoute, type Device } from "./lib";
 
 const Dot = ({ online }: { online: boolean }) => (
-  <span
-    style={{ width: 10, height: 10, borderRadius: "50%", background: online ? "var(--mantine-color-green-6)" : "var(--mantine-color-gray-5)" }}
-  />
+  <span className={`size-2.5 shrink-0 rounded-full ${online ? "bg-green-500" : "bg-gray-400"}`} />
 );
 
 function AmpCard({ d }: { d: Device }) {
   return (
-    <UnstyledButton w="100%" onClick={() => go(d.id)}>
-      <Card withBorder radius="md" mih={64}>
-        <Group justify="space-between" wrap="nowrap">
-          <div>
-            <Text fw={600}>{d.name || d.mac}</Text>
-            <Text size="sm" c="dimmed">
-              {d.brand} · {d.ip} · fw {d.firmwareVersion}
-            </Text>
-            <Text size="sm" c="dimmed">
-              {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
-            </Text>
+    <Card className="!mx-0 cursor-pointer" onClick={() => go(d.id)}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate font-semibold">{d.name || d.mac}</div>
+          <div className="text-sm opacity-60">
+            {d.brand} · {d.ip} · fw {d.firmwareVersion}
           </div>
-          <Badge color={d.online ? "green" : "gray"}>{d.online ? "online" : "offline"}</Badge>
-        </Group>
-      </Card>
-    </UnstyledButton>
+          <div className="text-sm opacity-60">
+            {d.analogInputChannels + d.digitalInputChannels} in · {d.outputChannels} out
+          </div>
+        </div>
+        <Chip colors={chipColors(d.online ? "success" : "default")}>{d.online ? "online" : "offline"}</Chip>
+      </div>
+    </Card>
   );
 }
 
 export function App() {
   const devices = useDevices();
-  const { id, tab } = useRoute();
-  const [menu, { toggle, close }] = useDisclosure(false);
+  const { id, tab, eqChannel, settings } = useRoute();
+  const [menu, setMenu] = useState(false);
   const amp = id ? devices.find((d) => d.id === id) : undefined;
+  const nav = (fn: () => void) => () => {
+    fn();
+    setMenu(false);
+  };
 
   return (
-    // viewport-fit=cover (index.html) draws under the system bars, so the bars
-    // and the content end pad with the safe-area insets.
-    <AppShell
-      header={{ height: "calc(56px + env(safe-area-inset-top))" }}
-      footer={amp ? { height: "calc(56px + env(safe-area-inset-bottom))" } : undefined}
-      navbar={{ width: 280, breakpoint: 0, collapsed: { mobile: !menu, desktop: !menu } }}
-      padding="md"
-    >
-      <AppShell.Header style={{ paddingTop: "env(safe-area-inset-top)" }}>
-        <Group h={56} px="md" justify="space-between" wrap="nowrap">
-          <Group wrap="nowrap">
-            <Burger opened={menu} onClick={toggle} aria-label="Menu" />
-            <Title order={3}>{amp ? amp.name || amp.mac : "AmpCore"}</Title>
-          </Group>
-          {!amp && (devices.length === 0 ? <Loader size="sm" /> : <Text c="dimmed">{devices.length} found</Text>)}
-        </Group>
-      </AppShell.Header>
+    <Page>
+      <Navbar
+        title={settings ? "Settings" : amp ? amp.name || amp.mac : "AmpCore"}
+        left={
+          // On the EQ route the same slot goes back one level instead — the
+          // hash history entry is what Android's back button pops too.
+          eqChannel !== null ? (
+            <Link onClick={() => history.back()} aria-label="Back">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M12 4l-6 6 6 6" />
+              </svg>
+            </Link>
+          ) : (
+            <Link onClick={() => setMenu(true)} aria-label="Menu">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M3 5h14M3 10h14M3 15h14" />
+              </svg>
+            </Link>
+          )
+        }
+        right={!amp && !settings && (devices.length === 0 ? <Preloader className="size-5" /> : <span className="pr-4 opacity-60">{devices.length} found</span>)}
+      />
 
-      <AppShell.Navbar p="md" style={{ paddingTop: "calc(var(--mantine-spacing-md) + env(safe-area-inset-top))" }}>
-        <NavLink
-          label="All amps"
-          active={!id}
-          onClick={() => {
-            go(null);
-            close();
-          }}
-        />
-        {devices.map((d) => (
-          <NavLink
-            key={d.id}
-            label={d.name || d.mac}
-            description={d.ip}
-            leftSection={<Dot online={d.online} />}
-            active={d.id === id}
-            onClick={() => {
-              go(d.id, tab); // amp → amp keeps the current section
-              close();
-            }}
-          />
-        ))}
-      </AppShell.Navbar>
+      <Panel side="left" opened={menu} onBackdropClick={() => setMenu(false)}>
+        <Page>
+          <Navbar title="AmpCore" />
+          <List nested>
+            <ListItem link title="All amps" onClick={nav(() => go(null))} className={!id && !settings ? "bg-black/10 dark:bg-white/10" : ""} />
+            {devices.map((d) => (
+              <ListItem
+                key={d.id}
+                link
+                media={<Dot online={d.online} />}
+                title={d.name || d.mac}
+                subtitle={d.ip}
+                onClick={nav(() => go(d.id, tab))} // amp → amp keeps the current section
+                className={d.id === id ? "bg-black/10 dark:bg-white/10" : ""}
+              />
+            ))}
+            <ListItem link title="Settings" onClick={nav(goSettings)} className={settings ? "bg-black/10 dark:bg-white/10" : ""} />
+          </List>
+        </Page>
+      </Panel>
 
-      <AppShell.Main style={amp ? undefined : { paddingBottom: "calc(var(--mantine-spacing-md) + env(safe-area-inset-bottom))" }}>
-        {amp ? (
-          <AmpScreen key={amp.id} device={amp} tab={tab} />
+      <main className={`px-4 py-4 ${amp ? "pb-24" : ""}`}>
+        {settings ? (
+          <Settings />
+        ) : amp ? (
+          <AmpScreen key={amp.id} device={amp} tab={tab} eqChannel={eqChannel} />
         ) : id ? (
-          <Text c="dimmed" ta="center" mt="xl">
-            Looking for this amp…
-          </Text>
+          <p className="mt-8 text-center opacity-60">Looking for this amp…</p>
         ) : devices.length === 0 ? (
-          <Text c="dimmed" ta="center" mt="xl">
-            Searching for amps on your Wi-Fi…
-          </Text>
+          <p className="mt-8 text-center opacity-60">Searching for amps on your Wi-Fi…</p>
         ) : (
-          <div style={{ display: "grid", gap: "var(--mantine-spacing-sm)" }} aria-live="polite">
+          <div className="grid gap-3" aria-live="polite">
             {devices.map((d) => (
               <AmpCard key={d.id} d={d} />
             ))}
           </div>
         )}
-      </AppShell.Main>
-    </AppShell>
+      </main>
+    </Page>
   );
 }

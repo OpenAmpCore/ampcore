@@ -1,9 +1,17 @@
 <!doctype html>
-<html>
+<html class="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>AmpCore Mobile</title>
+    <!-- Pre-paint: apply the saved scheme (default dark) so there is no white flash. Keep in sync with src/lib.tsx. -->
+    <script>
+      try {
+        var s = localStorage.getItem("ampcore-color-scheme") || "dark";
+        if (s === "auto") s = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.classList.toggle("dark", s === "dark");
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,11 @@
+@import "tailwindcss";
+@import "konsta/react/theme.css";
+
+/* Konsta's accent. Saturated, unlike desktop's pastel (same hue 217): Konsta draws white text on it; must be hex. */
+@theme {
+  --color-brand-primary: #3077e8;
+}
+html.dark,
+html.dark body {
+  background: #0a0b0c;
+}

@@ -104,15 +104,19 @@ pub fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> 
 
 /// Resolve the device, build one packet for its firmware, send it through the
 /// driver's socket. The amp's new state comes back via the next FC=27 poll.
+///
+/// Returns the packet's `WriteOutcome` so a caller can report delivery — feed
+/// it to a `WriteTally` for the `LiveWriteAck` the frontend reads. Resolving
+/// `Ok` means the amp acknowledged the datagram (see `send_control`), never
+/// that the parameter took the requested value.
 pub async fn send_write(
     state: &LiveDeviceState,
     device_id: &str,
     build: impl FnOnce(Option<&str>) -> Option<Vec<u8>>,
-) -> Result<(), AppError> {
+) -> Result<WriteOutcome, AppError> {
     let (firmware, ip, write_tx) = resolve_write_target(state, device_id)?;
     let packet = build(firmware.as_deref()).ok_or_else(|| unknown_firmware_error(device_id))?;
-    write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?)
 }
 
 /// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
