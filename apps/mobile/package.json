@@ -4,9 +4,26 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "dev": "vite",
+    "preview": "tauri dev",
+    "preview:android": "tauri android build --debug --target aarch64 && \"%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb\" install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk && \"%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb\" shell am start -n com.scalli.ampcore.mobile/.MainActivity",
+    "build": "tsc && vite build",
     "tauri": "tauri"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@tauri-apps/api": "^2.11.1",
+    "konsta": "^5.4.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4.3.2"
   }
 }

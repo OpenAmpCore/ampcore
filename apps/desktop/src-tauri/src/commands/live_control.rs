@@ -1,13 +1,11 @@
 use tauri::{AppHandle, State};
 
 use ampcore_core::data::capability::{PowerMode, SourceKind};
-use ampcore_core::data::common::now_millis;
 use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
-use ampcore_core::live::cvr::preset;
 use ampcore_core::live::cvr::write;
 use ampcore_core::live::driver::all_drivers;
 use ampcore_core::live::state::{
@@ -15,7 +13,8 @@ use ampcore_core::live::state::{
     LiveWriteAck,
 };
 use ampcore_core::live::write_helpers::{
-    current_channel, current_crossover_slot, current_eq_band, require_fir_firmware, require_v118_firmware, resolve_write_target,
+    current_channel, current_crossover_slot, current_eq_band, fetch_presets, require_fir_firmware, require_v118_firmware, resolve_write_target,
+    send_request_with_retry,
     unknown_firmware_error, WriteTally,
 };
 
@@ -162,106 +161,14 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
 /// `preset.rs`'s `PRESET_NAME_LEN`); anything longer is silently truncated
 /// on the wire, so reject it up front instead.
 const PRESET_NAME_MAX_LEN: usize = 32;
-/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
-/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
-/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
-/// comfortably outlasts one poll cycle without adding noticeable latency to
-/// the common case (which succeeds on the first attempt). Shared by every
-/// `send_request_with_retry` caller, which is why it is no longer named
-/// after presets.
-const REQUEST_BUSY_MAX_RETRIES: u32 = 10;
-const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
-
-/// Sends one request through the driver's request registry with an
-/// `External` sink and awaits its resolved frame — the one place every
-/// on-demand read goes through (presets, bridge). Not reusable across an
-/// `.await` point with a second call in flight for the same device and
-/// function code: `RequestRegistry` keys pending requests by `(ip,
-/// function_code)` only, so a second request under the same code sent before
-/// the first resolves would supersede/fail it (see
-/// `live/cvr/request.rs`'s `RequestRegistry::register`) — callers must fully
-/// await one call before making the next.
-///
-/// Transparently retries `RequestError::Busy` (the driver rejects a new
-/// request outright when it would clash with an exchange already in flight
-/// for this ip — see `RequestRegistry::conflicts_with`). Without this retry,
-/// a fetch racing the poll tick (most likely right after mount, when several
-/// things fire close together) would surface a raw "Busy" error instead of
-/// just quietly succeeding a moment later.
-///
-/// `expects_fragments` and `in_out_flag` are passed straight through to the
-/// spec — see their docs for why a single-datagram read must declare itself as
-/// one, and why an output-side query has to say so.
-async fn send_request_with_retry(
-    request_tx: &tokio::sync::mpsc::UnboundedSender<ampcore_core::live::cvr::request::RequestSpec>,
-    ip: &str,
-    function_code: u8,
-    chx: u8,
-    body: Vec<u8>,
-    expects_fragments: bool,
-    in_out_flag: u8,
-) -> Result<Vec<u8>, AppError> {
-    let mut last_err = AppError::from(format!("device {} request never attempted", ip));
-    for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let spec = ampcore_core::live::cvr::request::RequestSpec {
-            ip: ip.to_string(),
-            function_code,
-            chx,
-            body: body.clone(),
-            expects_fragments,
-            in_out_flag,
-            sink: ampcore_core::live::cvr::request::ResultSink::External(tx),
-        };
-        request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
-        match rx.await.map_err(|_| AppError::from("live control driver dropped the request"))? {
-            Ok(frame) => return Ok(frame),
-            Err(ampcore_core::live::cvr::request::RequestError::Busy) => {
-                last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
-                if attempt < REQUEST_BUSY_MAX_RETRIES {
-                    tokio::time::sleep(std::time::Duration::from_millis(REQUEST_BUSY_RETRY_DELAY_MS)).await;
-                }
-            }
-            Err(e) => return Err(AppError::from(format!("{:?}", e))),
-        }
-    }
-    Err(last_err)
-}
-
-/// Fetches the full preset slot-name list (FC=59 mode=0) and the currently
-/// active preset's name (mode=4) as one command — deliberately not two
-/// independently-callable commands, since both share the same FC=59 request
-/// registry key and must not overlap (see `send_request_with_retry`'s doc). The
-/// mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
-/// the result and emits `live_presets:updated`, same pattern as
-/// `live_control_refresh_now`/`parse_and_store_sync_data`.
+/// Fetches the preset slot list + active preset and emits `live_presets:updated`;
+/// the request sequencing lives in `ampcore_core::live::write_helpers::fetch_presets`.
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDeviceState>, device_id: String) -> Result<DevicePresets, AppError> {
-    let (ip, firmware_family, request_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
-        (device.ip, device.firmware_family, request_tx)
-    };
-    require_v118_firmware(&device_id, firmware_family.as_deref())?;
-
-    let list_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true, 0)
-            .await?;
-    let slots = preset::parse_preset_list(&list_frame)
-        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
-
-    let current_frame =
-        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true, 0)
-            .await?;
-    let active_preset_name = preset::parse_preset_current(&current_frame)
-        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
-
-    let snapshot = preset::DevicePresetsSnapshot { slots, active_preset_name: Some(active_preset_name), received_at: now_millis() };
     let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
-    sink.set_presets(device_id.clone(), snapshot.clone());
-    Ok(DevicePresets { device_id, presets: snapshot })
+    let presets = fetch_presets(&sink, &device_id).await?;
+    Ok(DevicePresets { device_id, presets })
 }
 
 /// Snapshot getter for FC=50 bridge state — no wire I/O, just whatever the

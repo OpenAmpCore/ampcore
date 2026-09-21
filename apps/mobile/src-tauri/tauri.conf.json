@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.scalli.ampcore.mobile",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "pnpm exec vite",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [
