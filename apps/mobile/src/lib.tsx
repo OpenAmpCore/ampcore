@@ -81,6 +81,20 @@ export interface Channel {
   outputPhaseInverted: boolean;
   inputEq: ChannelEq;
   outputEq: ChannelEq;
+  matrixCrosspoints: MatrixCrosspoint[];
+  limiter: Limiter;
+}
+/** One matrix cell: which input feeds this output, and how hot. */
+export interface MatrixCrosspoint {
+  sourceIndex: number;
+  gainDb: number;
+  active: boolean;
+}
+/** Both limiter stages run independently; each is a whole-record write, so the
+ * backend merges the fields a patch omits (see `set_limiter`). */
+export interface Limiter {
+  rms: { enabled: boolean; thresholdVrms: number; attackMs: number; releaseMultiplier: number };
+  peak: { enabled: boolean; thresholdVp: number; holdMs: number; releaseMs: number };
 }
 export interface Snapshot {
   standby: boolean | null;
@@ -110,6 +124,13 @@ export interface Ranges {
   crossoverFreqHz: { min: number; max: number };
   eqBandGainDb: { min: number; max: number };
   eqBandQ: { min: number; max: number };
+  matrixGainDb: { min: number; max: number };
+  rmsLimiterThresholdVrms: { min: number; max: number };
+  rmsLimiterAttackMs: { min: number; max: number };
+  rmsLimiterReleaseMultiplier: { min: number; max: number };
+  peakLimiterThresholdVp: { min: number; max: number };
+  peakLimiterHoldMs: { min: number; max: number };
+  peakLimiterReleaseMs: { min: number; max: number };
   channelNameMaxLength: number;
 }
 export interface Presets {
@@ -132,42 +153,91 @@ export type Write = (cmd: string, args: Record<string, unknown>) => Promise<void
 /** Outputs are lettered A, B, C… (repo convention; inputs are numbered). */
 export const outputLabel = (i: number) => String.fromCharCode(65 + i);
 
-// Hash routes: `#/` (amps), `#/amp/:id/:tab` and `#/amp/:id/:tab/eq/:channel`.
+// Hash routes:
+//   #/                        amps
+//   #/settings                settings
+//   #/amp/:id                 landing (meters, standby, device)
+//   #/amp/:id/presets         presets
+//   #/amp/:id/in|out/:ch      that channel's signal path
+//   #/amp/:id/in|out/:ch/:st  one stage of it
 // Writing location.hash pushes WebView history, and wry's WryActivity maps
-// Android's back button to canGoBack() → goBack(), so system back leaves the
-// EQ screen with no router library.
+// Android's back button to canGoBack() → goBack(), so system back walks
+// stage → path → landing → amps with no router library.
 // ponytail: swap for wouter/react-router if nested layouts or guards appear.
-// Input before Output: signal-flow order, same as desktop's tab contract.
-export const TABS = ["overview", "inputs", "outputs", "presets"] as const;
-export type Tab = (typeof TABS)[number];
+export type Dir = "in" | "out";
+
+/** The signal path itself. A plain table, not a backend call: `CvrUdp` is the
+ * only protocol and the order is identical on 1.1.8 and 1.1.9, so a command
+ * would return a constant. Everything that genuinely varies per model or
+ * firmware already crosses the bridge — channel counts on `Device`, bounds via
+ * `amp_ranges`, gain/Q support via `amp_eq_filter_capabilities`, presets via
+ * `amp_presets_supported`. Nothing here is a DSP or capability fact.
+ *
+ * `short` is the strip glyph, `label` the screen title. Input has no source or
+ * trim stage because mobile has no command to write either. */
+export const PATHS = {
+  in: [
+    { id: "in", short: "IN", label: "Input" },
+    { id: "delay", short: "DLY", label: "Delay" },
+    { id: "eq", short: "EQ", label: "Input EQ" },
+  ],
+  out: [
+    { id: "matrix", short: "MTX", label: "Sources" },
+    { id: "eq", short: "EQ", label: "Output EQ" },
+    { id: "limiter", short: "LIM", label: "Limiter" },
+    { id: "delay", short: "DLY", label: "Delay & Polarity" },
+    { id: "out", short: "OUT", label: "Output" },
+  ],
+} as const satisfies Record<Dir, readonly { id: string; short: string; label: string }[]>;
+
+export type StageId = (typeof PATHS)[Dir][number]["id"];
+export const stagesFor = (dir: Dir): readonly { id: string; short: string; label: string }[] => PATHS[dir];
 
 const onHash = (cb: () => void) => {
   addEventListener("hashchange", cb);
   return () => removeEventListener("hashchange", cb);
 };
 
-/** `eqChannel` is set only on the EQ route; the tab picks the chain
- * (inputs → input EQ, outputs → output EQ). */
-export function useRoute(): { id: string | null; tab: Tab; eqChannel: number | null; settings: boolean } {
+export interface Route {
+  id: string | null;
+  dir: Dir;
+  /** `null` on the landing screen — no channel picked yet. */
+  ch: number | null;
+  /** `null` = the path overview; otherwise the open stage. */
+  stage: StageId | null;
+  presets: boolean;
+  settings: boolean;
+}
+
+/** An unknown stage falls back to the path overview rather than a blank
+ * screen — same defensive shape the old tab route had. */
+export function useRoute(): Route {
   const hash = useSyncExternalStore(onHash, () => location.hash);
-  const m = hash.match(/^#\/amp\/([^/]+)(?:\/(\w+))?(?:\/eq\/(\d+))?/);
-  if (!m) return { id: null, tab: "overview", eqChannel: null, settings: hash === "#/settings" };
-  return {
-    id: decodeURIComponent(m[1]),
-    tab: TABS.find((t) => t === m[2]) ?? "overview",
-    eqChannel: m[3] === undefined ? null : Number(m[3]),
-    settings: false,
-  };
+  const base: Route = { id: null, dir: "out", ch: null, stage: null, presets: false, settings: hash === "#/settings" };
+  const m = hash.match(/^#\/amp\/([^/]+)(?:\/(in|out|presets)(?:\/(\d+)(?:\/(\w+))?)?)?/);
+  if (!m) return base;
+  const id = decodeURIComponent(m[1]);
+  if (m[2] === "presets") return { ...base, id, presets: true, settings: false };
+  const dir: Dir = m[2] === "in" ? "in" : "out";
+  const ch = m[3] === undefined ? null : Number(m[3]);
+  const stage = stagesFor(dir).find((s) => s.id === m[4])?.id ?? null;
+  return { id, dir, ch, stage: (stage as StageId | null) ?? null, presets: false, settings: false };
 }
 
-export function go(id: string | null, tab: Tab = "overview") {
-  location.hash = id ? `#/amp/${encodeURIComponent(id)}/${tab}` : "#/";
-}
+const amp = (id: string) => `#/amp/${encodeURIComponent(id)}`;
 
-export const goEq = (id: string, tab: Tab, channelIndex: number) => {
-  location.hash = `#/amp/${encodeURIComponent(id)}/${tab}/eq/${channelIndex}`;
+export function go(id: string | null) {
+  location.hash = id ? amp(id) : "#/";
+}
+export const goPath = (id: string, dir: Dir, ch: number) => {
+  location.hash = `${amp(id)}/${dir}/${ch}`;
 };
-
+export const goStage = (id: string, dir: Dir, ch: number, stage: string) => {
+  location.hash = `${amp(id)}/${dir}/${ch}/${stage}`;
+};
+export const goPresets = (id: string) => {
+  location.hash = `${amp(id)}/presets`;
+};
 export const goSettings = () => {
   location.hash = "#/settings";
 };

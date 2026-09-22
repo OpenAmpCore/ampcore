@@ -8,7 +8,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use ampcore_core::data::capability::cvr::{cvr_param_ranges, AmpParamRanges};
 use ampcore_core::data::capability::{eq_filter_capabilities, EqFilterCapabilityEntry};
-use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection};
+use ampcore_core::data::project::{
+    CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch, PeakLimiter, RmsLimiter,
+};
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::{preset, write};
@@ -314,6 +316,105 @@ async fn set_crossover_slot(
     Ok(tally.finish())
 }
 
+// Matrix + limiter. Both are whole-record wire packets: a crosspoint carries
+// gain *and* active, each limiter stage carries all four of its parameters.
+// The commands take partial patches, so the untouched fields are merged from
+// the last FC=27 snapshot — writing defaults instead would silently zero a
+// configured threshold. Ported from desktop's
+// `live_control_set_matrix_crosspoint` / `live_control_set_channel_limiter`.
+
+/// Merged RMS stage, as `build_set_rms_limiter` wants it. Pure so the
+/// no-clobber rule has a test that doesn't need a live amp.
+fn merge_rms(patch: &LimiterPatch, rms: &RmsLimiter) -> (bool, f32, u16, u8) {
+    (
+        patch.rms_enabled.unwrap_or(rms.enabled),
+        patch.rms_threshold_vrms.unwrap_or(rms.threshold_vrms) as f32,
+        patch.rms_attack_ms.unwrap_or(rms.attack_ms) as u16,
+        patch.rms_release_multiplier.unwrap_or(rms.release_multiplier) as u8,
+    )
+}
+
+/// Merged peak stage — same rule as `merge_rms`.
+fn merge_peak(patch: &LimiterPatch, peak: &PeakLimiter) -> (bool, f32, u16, u16) {
+    (
+        patch.peak_enabled.unwrap_or(peak.enabled),
+        patch.peak_threshold_vp.unwrap_or(peak.threshold_vp) as f32,
+        patch.peak_hold_ms.unwrap_or(peak.hold_ms) as u16,
+        patch.peak_release_ms.unwrap_or(peak.release_ms) as u16,
+    )
+}
+
+/// FC=55 RMS_LIMITER / FC=54 PEAK_LIMITER. One packet per stage the patch
+/// actually touches — an RMS-only patch leaves the peak stage alone instead
+/// of rewriting it. Both are tallied into the single `LiveWriteAck` the UI
+/// reports.
+#[tauri::command]
+async fn set_limiter(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    patch: LimiterPatch,
+) -> Result<LiveWriteAck, String> {
+    let channel = write_helpers::current_channel(&state, &device_id, channel_index).map_err(|e| e.message)?;
+    let mut tally = WriteTally::default();
+
+    if patch.rms_enabled.is_some()
+        || patch.rms_threshold_vrms.is_some()
+        || patch.rms_attack_ms.is_some()
+        || patch.rms_release_multiplier.is_some()
+    {
+        let (enabled, threshold_vrms, attack_ms, release_multiplier) = merge_rms(&patch, &channel.limiter.rms);
+        send_write(&state, &device_id, |fw| {
+            write::build_set_rms_limiter(fw, channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)
+        })
+        .await
+        .map(|o| tally.record(o))
+        .map_err(|e| e.message)?;
+    }
+
+    if patch.peak_enabled.is_some()
+        || patch.peak_threshold_vp.is_some()
+        || patch.peak_hold_ms.is_some()
+        || patch.peak_release_ms.is_some()
+    {
+        let (enabled, threshold_vp, hold_ms, release_ms) = merge_peak(&patch, &channel.limiter.peak);
+        send_write(&state, &device_id, |fw| {
+            write::build_set_peak_limiter(fw, channel_index, enabled, threshold_vp, hold_ms, release_ms)
+        })
+        .await
+        .map(|o| tally.record(o))
+        .map_err(|e| e.message)?;
+    }
+
+    Ok(tally.finish())
+}
+
+/// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
+/// is filled from the crosspoint's current state.
+#[tauri::command]
+async fn set_matrix_crosspoint(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    source_index: u8,
+    gain_db: Option<f64>,
+    active: Option<bool>,
+) -> Result<LiveWriteAck, String> {
+    let channel = write_helpers::current_channel(&state, &device_id, channel_index).map_err(|e| e.message)?;
+    let existing = channel
+        .matrix_crosspoints
+        .iter()
+        .find(|c| c.source_index == u32::from(source_index))
+        .ok_or_else(|| format!("channel {channel_index} has no matrix source {source_index}"))?;
+    let gain_db = gain_db.unwrap_or(existing.gain_db) as f32;
+    let active = active.unwrap_or(existing.active);
+
+    send_write(&state, &device_id, |fw| write::build_set_matrix_crosspoint(fw, channel_index, source_index, gain_db, active))
+        .await
+        .map(ack)
+        .map_err(|e| e.message)
+}
+
 /// Slider bounds come from core, not the UI (`AmpParamRanges`, camelCase).
 #[tauri::command]
 fn amp_ranges() -> AmpParamRanges {
@@ -365,6 +466,35 @@ mod tests {
         assert_eq!(crossover_segment(CrossoverSlotKind::Hp), 0);
         assert_eq!(crossover_segment(CrossoverSlotKind::Lp), 9);
     }
+
+    /// A patch that touches one limiter field must not rewrite the other
+    /// three: each stage is a whole-record packet, so an unmerged write
+    /// would push a 0 V threshold to a live amp.
+    #[test]
+    fn limiter_patch_preserves_untouched_fields() {
+        let rms = RmsLimiter {
+            enabled: false,
+            threshold_vrms: 31.5,
+            attack_ms: 120.0,
+            release_multiplier: 4.0,
+            auto: false,
+            max_vrms: 0.0,
+        };
+        let patch = LimiterPatch {
+            rms_enabled: Some(true),
+            rms_threshold_vrms: None,
+            rms_attack_ms: None,
+            rms_release_multiplier: None,
+            peak_enabled: None,
+            peak_threshold_vp: None,
+            peak_hold_ms: None,
+            peak_release_ms: None,
+        };
+        assert_eq!(merge_rms(&patch, &rms), (true, 31.5, 120, 4));
+
+        let peak = PeakLimiter { enabled: true, threshold_vp: 44.0, hold_ms: 20.0, release_ms: 300.0, max_vp: 0.0 };
+        assert_eq!(merge_peak(&patch, &peak), (true, 44.0, 20, 300));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -389,6 +519,8 @@ pub fn run() {
             set_output_polarity,
             set_eq_band,
             set_crossover_slot,
+            set_limiter,
+            set_matrix_crosspoint,
             amp_eq_filter_capabilities,
             set_rotary_lock,
             set_channel_name,

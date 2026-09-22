@@ -1,6 +1,69 @@
 @import "tailwindcss";
 @import "konsta/react/theme.css";
 
+/* Phone vs tablet, the only size distinction this app makes. It is Android's own
+   sw600dp rule — the *short* side decides — expressed as "both sides >= 600px",
+   which is the same thing. Width alone cannot be used: the app runs in landscape
+   too, where a phone is 834x375, i.e. wider than any sensible tablet width
+   threshold while still being a phone. Measured, not guessed: the test phone
+   reports 834x375 CSS px in landscape and 375x834 in portrait; both fail the
+   min-height/min-width pair, a tablet passes it in either orientation. */
+@custom-variant tablet (@media (min-width: 600px) and (min-height: 600px));
+
+/* Global size knob: Tailwind v4's whole spacing scale is calc(var(--spacing) * N)
+   with --spacing: 0.25rem, and text sizes are rem too, so this one root
+   font-size scales nearly every padding/gap/size/text in the app uniformly —
+   more fits on screen, nothing individually re-tuned. rem-based, so it
+   composes correctly no matter how deep the element is nested. */
+html {
+  font-size: 87.5%; /* 16px -> 14px */
+}
+
+/* Toggle/Range don't shrink with the knob above: Konsta only forwards
+   `className` to their outer wrapper, never to the internal thumb/track — and
+   those parts' fixed-px math (the toggle's checked-state translate, the range
+   thumb's vertical-centering margin) is tuned to Konsta's default size, so a
+   plain class override on them would misalign rather than shrink. `transform`
+   sidesteps that: it scales the whole rendered subtree as one unit, so
+   Konsta's own internal offsets stay correct at the smaller size.
+   Requested explicitly, smaller than the knob above alone gives: this puts
+   both under the ~44px accessibility touch-target minimum. */
+.k-toggle {
+  transform: scale(0.72);
+}
+.k-range {
+  /* Y only — X is drag travel; scaling it would shorten the slider's range, not just its look. */
+  transform: scaleY(0.65);
+}
+
+/* Tablets have the room the phone knobs above don't: undo both rather than
+   inventing a third size. Same condition as the `tablet` variant at the top —
+   keep the two in sync. */
+@media (min-width: 600px) and (min-height: 600px) {
+  html {
+    font-size: 100%;
+  }
+  .k-toggle {
+    transform: scale(1);
+  }
+  .k-range {
+    transform: scaleY(1);
+  }
+}
+
+/* Konsta sets --k-safe-area-* from env() on its own .safe-areas root. Because it
+   redeclares them *there*, a value set on <html> is shadowed for the whole app
+   underneath — which is why the native bridge appeared to do nothing. Re-point
+   them at the bridge's own variables and keep env() as the fallback, so iOS and
+   a desktop browser (where env() works and the bridge is absent) are unchanged.
+   Must stay after the konsta import: same specificity, later source wins. */
+.safe-areas {
+  --k-safe-area-top: var(--ampcore-inset-top, env(safe-area-inset-top));
+  --k-safe-area-right: var(--ampcore-inset-right, env(safe-area-inset-right));
+  --k-safe-area-bottom: var(--ampcore-inset-bottom, env(safe-area-inset-bottom));
+  --k-safe-area-left: var(--ampcore-inset-left, env(safe-area-inset-left));
+}
+
 /* Konsta's accent. Saturated, unlike desktop's pastel (same hue 217): Konsta draws white text on it; must be hex. */
 @theme {
   --color-brand-primary: #3077e8;
