@@ -24,6 +24,21 @@
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
             android:exported="true">
+            <!-- No `screenOrientation`: the app follows the device. It used to
+                 be locked to `sensorLandscape`, which made a phone 834x375 dp —
+                 375dp of height for everything, and wide enough that any
+                 width-based CSS breakpoint read a phone as a tablet. The layout
+                 flips axis on orientation instead (see PathRail in path.tsx),
+                 and phone/tablet is decided by the short side, Android's own
+                 sw600dp rule (the `tablet` variant in styles.css).
+
+                 Dropping the lock also retires the
+                 PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY opt-out that used
+                 to sit here: it only existed to keep the lock working on
+                 >= sw600dp displays under Android 16, and Google removes it at
+                 API 37 anyway. `configChanges` above still applies — it only
+                 stops the activity being recreated on rotation. -->
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

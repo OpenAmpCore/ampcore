@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Block, Button, Card, Chip, Dialog, DialogButton, Preloader, Range, Segmented, SegmentedButton, Sheet } from "konsta/react";
 import {
@@ -6,20 +6,20 @@ import {
   chipColors,
   CROSSOVER_FILTER_TYPES,
   EQ_FILTER_TYPES,
-  goEq,
+  goPath,
   outputLabel,
   Row,
   savedScheme,
   useEqFilterCaps,
-  useRanges,
+  type Channel,
   type CrossoverSlot,
   type Device,
+  type Dir,
   type EqBand,
   type Presets as PresetsData,
   type Ranges,
   type Scheme,
   type Snapshot,
-  type Tab,
   type Telemetry,
   type Write,
 } from "./lib";
@@ -84,7 +84,7 @@ function usePeakHold(db: number | null): number | null {
 function Meter({ db, muted }: { db: number | null; muted?: boolean }) {
   const peak = usePeakHold(db);
   return (
-    <div className={`relative h-3 flex-1 overflow-hidden rounded-full bg-black/15 dark:bg-white/15 ${muted ? "opacity-40" : ""}`}>
+    <div className={`relative h-3 flex-1 overflow-hidden rounded-full bg-black/15 dark:bg-white/15 tablet:h-4 ${muted ? "opacity-40" : ""}`}>
       {/* Gradient spans the whole track and is clipped by the lit width, so a
           colour stays at a fixed scale position instead of sliding with level. */}
       <div
@@ -172,7 +172,7 @@ function NameField(p: { label: string; value: string; max: number; disabled: boo
   );
 }
 
-export function Overview({ device, config, telemetry, write, disabled }: Props) {
+export function Overview({ id, device, config, telemetry, write, disabled }: Props) {
   const t = telemetry;
   const temps = t?.temperatures ?? [];
   return (
@@ -202,7 +202,7 @@ export function Overview({ device, config, telemetry, write, disabled }: Props) 
       ) : (
         <>
           {temps.length > 0 && (
-            <div className="flex flex-col gap-1 text-sm">
+            <div className="flex flex-col gap-1 text-sm tablet:grid tablet:grid-cols-2 tablet:gap-x-6">
               {temps.slice(0, 4).map((v, i) => (
                 <StatRow key={i} label={`Temperature ${outputLabel(i)}`} value={`${Math.round(v)} °C`} />
               ))}
@@ -210,10 +210,12 @@ export function Overview({ device, config, telemetry, write, disabled }: Props) 
               {t.fanVoltage !== null && <StatRow label="Fan" value={`${t.fanVoltage.toFixed(1)} V`} />}
             </div>
           )}
-          <div className="flex flex-col gap-1 text-sm">
+          {/* Each row is the way into that output's signal path. */}
+          <div className="flex flex-col gap-1 text-sm tablet:grid tablet:grid-cols-2 tablet:gap-x-6">
             {t.outputLevelDb.map((_, i) => (
               <StatRow
                 key={i}
+                onClick={() => goPath(id, "out", i)}
                 label={`Output ${outputLabel(i)}`}
                 value={
                   [
@@ -241,188 +243,112 @@ export function Overview({ device, config, telemetry, write, disabled }: Props) 
   );
 }
 
-const StatRow = ({ label, value }: { label: string; value: string }) => (
-  <div className="flex items-baseline justify-between gap-3">
+const StatRow = ({ label, value, onClick }: { label: string; value: string; onClick?: () => void }) => (
+  <div
+    className={`flex items-baseline justify-between gap-3 ${onClick ? "-mx-2 cursor-pointer rounded-md px-2 py-1 active:bg-black/10 dark:active:bg-white/10" : ""}`}
+    onClick={onClick}
+  >
     <span className="opacity-60">{label}</span>
     <span className="tabular-nums">{value}</span>
   </div>
 );
 
-export function Outputs({ id, config, telemetry, write, disabled }: Props) {
-  const ranges: Ranges | null = useRanges();
+/** Every stage screen gets the same bundle; `channel` is the one the pills picked. */
+export interface StageProps {
+  id: string;
+  dir: Dir;
+  ch: number;
+  channel: Channel;
+  telemetry: Telemetry | null;
+  ranges: Ranges;
+  write: Write;
+  disabled: boolean;
+}
+
+/** Input: what the amp is receiving, before any processing. */
+function InStage({ channel: c, ch, telemetry, ranges, write, disabled }: StageProps) {
   return (
     <div className="flex flex-col gap-3">
-      {config.channels.map((c) => {
-        const i = c.channelIndex;
-        const st = telemetry?.outputChannelStates[i];
-        return (
-          <Card key={i} className="!mx-0">
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-2">
-                <span className="w-5 text-lg font-semibold">{outputLabel(i)}</span>
-                {ranges && (
-                  <NameField
-                    label="Name"
-                    value={c.outputName ?? ""}
-                    max={ranges.channelNameMaxLength}
-                    disabled={disabled}
-                    onCommit={(name) => write("set_channel_name", { channelIndex: i, output: true, name })}
-                  />
-                )}
-                {st && !NORMAL.has(st) && <StateChip state={st} />}
-              </div>
-              {/* Meter leads the body, controls follow — same channel, same card,
-                  so a fader move is visible on the meter without leaving the tab.
-                  0 dB = the amp's rated output. */}
-              <MeterRow db={telemetry?.outputLevelDb[i] ?? null} unit="dB" muted={c.outputMuted} />
-              {ranges && (
-                <>
-                  <Fader
-                    label="Volume"
-                    unit="dB"
-                    value={c.outputVolumeDb}
-                    min={ranges.outputVolumeDb.min}
-                    max={ranges.outputVolumeDb.max}
-                    disabled={disabled}
-                    onCommit={(db) => write("set_output_volume", { channelIndex: i, db })}
-                  />
-                  <Fader
-                    label="Trim"
-                    unit="dB"
-                    value={c.outputTrimDb}
-                    min={ranges.outputTrimDb.min}
-                    max={ranges.outputTrimDb.max}
-                    disabled={disabled}
-                    onCommit={(db) => write("set_output_trim", { channelIndex: i, db })}
-                  />
-                  <NumField
-                    label="Delay (ms)"
-                    value={c.delayOutMs}
-                    min={ranges.delayOutMs.min}
-                    max={ranges.delayOutMs.max}
-                    disabled={disabled}
-                    onCommit={(ms) => write("set_output_delay", { channelIndex: i, ms })}
-                  />
-                </>
-              )}
-              <Row
-                name="Invert polarity"
-                checked={c.outputPhaseInverted}
-                disabled={disabled}
-                onChange={(inverted) => write("set_output_polarity", { channelIndex: i, inverted })}
-              />
-              <Row name="Mute" checked={c.outputMuted} disabled={disabled} onChange={(muted) => write("set_output_mute", { channelIndex: i, muted })} />
-              <EqLink id={id} tab="outputs" channelIndex={i} />
-            </div>
-          </Card>
-        );
-      })}
+      <NameField
+        label="Name"
+        value={c.inputName ?? ""}
+        max={ranges.channelNameMaxLength}
+        disabled={disabled}
+        onCommit={(name) => write("set_channel_name", { channelIndex: ch, output: false, name })}
+      />
+      {/* dBV, not dBFS: core converts against an honest 1.0V reference
+          (telemetry_v118.rs), so 0 dB = 1 Vrms in, despite the field name. */}
+      <MeterRow db={telemetry?.inputDbfs[ch] ?? null} unit="dBV" muted={c.inputMuted} />
+      {/* ponytail: the vendor enum is `Clip = 0` and core follows it, but the
+          old web app read the same byte as "signal present" — unconfirmed. */}
+      {telemetry?.inputClipping[ch] && <Chip colors={chipColors("warning")}>clip</Chip>}
+      <Row name="Mute" checked={c.inputMuted} disabled={disabled} onChange={(muted) => write("set_input_mute", { channelIndex: ch, muted })} />
     </div>
   );
 }
 
-export function Inputs({ id, config, telemetry, write, disabled }: Props) {
-  const ranges = useRanges();
+/** Delay, plus polarity on the output side — both are time/phase alignment. */
+function DelayStage({ channel: c, dir, ch, ranges, write, disabled }: StageProps) {
+  const out = dir === "out";
   return (
     <div className="flex flex-col gap-3">
-      {config.channels.map((c) => (
-        <Card key={c.channelIndex} className="!mx-0">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <span className="w-5 text-lg font-semibold">{c.channelIndex + 1}</span>
-              {ranges && (
-                <NameField
-                  label="Name"
-                  value={c.inputName ?? ""}
-                  max={ranges.channelNameMaxLength}
-                  disabled={disabled}
-                  onCommit={(name) => write("set_channel_name", { channelIndex: c.channelIndex, output: false, name })}
-                />
-              )}
-              {/* Pill stays in the header: appearing inside the control row at
-                  runtime would re-wrap it. ponytail: the vendor enum is
-                  `Clip = 0` and core follows it, but the old web app read the
-                  same byte as "signal present" — unconfirmed on hardware. */}
-              {telemetry?.inputClipping[c.channelIndex] && (
-                <Chip colors={chipColors("warning")}>clip</Chip>
-              )}
-            </div>
-            {/* dBV, not dBFS: core converts against an honest 1.0V reference
-                (telemetry_v118.rs), so 0 dB = 1 Vrms in, despite the field name. */}
-            <MeterRow db={telemetry?.inputDbfs[c.channelIndex] ?? null} unit="dBV" muted={c.inputMuted} />
-            {ranges && (
-              <NumField
-                label="Delay (ms)"
-                value={c.delayInMs}
-                min={ranges.delayInMs.min}
-                max={ranges.delayInMs.max}
-                disabled={disabled}
-                onCommit={(ms) => write("set_input_delay", { channelIndex: c.channelIndex, ms })}
-              />
-            )}
-            <Row
-              name="Mute"
-              checked={c.inputMuted}
-              disabled={disabled}
-              onChange={(muted) => write("set_input_mute", { channelIndex: c.channelIndex, muted })}
-            />
-            <EqLink id={id} tab="inputs" channelIndex={c.channelIndex} />
-          </div>
-        </Card>
-      ))}
+      <NumField
+        label="Delay (ms)"
+        value={out ? c.delayOutMs : c.delayInMs}
+        min={out ? ranges.delayOutMs.min : ranges.delayInMs.min}
+        max={out ? ranges.delayOutMs.max : ranges.delayInMs.max}
+        disabled={disabled}
+        onCommit={(ms) => write(out ? "set_output_delay" : "set_input_delay", { channelIndex: ch, ms })}
+      />
+      {out && (
+        <Row
+          name="Invert polarity"
+          checked={c.outputPhaseInverted}
+          disabled={disabled}
+          onChange={(inverted) => write("set_output_polarity", { channelIndex: ch, inverted })}
+        />
+      )}
     </div>
   );
 }
 
-const EqLink = ({ id, tab, channelIndex }: { id: string; tab: Tab; channelIndex: number }) => (
-  <Button outline onClick={() => goEq(id, tab, channelIndex)}>
-    EQ
-  </Button>
-);
-
-/** HP + 8 bands + LP for one channel's chain. Tapping a row opens the sheet;
- * every edit is a partial patch, so the amp keeps the fields left untouched. */
-export function Eq({ config, write, disabled, tab, channelIndex }: Props & { tab: Tab; channelIndex: number }) {
-  const ranges = useRanges();
+/** One channel's EQ chain: the HP crossover slot, the 8 parametric bands, then
+ * the LP slot — the same 10 wire segments the amp stores, in order. Tapping a
+ * row opens the sheet for it; every edit is a partial patch, so the amp keeps
+ * the fields left untouched. */
+function EqStage({ channel: c, dir, ch, ranges, write, disabled }: StageProps) {
   const caps = useEqFilterCaps();
   const [open, setOpen] = useState<number | "hp" | "lp" | null>(null);
-  const channel = config.channels.find((c) => c.channelIndex === channelIndex);
-  const output = tab === "outputs";
-  const direction = output ? "output" : "input";
-  const eq = output ? channel?.outputEq : channel?.inputEq;
-
-  if (!channel || !eq || !ranges) return <p className="opacity-60">Waiting for EQ data…</p>;
+  const eq = dir === "out" ? c.outputEq : c.inputEq;
+  const direction = dir === "out" ? "output" : "input";
 
   const slotRow = (kind: "hp" | "lp", slot: CrossoverSlot, name: string) => (
     <Card className="!mx-0" onClick={() => setOpen(kind)}>
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold">{name}</span>
-        <span className="text-sm opacity-60">
-          {slot.active ? `${Math.round(slot.freqHz)} Hz · ${slot.filterType}` : "off"}
-        </span>
+        <span className="text-sm opacity-60">{slot.active ? `${Math.round(slot.freqHz)} Hz · ${slot.filterType}` : "off"}</span>
       </div>
     </Card>
   );
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="opacity-60">
-        {output ? `Output ${outputLabel(channelIndex)}` : `Input ${channelIndex + 1}`} EQ
-      </p>
       {slotRow("hp", eq.hp, "High-pass")}
-      {eq.bands.map((b, i) => (
-        <Card key={i} className="!mx-0" onClick={() => setOpen(i)}>
-          <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2">
-              <span className={`size-2 rounded-full ${b.active ? "bg-brand-primary" : "bg-black/25 dark:bg-white/25"}`} />
-              <span className="font-semibold">Band {i + 1}</span>
-            </span>
-            <span className="text-sm opacity-60">
-              {Math.round(b.freqHz)} Hz · {b.gainDb.toFixed(1)} dB · Q {b.q.toFixed(2)}
-            </span>
-          </div>
-        </Card>
-      ))}
+      <div className="flex flex-col gap-2 tablet:grid tablet:grid-cols-2">
+        {eq.bands.map((b, i) => (
+          <Card key={i} className="!mx-0" onClick={() => setOpen(i)}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <span className={`size-2 rounded-full ${b.active ? "bg-brand-primary" : "bg-black/25 dark:bg-white/25"}`} />
+                <span className="font-semibold">Band {i + 1}</span>
+              </span>
+              <span className="text-sm opacity-60">
+                {Math.round(b.freqHz)} Hz · {b.gainDb.toFixed(1)} dB · Q {b.q.toFixed(2)}
+              </span>
+            </div>
+          </Card>
+        ))}
+      </div>
       {slotRow("lp", eq.lp, "Low-pass")}
 
       <Sheet opened={open !== null} onBackdropClick={() => setOpen(null)}>
@@ -434,7 +360,7 @@ export function Eq({ config, write, disabled, tab, channelIndex }: Props & { tab
               ranges={ranges}
               caps={caps}
               disabled={disabled}
-              onPatch={(patch) => write("set_eq_band", { channelIndex, direction, bandIndex: open, patch })}
+              onPatch={(patch) => write("set_eq_band", { channelIndex: ch, direction, bandIndex: open, patch })}
               onClose={() => setOpen(null)}
             />
           )}
@@ -444,7 +370,7 @@ export function Eq({ config, write, disabled, tab, channelIndex }: Props & { tab
               name={open === "hp" ? "High-pass" : "Low-pass"}
               ranges={ranges}
               disabled={disabled}
-              onPatch={(patch) => write("set_crossover_slot", { channelIndex, direction, slot: open, patch })}
+              onPatch={(patch) => write("set_crossover_slot", { channelIndex: ch, direction, slot: open, patch })}
               onClose={() => setOpen(null)}
             />
           )}
@@ -453,6 +379,165 @@ export function Eq({ config, write, disabled, tab, channelIndex }: Props & { tab
     </div>
   );
 }
+
+/** RMS and Peak, each independently engaged. Every field is sent as a patch —
+ * the backend merges the rest from the last poll, because each stage is one
+ * whole-record packet on the wire. */
+function LimiterStage({ channel: c, ch, telemetry, ranges, write, disabled }: StageProps) {
+  const patch = (p: Record<string, unknown>) => write("set_limiter", { channelIndex: ch, patch: p });
+  const { rms, peak } = c.limiter;
+  const reduction = telemetry?.limiters[ch];
+  return (
+    <div className="flex flex-col gap-4">
+      {/* 0 means the limiter is not currently pulling anything back. */}
+      {reduction ? <p className="text-sm opacity-60">Gain reduction {reduction.toFixed(1)} dB</p> : null}
+
+      <div className="flex flex-col gap-6 tablet:grid tablet:grid-cols-2 tablet:items-start tablet:gap-8">
+        <div className="flex flex-col gap-4">
+          <h2 className="font-semibold">RMS</h2>
+          <Row name="Enabled" checked={rms.enabled} disabled={disabled} onChange={(v) => patch({ rmsEnabled: v })} />
+          <Fader
+            label="Threshold"
+            unit="Vrms"
+            value={rms.thresholdVrms}
+            min={ranges.rmsLimiterThresholdVrms.min}
+            max={ranges.rmsLimiterThresholdVrms.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ rmsThresholdVrms: v })}
+          />
+          <NumField
+            label="Attack (ms)"
+            value={rms.attackMs}
+            min={ranges.rmsLimiterAttackMs.min}
+            max={ranges.rmsLimiterAttackMs.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ rmsAttackMs: v })}
+          />
+          <NumField
+            label="Release (x attack)"
+            value={rms.releaseMultiplier}
+            min={ranges.rmsLimiterReleaseMultiplier.min}
+            max={ranges.rmsLimiterReleaseMultiplier.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ rmsReleaseMultiplier: v })}
+          />
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <h2 className="font-semibold">Peak</h2>
+          <Row name="Enabled" checked={peak.enabled} disabled={disabled} onChange={(v) => patch({ peakEnabled: v })} />
+          <Fader
+            label="Threshold"
+            unit="Vp"
+            value={peak.thresholdVp}
+            min={ranges.peakLimiterThresholdVp.min}
+            max={ranges.peakLimiterThresholdVp.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ peakThresholdVp: v })}
+          />
+          <NumField
+            label="Hold (ms)"
+            value={peak.holdMs}
+            min={ranges.peakLimiterHoldMs.min}
+            max={ranges.peakLimiterHoldMs.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ peakHoldMs: v })}
+          />
+          <NumField
+            label="Release (ms)"
+            value={peak.releaseMs}
+            min={ranges.peakLimiterReleaseMs.min}
+            max={ranges.peakLimiterReleaseMs.max}
+            disabled={disabled}
+            onCommit={(v) => patch({ peakReleaseMs: v })}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Which inputs feed this output, and how hot. A crosspoint is addressed by
+ * output channel + source index, which is why the matrix sits on this side of
+ * the path and not the input side. */
+function MatrixStage({ channel: c, ch, ranges, write, disabled }: StageProps) {
+  if (c.matrixCrosspoints.length === 0) return <p className="opacity-60">This amp reports no matrix sources.</p>;
+  return (
+    <div className="flex flex-col gap-3 tablet:grid tablet:grid-cols-2">
+      {c.matrixCrosspoints.map((x) => (
+        <Card key={x.sourceIndex} className="!mx-0">
+          <div className="flex flex-col gap-2">
+            <Row
+              name={`Input ${x.sourceIndex + 1}`}
+              checked={x.active}
+              disabled={disabled}
+              onChange={(active) => write("set_matrix_crosspoint", { channelIndex: ch, sourceIndex: x.sourceIndex, gainDb: null, active })}
+            />
+            <Fader
+              label="Gain"
+              unit="dB"
+              value={x.gainDb}
+              min={ranges.matrixGainDb.min}
+              max={ranges.matrixGainDb.max}
+              disabled={disabled || !x.active}
+              onCommit={(gainDb) => write("set_matrix_crosspoint", { channelIndex: ch, sourceIndex: x.sourceIndex, gainDb, active: null })}
+            />
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+/** The last stage: what leaves the amp. 0 dB on the meter = rated output. */
+function OutStage({ channel: c, ch, telemetry, ranges, write, disabled }: StageProps) {
+  const st = telemetry?.outputChannelStates[ch];
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <NameField
+          label="Name"
+          value={c.outputName ?? ""}
+          max={ranges.channelNameMaxLength}
+          disabled={disabled}
+          onCommit={(name) => write("set_channel_name", { channelIndex: ch, output: true, name })}
+        />
+        {st && !NORMAL.has(st) && <StateChip state={st} />}
+      </div>
+      <MeterRow db={telemetry?.outputLevelDb[ch] ?? null} unit="dB" muted={c.outputMuted} />
+      <Fader
+        label="Volume"
+        unit="dB"
+        value={c.outputVolumeDb}
+        min={ranges.outputVolumeDb.min}
+        max={ranges.outputVolumeDb.max}
+        disabled={disabled}
+        onCommit={(db) => write("set_output_volume", { channelIndex: ch, db })}
+      />
+      <Fader
+        label="Trim"
+        unit="dB"
+        value={c.outputTrimDb}
+        min={ranges.outputTrimDb.min}
+        max={ranges.outputTrimDb.max}
+        disabled={disabled}
+        onCommit={(db) => write("set_output_trim", { channelIndex: ch, db })}
+      />
+      <Row name="Mute" checked={c.outputMuted} disabled={disabled} onChange={(muted) => write("set_output_mute", { channelIndex: ch, muted })} />
+    </div>
+  );
+}
+
+/** Stage id -> screen. Keyed by the same ids `PATHS` declares, so an id that
+ * routes is an id that renders. */
+export const STAGES: Record<string, (p: StageProps) => ReactElement> = {
+  in: InStage,
+  delay: DelayStage,
+  eq: EqStage,
+  limiter: LimiterStage,
+  matrix: MatrixStage,
+  out: OutStage,
+};
 
 /** A patch only carries the field that changed — the backend merges the rest
  * from the amp's last poll, so nothing untouched gets overwritten. */
