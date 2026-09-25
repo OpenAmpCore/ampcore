@@ -253,6 +253,15 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     async setChannelFirBypass(channelIndex, bypassed) {
       return reportWrite("Set FIR bypass", commands.liveControlSetFirBypass(deviceId, channelIndex, bypassed));
     },
+    async setChannelFirData(channelIndex, name, coefficients) {
+      return reportWrite(
+        "Import FIR data",
+        commands.liveControlSetChannelFirData(deviceId, channelIndex, name, coefficients),
+      );
+    },
+    async clearChannelFirData(channelIndex) {
+      return reportWrite("Clear FIR data", commands.liveControlClearChannelFirData(deviceId, channelIndex));
+    },
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
