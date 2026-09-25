@@ -192,17 +192,13 @@ export function FirPanel({
     window.setTimeout(() => setCopied(false), 1500);
   }
 
-  function handleExport() {
+  async function handleExport() {
     if (!fir) return;
     // One coefficient per line — the vendor's own `ExportFIR_file` shape, for
     // round-trip compatibility with files the original vendor software wrote.
     const text = fir.coefficients.map((c) => c ?? 0).join("\n");
-    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${fir.name?.trim() || `out${label}-fir`}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const result = await commands.firExportFile(`${fir.name?.trim() || `out${label}-fir`}.txt`, text);
+    if (result.status === "error") setWriteError(result.error.message);
   }
 
   async function handleImportFile(file: File) {
@@ -283,7 +279,7 @@ export function FirPanel({
         <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleCopy()}>
           <Copy size={14} /> {copied ? "Copied" : "Copy JSON"}
         </Button>
-        <Button size="sm" variant="secondary" isDisabled={!fir} onPress={handleExport}>
+        <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleExport()}>
           <Download size={14} /> Export
         </Button>
         {onImportData && (

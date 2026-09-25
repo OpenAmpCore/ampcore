@@ -690,6 +690,20 @@ pub async fn live_control_clear_channel_fir_data(
     Ok(tally.finish())
 }
 
+/// Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
+/// no-op inside Tauri. Returns `false` when the user cancels the dialog.
+#[tauri::command]
+#[specta::specta]
+pub async fn fir_export_file(app: AppHandle, default_name: String, contents: String) -> Result<bool, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(path) = app.dialog().file().set_file_name(&default_name).add_filter("Text", &["txt"]).blocking_save_file() else {
+        return Ok(false);
+    };
+    let path = path.into_path().map_err(|e| AppError::from(e.to_string()))?;
+    std::fs::write(path, contents).map_err(|e| AppError::from(e.to_string()))?;
+    Ok(true)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_input_mute(

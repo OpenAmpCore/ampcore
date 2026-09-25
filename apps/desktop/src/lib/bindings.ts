@@ -376,6 +376,11 @@ export const commands = {
 	/**  FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram. */
 	liveControlClearChannelFirData: (deviceId: string, channelIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_clear_channel_fir_data", { deviceId, channelIndex })),
 	/**
+	 *  Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
+	 *  no-op inside Tauri. Returns `false` when the user cancels the dialog.
+	 */
+	firExportFile: (defaultName: string, contents: string) => typedError<boolean, AppError>(__TAURI_INVOKE("fir_export_file", { defaultName, contents })),
+	/**
 	 *  Partial update of a channel's output trim/volume/delay — mirrors
 	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
 	 *  that single-struct-mutation command, each populated field here is its own
