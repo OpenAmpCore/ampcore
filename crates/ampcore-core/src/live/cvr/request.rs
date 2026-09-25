@@ -637,6 +637,12 @@ impl WriteRegistry {
 ///   is a raw ACK echo with no StructHeader to key on and whose position
 ///   immediately after its freq write is load-bearing;
 /// - anything too short to hold a StructHeader;
+/// - a continuation fragment (`NetworkDataHeader.packets_step > 1`) of a
+///   multi-datagram write (see `fir.rs`'s `split_into_fragments`) — only
+///   fragment 1 has a real StructHeader right after the network header;
+///   fragment 2+'s "header-shaped" bytes are actually a slice of the frame's
+///   middle, so reading them as `(function_code, chx, segment, in_out_flag)`
+///   would coalesce against garbage;
 /// - `FC_SAVE_RECALL` (FC=59), where the slot index lives in the *body* and all
 ///   header fields are 0 — collapsing two recalls would silently drop a slot
 ///   change rather than a redundant value.
@@ -646,6 +652,12 @@ impl WriteRegistry {
 /// past the commit packet that has to follow them.
 fn coalesce_key(spec: &WriteSpec) -> Option<(u8, u8, u8, u8)> {
     if !spec.expect_ack || spec.packet.len() < NETWORK_HEADER_LEN + super::protocol::STRUCT_HEADER_LEN {
+        return None;
+    }
+    // Byte 7 of the network header is `packets_step` (see
+    // `protocol::build_network_data_header`) — > 1 means this packet is a
+    // continuation fragment, not a fresh StructHeader.
+    if spec.packet[7] > 1 {
         return None;
     }
     let header = &spec.packet[NETWORK_HEADER_LEN..];
@@ -713,6 +725,30 @@ mod tests {
         let mut registry = RequestRegistry::default();
         let _ = registry.register(spec(IP, FC_SYNC_DATA, true), Instant::now());
         assert!(!registry.conflicts_with("10.0.0.3", FC_SYNC_DATA, true));
+    }
+
+    fn write_spec_with_packet(packet: Vec<u8>) -> WriteSpec {
+        let (tx, _rx) = oneshot::channel();
+        WriteSpec { ip: IP.to_string(), packet, expect_ack: true, tx }
+    }
+
+    #[test]
+    fn a_continuation_fragment_never_coalesces_even_if_its_bytes_look_like_a_matching_header() {
+        // Fragment 1: a real StructHeader (FC=43, chx=2, segment=0, flag=1)
+        // right after the network header.
+        let mut first = vec![0u8; NETWORK_HEADER_LEN];
+        first[7] = 1; // packets_step = 1
+        first.extend_from_slice(&[0x55, 43, 1, 2, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(coalesce_key(&write_spec_with_packet(first)), Some((43, 2, 0, 1)));
+
+        // Fragment 2: same network-header-relative byte layout, but these
+        // bytes are actually a slice of the frame's *body*, not a header —
+        // they must never be read as one just because packets_step is right
+        // after byte 0.
+        let mut second = vec![0u8; NETWORK_HEADER_LEN];
+        second[7] = 2; // packets_step = 2
+        second.extend_from_slice(&[0x55, 43, 1, 2, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(coalesce_key(&write_spec_with_packet(second)), None);
     }
 }
 

@@ -521,6 +521,17 @@ pub fn build_set_fir_bypass(channel_index: u8, bypassed: bool) -> Vec<u8> {
     build_control_packet(FC_FIR_BYPASS, channel_index, 0, 0, IN_OUT_FLAG_OUTPUT, &body)
 }
 
+/// FC=43, the write (Import) side — see `fir::build_set_fir_data`'s doc for
+/// the frame shape and fragmentation.
+pub fn build_set_fir_data(channel_index: u8, name: &str, coefficients: &[f32]) -> Vec<Vec<u8>> {
+    super::fir::build_set_fir_data(channel_index, name, coefficients)
+}
+
+/// FC=43, `status_code=6` — the vendor's Remove.
+pub fn build_clear_fir_data(channel_index: u8) -> Vec<u8> {
+    super::fir::build_clear_fir_data(channel_index)
+}
+
 /// FC=48 RMS_LIMITER_AUTO, `in_out_flag=1` (output). Wire body: one byte,
 /// **inverted** — `0x00`=auto on, `0x01`=auto off.
 ///

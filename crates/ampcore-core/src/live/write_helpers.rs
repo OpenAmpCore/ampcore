@@ -119,6 +119,29 @@ pub async fn send_write(
     Ok(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?)
 }
 
+/// Same shape as `send_write`, for a command whose packet doesn't fit one
+/// datagram (today: FIR coefficient import — see `fir::split_into_fragments`).
+/// Sends each fragment through `send_control` **sequentially**, awaiting one
+/// fragment's ACK before building the next, matching the vendor's own
+/// stop-and-wait fragment loop — this is what keeps at most one fragment ever
+/// queued in `WriteRegistry` at a time, so ordering and coalescing stay sound
+/// with no changes to that registry beyond `coalesce_key`'s continuation-
+/// fragment guard. Aborts on the first fragment that fails rather than
+/// sending the rest of a frame the device already missed part of.
+pub async fn send_fragmented_write(
+    state: &LiveDeviceState,
+    device_id: &str,
+    build: impl FnOnce(Option<&str>) -> Option<Vec<Vec<u8>>>,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware, ip, write_tx) = resolve_write_target(state, device_id)?;
+    let packets = build(firmware.as_deref()).ok_or_else(|| unknown_firmware_error(device_id))?;
+    let mut tally = WriteTally::default();
+    for packet in packets {
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    }
+    Ok(tally.finish())
+}
+
 /// Retry budget for `RequestError::Busy`. Must outlast one stalled request
 /// (`REQUEST_TIMEOUT_MS` + `REQUEST_RETRY_TIMEOUT_MS` = 4.2s): an unanswered
 /// poll parks the whole per-IP line for that long, since a fragmented read

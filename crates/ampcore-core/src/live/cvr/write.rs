@@ -296,6 +296,22 @@ pub fn build_set_fir_bypass(firmware_family: Option<&str>, channel_index: u8, by
     }
 }
 
+pub fn build_set_fir_data(firmware_family: Option<&str>, channel_index: u8, name: &str, coefficients: &[f32]) -> Option<Vec<Vec<u8>>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_fir_data(channel_index, name, coefficients)),
+        Some("1.1.9") => Some(super::write_v119::build_set_fir_data(channel_index, name, coefficients)),
+        _ => None,
+    }
+}
+
+pub fn build_clear_fir_data(firmware_family: Option<&str>, channel_index: u8) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_clear_fir_data(channel_index)),
+        Some("1.1.9") => Some(super::write_v119::build_clear_fir_data(channel_index)),
+        _ => None,
+    }
+}
+
 /// Auto travels on its own function code (FC=48), not inside the FC=55 record
 /// — see `write_v118::build_set_rms_limiter_auto`.
 pub fn build_set_rms_limiter_auto(firmware_family: Option<&str>, channel_index: u8, auto: bool) -> Option<Vec<u8>> {

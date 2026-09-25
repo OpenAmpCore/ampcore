@@ -150,6 +150,14 @@ pub fn build_set_fir_bypass(channel_index: u8, bypassed: bool) -> Vec<u8> {
     super::write_v118::build_set_fir_bypass(channel_index, bypassed)
 }
 
+pub fn build_set_fir_data(channel_index: u8, name: &str, coefficients: &[f32]) -> Vec<Vec<u8>> {
+    super::write_v118::build_set_fir_data(channel_index, name, coefficients)
+}
+
+pub fn build_clear_fir_data(channel_index: u8) -> Vec<u8> {
+    super::write_v118::build_clear_fir_data(channel_index)
+}
+
 pub fn build_set_rms_limiter_auto(channel_index: u8, auto: bool) -> Vec<u8> {
     super::write_v118::build_set_rms_limiter_auto(channel_index, auto)
 }

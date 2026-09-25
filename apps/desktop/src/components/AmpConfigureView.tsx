@@ -1757,6 +1757,14 @@ function OutputTab({
               capability={capability}
               bypassed={subChannel.firBypassed ?? false}
               onBypassChange={(next) => actions.setChannelFirBypass(subChannel.channelIndex, next)}
+              onImportData={
+                actions.setChannelFirData
+                  ? (name, coefficients) => actions.setChannelFirData!(subChannel.channelIndex, name, coefficients)
+                  : undefined
+              }
+              onClearData={
+                actions.clearChannelFirData ? () => actions.clearChannelFirData!(subChannel.channelIndex) : undefined
+              }
             />
           ) : view === "eq" ? (
             <div className="h-full overflow-y-auto">

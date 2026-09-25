@@ -4,12 +4,12 @@
 //! body layout, `ReceiveDatas/RD_All.cs:2212-2223` for the decode) and
 //! cross-checked against a prior web port of the same controller.
 //!
-//! **Read-only for now.** Writing coefficients (the vendor's Import, and its
-//! Remove — FC=43 with `status_code=6` and an empty body) needs a 2093-byte
-//! frame, which the protocol fragments into five 450-byte datagrams with a
-//! stop-and-wait ACK per fragment. Nothing in this app's write path fragments
-//! anything yet — every existing control packet fits one datagram — so that is
-//! deferred to its own phase rather than half-built here.
+//! Writing coefficients (the vendor's Import, and its Remove — FC=43 with
+//! `status_code=6` and an empty body) needs a 2093-byte frame, which the
+//! protocol fragments into five 450-byte datagrams (the last one shorter)
+//! with a stop-and-wait ACK per fragment — see `split_into_fragments` and
+//! `build_set_fir_data`. Ground-truthed against the vendor's own `UDP.cs`
+//! send loop, which does exactly this for this same command.
 //!
 //! Query: `status_code=2`, `chx` = output channel (0-based), **`in_out_flag=1`**
 //! (FIR is an output-side feature; the vendor sets it at
@@ -36,7 +36,10 @@
 //! reports 511 rather than 512, because the trim is strictly of *trailing*
 //! zeros. The vendor's own readout does the same.
 
-use super::protocol::{CHECKSUM_LEN, STRUCT_HEADER_LEN};
+use super::protocol::{
+    build_control_packet_with_status, build_network_data_header, build_struct_header, calc_check_code, CHECKSUM_LEN,
+    STRUCT_HEADER_LEN,
+};
 use crate::data::common::now_millis;
 use serde::Serialize;
 use specta::Type;
@@ -200,6 +203,80 @@ pub fn parse_fir_data(frame: &[u8], channel_index: u8) -> Option<ChannelFirSnaps
     })
 }
 
+/// Inverse of `decode_name_field`: ASCII bytes, truncated or zero-padded to
+/// `FIR_NAME_FIELD_LEN`.
+fn encode_name_field(name: &str) -> [u8; FIR_NAME_FIELD_LEN] {
+    let mut field = [0u8; FIR_NAME_FIELD_LEN];
+    let bytes = name.as_bytes();
+    let n = bytes.len().min(FIR_NAME_FIELD_LEN);
+    field[..n].copy_from_slice(&bytes[..n]);
+    field
+}
+
+/// Splits an already-built inner frame (StructHeader + body + checksum) into
+/// the datagrams the vendor's `UDP.cs::send` sends once a write exceeds one
+/// datagram: ≤450-byte chunks, each prefixed with its own `NetworkDataHeader`.
+///
+/// `packets_lastlen` carries the **last** fragment's length and stays constant
+/// across every fragment in the set (the vendor computes it once, before the
+/// send loop, and never touches it again) — not the current fragment's own
+/// length, which is what the field name is easy to misread as.
+///
+/// A frame that fits in one datagram still goes through this and comes out
+/// byte-identical to what `build_control_packet_with_status` already emits
+/// for a single-shot write (`packets_count = packets_step = 1`, `packets_lastlen`
+/// = the whole frame) — FIR is the only caller today, but nothing here special
+/// -cases the single-fragment shape.
+fn split_into_fragments(inner: &[u8]) -> Vec<Vec<u8>> {
+    const CHUNK: usize = 450;
+    let len = inner.len();
+    let mut count = len / CHUNK + 1;
+    let mut last_len = len % CHUNK;
+    if last_len == 0 {
+        last_len = CHUNK;
+        count -= 1;
+    }
+    (1..=count as u8)
+        .map(|step| {
+            let start = (step as usize - 1) * CHUNK;
+            let end = if (step as usize) * CHUNK > len { len } else { start + CHUNK };
+            let chunk = &inner[start..end];
+            let header = build_network_data_header(last_len as u16, 0, 0, count as u8, step);
+            let mut packet = Vec::with_capacity(header.len() + chunk.len());
+            packet.extend_from_slice(&header);
+            packet.extend_from_slice(chunk);
+            packet
+        })
+        .collect()
+}
+
+/// FC=43 write (the vendor's Import): `status_code=1`, `in_out_flag=1`, body =
+/// `name[32]` + `float32[512]` — same 2080-byte named shape `parse_fir_data`
+/// decodes, always sent with the name prefix regardless of what the amp last
+/// replied with. `coefficients` longer than `FIR_MAX_TAPS` is truncated;
+/// shorter is zero-padded — the caller (the Tauri command) rejects an
+/// over-long import instead of relying on this silent truncation.
+pub fn build_set_fir_data(channel_index: u8, name: &str, coefficients: &[f32]) -> Vec<Vec<u8>> {
+    let mut body = Vec::with_capacity(FIR_BODY_LEN_NAMED);
+    body.extend_from_slice(&encode_name_field(name));
+    for i in 0..FIR_MAX_TAPS {
+        let v = coefficients.get(i).copied().unwrap_or(0.0);
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    let struct_header = build_struct_header(FC_FIR_DATA, 1, channel_index, 0, 0, FIR_IN_OUT_FLAG);
+    let mut inner = Vec::with_capacity(STRUCT_HEADER_LEN + body.len() + CHECKSUM_LEN);
+    inner.extend_from_slice(&struct_header);
+    inner.extend_from_slice(&body);
+    inner.extend_from_slice(&calc_check_code(&inner));
+    split_into_fragments(&inner)
+}
+
+/// FC=43 write with `status_code=6` (`Response_cc`) and an empty body — the
+/// vendor's Remove. Fits in one datagram, so no fragmentation.
+pub fn build_clear_fir_data(channel_index: u8) -> Vec<u8> {
+    build_control_packet_with_status(FC_FIR_DATA, 6, channel_index, 0, 0, FIR_IN_OUT_FLAG, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +354,48 @@ mod tests {
         values[20] = 0.5;
         let parsed = parse_fir_data(&frame(&taps(&values)), 0).unwrap();
         assert_eq!(parsed.time_zero_index, 20);
+    }
+
+    #[test]
+    fn a_512_tap_write_fragments_exactly_like_the_vendor() {
+        let coefficients = vec![0.1f32; FIR_MAX_TAPS];
+        let fragments = build_set_fir_data(2, "lowpass", &coefficients);
+        // 2093-byte inner frame (10 header + 2080 body + 3 checksum) over
+        // 450-byte chunks: 5 fragments, four full plus a 293-byte remainder.
+        assert_eq!(fragments.len(), 5);
+        for fragment in &fragments[..4] {
+            assert_eq!(fragment.len(), super::super::protocol::NETWORK_HEADER_LEN + 450);
+        }
+        assert_eq!(fragments[4].len(), super::super::protocol::NETWORK_HEADER_LEN + 293);
+        for (i, fragment) in fragments.iter().enumerate() {
+            let header = super::super::protocol::parse_network_data_header(fragment).unwrap();
+            assert_eq!(header.packets_count, 5);
+            assert_eq!(header.packets_step, (i + 1) as u8);
+            assert_eq!(header.packets_lastlen, 293);
+        }
+    }
+
+    #[test]
+    fn a_fragmented_write_round_trips_through_parse_fir_data() {
+        let mut coefficients = vec![0.0f32; FIR_MAX_TAPS];
+        coefficients[0] = 0.5;
+        coefficients[10] = -0.25;
+        let fragments = build_set_fir_data(0, "test", &coefficients);
+
+        let inner: Vec<u8> = fragments
+            .into_iter()
+            .flat_map(|f| f[super::super::protocol::NETWORK_HEADER_LEN..].to_vec())
+            .collect();
+        let parsed = parse_fir_data(&inner, 0).expect("reassembled frame parses");
+        assert_eq!(parsed.name.as_deref(), Some("test"));
+        assert_eq!(parsed.coefficients, coefficients);
+    }
+
+    #[test]
+    fn clearing_fir_data_is_a_single_unfragmented_packet() {
+        let packet = build_clear_fir_data(3);
+        let header = super::super::protocol::parse_network_data_header(&packet).unwrap();
+        assert_eq!(header.packets_count, 1);
+        assert_eq!(header.packets_step, 1);
     }
 }

@@ -14,7 +14,7 @@ use ampcore_core::live::state::{
 };
 use ampcore_core::live::write_helpers::{
     current_channel, current_crossover_slot, current_eq_band, fetch_presets, require_fir_firmware, require_v118_firmware, resolve_write_target,
-    send_request_with_retry,
+    send_fragmented_write, send_request_with_retry,
     unknown_firmware_error, WriteTally,
 };
 
@@ -641,6 +641,51 @@ pub async fn live_control_set_fir_bypass(
     let mut tally = WriteTally::default();
     let packet = write::build_set_fir_bypass(firmware_family.as_deref(), channel_index, bypassed)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=43 write (the vendor's Import): a 2093-byte frame that needs outbound
+/// fragmentation (see `send_fragmented_write`/`fir::build_set_fir_data`).
+/// `coefficients` longer than the device's fixed 512-tap array is rejected —
+/// silently truncating an import would drop the tail of the caller's filter.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_fir_data(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    name: String,
+    coefficients: Vec<f32>,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+    if coefficients.len() > fir::FIR_MAX_TAPS {
+        return Err(AppError::from(format!(
+            "FIR import has {} taps, more than the device's {}-tap array",
+            coefficients.len(),
+            fir::FIR_MAX_TAPS
+        )));
+    }
+    send_fragmented_write(&state, &device_id, |firmware| {
+        write::build_set_fir_data(firmware, channel_index, &name, &coefficients)
+    })
+    .await
+}
+
+/// FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_clear_channel_fir_data(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    require_fir_firmware(&device_id, firmware_family.as_deref())?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_clear_fir_data(firmware_family.as_deref(), channel_index)
+        .ok_or_else(|| unknown_firmware_error(&device_id))?;
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())
 }
