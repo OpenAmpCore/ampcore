@@ -14,7 +14,7 @@ use super::cvr::fir::ChannelFirSnapshot;
 use super::cvr::preset::DevicePresetsSnapshot;
 use super::cvr::request::{RequestSpec, WriteSpec};
 use super::cvr::telemetry::Telemetry;
-use super::driver::DriverHandle;
+use crate::error::AppError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +49,8 @@ pub struct DiscoveredDevice {
 
 pub struct LiveDeviceInner {
     pub devices: HashMap<String, DiscoveredDevice>,
-    pub handles: Vec<DriverHandle>,
+    /// The running driver; `None` when stopped.
+    pub driver: Option<DriverHandle>,
     /// Latest parsed heartbeat telemetry per device id. Kept separate from
     /// `devices` (and emitted via its own event) rather than as a field on
     /// `DiscoveredDevice` — that struct's own upsert/touch/mark-offline paths
@@ -80,7 +81,7 @@ pub struct LiveDeviceInner {
     pub poll_subscriptions: HashMap<String, HashSet<String>>,
     /// Reaches into the running CVR driver's request engine from outside its
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
-    /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
+    /// running. `Some` while `cvr::driver::start`'s spawned task is alive.
     pub request_tx: Option<mpsc::UnboundedSender<RequestSpec>>,
     /// Write counterpart to `request_tx` — routes control packets through the
     /// driver's single long-lived socket (bound to `PC_LISTEN_PORT`) so the
@@ -107,7 +108,7 @@ impl LiveDeviceState {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(LiveDeviceInner {
             devices: HashMap::new(),
-            handles: Vec::new(),
+            driver: None,
             telemetry: HashMap::new(),
             channel_config: HashMap::new(),
             presets: HashMap::new(),
@@ -117,6 +118,55 @@ impl LiveDeviceState {
             write_tx: None,
         })))
     }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, LiveDeviceInner>, AppError> {
+        self.0.lock().map_err(|e| AppError::from(e.to_string()))
+    }
+
+    /// Starts the driver; a no-op when it is already running. `sink` must wrap
+    /// this same state.
+    pub fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> Result<(), AppError> {
+        if self.lock()?.driver.is_some() {
+            return Ok(());
+        }
+        // Lock released before `start()`: the driver locks this same mutex
+        // itself (to store `request_tx`/`write_tx`), and `std::sync::Mutex`
+        // isn't reentrant — holding it across the call deadlocks.
+        let handle = super::cvr::driver::start(sink, runtime);
+        self.lock()?.driver = Some(handle);
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), AppError> {
+        let handle = {
+            let mut inner = self.lock()?;
+            inner.request_tx = None;
+            inner.write_tx = None;
+            inner.driver.take()
+        };
+        if let Some(h) = handle {
+            // Fire-and-forget: the task exits on its next `select!` tick.
+            let _ = h.stop_tx.send(());
+        }
+        Ok(())
+    }
+
+    /// Replaces one subscription token's polled-device set; an empty list
+    /// removes the token (see `LiveDeviceInner::poll_subscriptions`).
+    pub fn set_poll_subscription(&self, token: String, device_ids: Vec<String>) -> Result<(), AppError> {
+        let mut inner = self.lock()?;
+        if device_ids.is_empty() {
+            inner.poll_subscriptions.remove(&token);
+        } else {
+            inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
+        }
+        Ok(())
+    }
+}
+
+/// Stops the task `cvr::driver::start` spawned.
+pub struct DriverHandle {
+    pub(crate) stop_tx: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Default for LiveDeviceState {

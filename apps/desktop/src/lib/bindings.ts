@@ -1039,7 +1039,7 @@ export type AmpParamRanges = {
 };
 
 /**
- *  Identifies which `AmpDriver` controls a catalog model — a brand-protocol-
+ *  Identifies which driver controls a catalog model — a brand-protocol-
  *  family concept, not a firmware version (firmware is a runtime property of
  *  a physical unit, detected at discovery time, not a fixed catalog attribute).
  */
@@ -1865,7 +1865,7 @@ export type Telemetry = {
 	/**
 	 *  dB relative to the device's rated RMS output voltage (`0dB` = rated
 	 *  max output) — `None` per-channel until `driver.rs` fills it in, since
-	 *  the wire-format adapters (`telemetry_v118`/`telemetry_v119`) only see
+	 *  the wire-format adapters (`telemetry_v118`) only see
 	 *  raw packet bytes, not the device's firmware-version string needed to
 	 *  look up a real reference voltage (see
 	 *  `capability::cvr::rated_rms_voltage_from_firmware_string`). Stays

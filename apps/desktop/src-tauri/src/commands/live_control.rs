@@ -7,53 +7,26 @@ use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, e
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
 use ampcore_core::live::cvr::write;
-use ampcore_core::live::driver::all_drivers;
 use ampcore_core::live::state::{
     DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
     LiveWriteAck,
 };
 use ampcore_core::live::write_helpers::{
-    current_channel, current_crossover_slot, current_eq_band, fetch_presets, require_fir_firmware, require_v118_firmware, resolve_write_target,
-    send_fragmented_write, send_request_with_retry,
-    unknown_firmware_error, WriteTally,
+    current_channel, current_crossover_slot, current_eq_band, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
+    resolve_write_target, send_fragmented_write, send_request_with_retry, unknown_firmware_error, validate_name, WriteTally,
 };
 
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Result<(), AppError> {
-    {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        if !inner.handles.is_empty() {
-            return Ok(()); // idempotent — already running
-        }
-    }
-    // Lock must be released before calling `start()` — `CvrDriver::start`
-    // locks this same `Arc<Mutex<LiveDeviceInner>>` itself (to store
-    // `request_tx`), and `std::sync::Mutex` isn't reentrant: holding it
-    // across the call deadlocks the very first `live_control_start`
-    // invocation, which fires when the first live-aware view mounts (see
-    // `useLiveDriver`).
     let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
-    let runtime = tauri::async_runtime::handle().inner().clone();
-    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone(), &runtime)).collect();
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    inner.handles.extend(handles);
-    Ok(())
+    state.start(sink, tauri::async_runtime::handle().inner())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_stop(state: State<LiveDeviceState>) -> Result<(), AppError> {
-    let handles = {
-        let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-        inner.request_tx = None;
-        inner.write_tx = None;
-        std::mem::take(&mut inner.handles)
-    };
-    for h in handles {
-        h.request_stop();
-    }
-    Ok(())
+    state.stop()
 }
 
 /// Declares which devices one live consumer needs the heavy polls (heartbeat,
@@ -79,13 +52,7 @@ pub fn live_control_set_poll_subscription(
     token: String,
     device_ids: Vec<String>,
 ) -> Result<(), AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    if device_ids.is_empty() {
-        inner.poll_subscriptions.remove(&token);
-    } else {
-        inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
-    }
-    Ok(())
+    state.set_poll_subscription(token, device_ids)
 }
 
 #[tauri::command]
@@ -339,42 +306,17 @@ pub async fn live_control_set_channel_limiter(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let channel = current_channel(&state, &device_id, channel_index)?;
 
-    let touches_rms = patch.rms_enabled.is_some()
-        || patch.rms_threshold_vrms.is_some()
-        || patch.rms_attack_ms.is_some()
-        || patch.rms_release_multiplier.is_some();
-    let touches_peak = patch.peak_enabled.is_some()
-        || patch.peak_threshold_vp.is_some()
-        || patch.peak_hold_ms.is_some()
-        || patch.peak_release_ms.is_some();
-
     let mut packets: Vec<Vec<u8>> = Vec::new();
-    if touches_rms {
-        let rms = &channel.limiter.rms;
+    if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = merge_rms(&patch, &channel.limiter.rms) {
         packets.push(
-            write::build_set_rms_limiter(
-                firmware_family.as_deref(),
-                channel_index,
-                patch.rms_enabled.unwrap_or(rms.enabled),
-                patch.rms_threshold_vrms.unwrap_or(rms.threshold_vrms) as f32,
-                patch.rms_attack_ms.unwrap_or(rms.attack_ms) as u16,
-                patch.rms_release_multiplier.unwrap_or(rms.release_multiplier) as u8,
-            )
-            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?,
+            write::build_set_rms_limiter(firmware_family.as_deref(), channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)
+                .ok_or_else(|| unknown_firmware_error(&device_id))?,
         );
     }
-    if touches_peak {
-        let peak = &channel.limiter.peak;
+    if let Some((enabled, threshold_vp, hold_ms, release_ms)) = merge_peak(&patch, &channel.limiter.peak) {
         packets.push(
-            write::build_set_peak_limiter(
-                firmware_family.as_deref(),
-                channel_index,
-                patch.peak_enabled.unwrap_or(peak.enabled),
-                patch.peak_threshold_vp.unwrap_or(peak.threshold_vp) as f32,
-                patch.peak_hold_ms.unwrap_or(peak.hold_ms) as u16,
-                patch.peak_release_ms.unwrap_or(peak.release_ms) as u16,
-            )
-            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?,
+            write::build_set_peak_limiter(firmware_family.as_deref(), channel_index, enabled, threshold_vp, hold_ms, release_ms)
+                .ok_or_else(|| unknown_firmware_error(&device_id))?,
         );
     }
 
@@ -404,22 +346,8 @@ pub async fn live_control_set_channel_name(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
 
     let name = name.unwrap_or_default();
-    let trimmed = name.trim();
-    if !trimmed.is_ascii() {
-        return Err(AppError::from("channel name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
-    }
-    if trimmed.bytes().any(|b| b == 0) {
-        return Err(AppError::from("channel name cannot contain a null byte".to_string()));
-    }
-    if trimmed.len() > CHANNEL_NAME_FIELD_LEN {
-        return Err(AppError::from(format!("channel name is limited to {} characters", CHANNEL_NAME_FIELD_LEN)));
-    }
-
-    let in_out_flag = match direction {
-        EqDirection::Input => 0,
-        EqDirection::Output => 1,
-    };
-    let packet = write::build_set_channel_name(firmware_family.as_deref(), channel_index, in_out_flag, trimmed)
+    let trimmed = validate_name("channel name", &name, CHANNEL_NAME_FIELD_LEN)?;
+    let packet = write::build_set_channel_name(firmware_family.as_deref(), channel_index, write::in_out_flag(direction), trimmed)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
     let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
@@ -577,18 +505,9 @@ pub async fn live_control_store_preset(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
 
-    let trimmed = name.trim();
+    let trimmed = validate_name("preset name", &name, PRESET_NAME_MAX_LEN)?;
     if trimmed.is_empty() {
         return Err(AppError::from("preset name cannot be empty".to_string()));
-    }
-    if !trimmed.is_ascii() {
-        return Err(AppError::from("preset name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
-    }
-    if trimmed.bytes().any(|b| b == 0) {
-        return Err(AppError::from("preset name cannot contain a null byte".to_string()));
-    }
-    if trimmed.len() > PRESET_NAME_MAX_LEN {
-        return Err(AppError::from(format!("preset name is limited to {} characters", PRESET_NAME_MAX_LEN)));
     }
 
     let mut tally = WriteTally::default();
@@ -824,16 +743,7 @@ pub async fn live_control_set_device_name(
 ) -> Result<LiveWriteAck, AppError> {
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
 
-    let trimmed = name.trim();
-    if !trimmed.is_ascii() {
-        return Err(AppError::from("device name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
-    }
-    if trimmed.bytes().any(|b| b == 0) {
-        return Err(AppError::from("device name cannot contain a null byte".to_string()));
-    }
-    if trimmed.len() > DEVICE_NAME_FIELD_LEN {
-        return Err(AppError::from(format!("device name is limited to {} characters", DEVICE_NAME_FIELD_LEN)));
-    }
+    let trimmed = validate_name("device name", &name, DEVICE_NAME_FIELD_LEN)?;
 
     let packet = write::build_set_device_name(firmware_family.as_deref(), trimmed)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
@@ -960,16 +870,8 @@ pub async fn live_control_set_eq_band(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let mut tally = WriteTally::default();
     let firmware_family = firmware_family.as_deref();
-    let in_out_flag: u8 = match direction {
-        EqDirection::Input => 0,
-        EqDirection::Output => 1,
-    };
-    // `band_index` (0-7) is the array index into `ChannelEq.bands`; the wire
-    // protocol's `segment` numbering reserves 0 for HP and 9 for LP, so a
-    // parametric band's wire segment is always `band_index + 1` (1-8), never
-    // `band_index` directly — passing it unshifted silently aims every write
-    // at the wrong stage (band 0 would land on the HP crossover slot).
-    let segment = band_index + 1;
+    let in_out_flag = write::in_out_flag(direction);
+    let segment = write::eq_band_segment(band_index);
 
     if patch.filter_type.is_some() || patch.active.is_some() {
         let current = current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)?
@@ -1020,16 +922,8 @@ pub async fn live_control_set_crossover_slot(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let mut tally = WriteTally::default();
     let firmware_family = firmware_family.as_deref();
-    let in_out_flag: u8 = match direction {
-        EqDirection::Input => 0,
-        EqDirection::Output => 1,
-    };
-    // HP = segment 0, LP = segment 9 of the fixed 10-band chain, per the
-    // reference's `getCrossoverSegment`.
-    let segment: u8 = match slot {
-        CrossoverSlotKind::Hp => 0,
-        CrossoverSlotKind::Lp => 9,
-    };
+    let in_out_flag = write::in_out_flag(direction);
+    let segment = write::crossover_segment(slot);
     let mut wrote_anything = false;
 
     if patch.filter_type.is_some() || patch.active.is_some() {

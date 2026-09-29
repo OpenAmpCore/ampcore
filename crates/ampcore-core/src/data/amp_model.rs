@@ -64,7 +64,7 @@ pub struct AmpDspTopology {
     pub rated_rms_voltage: Option<f64>,
 }
 
-/// Identifies which `AmpDriver` controls a catalog model — a brand-protocol-
+/// Identifies which driver controls a catalog model — a brand-protocol-
 /// family concept, not a firmware version (firmware is a runtime property of
 /// a physical unit, detected at discovery time, not a fixed catalog attribute).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

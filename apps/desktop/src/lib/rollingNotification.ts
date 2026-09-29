@@ -1,46 +1,31 @@
-import { notifications } from "./notify";
+import type { ReactNode } from "react";
+import { toast } from "@heroui/react";
 
-type NotificationProps = Parameters<typeof notifications.show>[0];
-
-/** Notification id currently on screen for each rolling key. */
+/** Toast id currently on screen for each rolling key. */
 const activeByKey = new Map<string, string>();
-let sequence = 0;
 
 /**
- * Shows a notification that *replaces* the previous one for the same `key`,
- * restarting its auto-close timer — a single rolling confirmation rather than
- * a stack.
+ * Shows a short green confirmation that *replaces* the previous one for the
+ * same `key` — a single rolling confirmation rather than a stack.
  *
- * HeroUI's `toast()` (see `./notify.ts`) always queues a brand-new toast on
- * every call — there's no caller-supplied id it dedupes or replaces by — so
- * calling it again for, say, "preset recalled" while the previous one is
- * still showing would stack two toasts instead of refreshing one. This
- * closes the previous toast for `key` first, then opens a new one, which
- * also reads as a visible swap rather than a silently mutating toast.
- *
- * `key` scopes the rolling behaviour: two different keys coexist and stack
- * normally. Only repeats of the same key replace each other.
+ * HeroUI's `toast()` always queues a brand-new toast and generates its own
+ * id, so calling it again for, say, "preset recalled" while the previous one
+ * is still showing would stack two. This closes the previous toast for `key`
+ * first, which also reads as a visible swap rather than a silently mutating
+ * toast. Different keys coexist and stack normally.
  */
-export function showRollingNotification(key: string, props: Omit<NotificationProps, "id" | "onClose">): void {
-  // Hide first, then record: `hide` fires the old notification's `onClose`,
-  // which clears the map entry. Doing it in the other order would let that
-  // callback delete the entry we just wrote for the new toast.
+export function showRollingNotification(key: string, title: ReactNode, description: ReactNode): void {
   const previous = activeByKey.get(key);
-  if (previous) {
-    notifications.hide(previous);
-  }
+  if (previous) toast.close(previous);
 
-  const id = `${key}#${++sequence}`;
-  activeByKey.set(key, id);
-  notifications.show({
-    ...props,
-    id,
+  const id = toast.success(title, {
+    description,
+    timeout: 1500,
+    // Guard against a late close from a superseded toast evicting the entry
+    // belonging to a newer one.
     onClose: () => {
-      // Guard against a late auto-close from a superseded toast evicting the
-      // entry belonging to a newer one.
-      if (activeByKey.get(key) === id) {
-        activeByKey.delete(key);
-      }
+      if (activeByKey.get(key) === id) activeByKey.delete(key);
     },
   });
+  activeByKey.set(key, id);
 }

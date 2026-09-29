@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc;
 
-use crate::data::project::{CrossoverSlot, CrossoverSlotKind, EqBand, EqDirection};
+use crate::data::project::{CrossoverSlot, CrossoverSlotKind, EqBand, EqDirection, LimiterPatch, PeakLimiter, RmsLimiter};
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::data::common::now_millis;
@@ -246,7 +246,7 @@ pub async fn fetch_presets(sink: &LiveEventSink, device_id: &str) -> Result<Devi
 /// Anything older — or an unrecognized firmware — is refused rather than
 /// guessed at, matching this app's no-fallback-encoding rule.
 pub fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
-    if !matches!(firmware_family, Some("1.1.8") | Some("1.1.9")) {
+    if !super::cvr::protocol::is_known_family(firmware_family) {
         return Err(AppError::from(format!(
             "device {} FIR data requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
             device_id, firmware_family
@@ -337,9 +337,107 @@ pub fn current_channel(
         .ok_or_else(|| AppError::from(format!("device {} has no channel {}", device_id, channel_index)))
 }
 
+/// Trims and checks a name for a fixed-width ASCII wire field. `label`
+/// ("channel name", "device name", …) prefixes the error.
+pub fn validate_name<'a>(label: &str, name: &'a str, max: usize) -> Result<&'a str, AppError> {
+    let name = name.trim();
+    if !name.is_ascii() {
+        return Err(AppError::from(format!("{label} must be ASCII — the device stores names as fixed-width ASCII")));
+    }
+    if name.bytes().any(|b| b == 0) {
+        return Err(AppError::from(format!("{label} cannot contain a null byte")));
+    }
+    if name.len() > max {
+        return Err(AppError::from(format!("{label} is limited to {max} characters")));
+    }
+    Ok(name)
+}
+
+// Each limiter stage is a whole-record wire packet, so a partial patch takes
+// its untouched fields from the last FC=27 snapshot — writing defaults
+// instead would silently zero a configured threshold.
+
+/// Merged RMS stage, as `build_set_rms_limiter` wants it; `None` when the
+/// patch doesn't touch RMS at all.
+pub fn merge_rms(patch: &LimiterPatch, rms: &RmsLimiter) -> Option<(bool, f32, u16, u8)> {
+    let touched = patch.rms_enabled.is_some()
+        || patch.rms_threshold_vrms.is_some()
+        || patch.rms_attack_ms.is_some()
+        || patch.rms_release_multiplier.is_some();
+    touched.then(|| {
+        (
+            patch.rms_enabled.unwrap_or(rms.enabled),
+            patch.rms_threshold_vrms.unwrap_or(rms.threshold_vrms) as f32,
+            patch.rms_attack_ms.unwrap_or(rms.attack_ms) as u16,
+            patch.rms_release_multiplier.unwrap_or(rms.release_multiplier) as u8,
+        )
+    })
+}
+
+/// Merged peak stage — same rule as `merge_rms`.
+pub fn merge_peak(patch: &LimiterPatch, peak: &PeakLimiter) -> Option<(bool, f32, u16, u16)> {
+    let touched = patch.peak_enabled.is_some()
+        || patch.peak_threshold_vp.is_some()
+        || patch.peak_hold_ms.is_some()
+        || patch.peak_release_ms.is_some();
+    touched.then(|| {
+        (
+            patch.peak_enabled.unwrap_or(peak.enabled),
+            patch.peak_threshold_vp.unwrap_or(peak.threshold_vp) as f32,
+            patch.peak_hold_ms.unwrap_or(peak.hold_ms) as u16,
+            patch.peak_release_ms.unwrap_or(peak.release_ms) as u16,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one silent-wrong-amp bug here: band 0 must land on wire segment 1,
+    /// never on segment 0 (the HP crossover).
+    #[test]
+    fn band_segments_skip_the_crossover_slots() {
+        assert_eq!(write::eq_band_segment(0), 1);
+        assert_eq!(write::eq_band_segment(7), 8);
+        assert_eq!(write::crossover_segment(CrossoverSlotKind::Hp), 0);
+        assert_eq!(write::crossover_segment(CrossoverSlotKind::Lp), 9);
+    }
+
+    /// A patch that touches one limiter field must not rewrite the other
+    /// three, and a patch that touches no field of a stage sends nothing.
+    #[test]
+    fn limiter_patch_preserves_untouched_fields() {
+        let rms = RmsLimiter {
+            enabled: false,
+            threshold_vrms: 31.5,
+            attack_ms: 120.0,
+            release_multiplier: 4.0,
+            auto: false,
+            max_vrms: 0.0,
+        };
+        let peak = PeakLimiter { enabled: true, threshold_vp: 44.0, hold_ms: 20.0, release_ms: 300.0, max_vp: 0.0 };
+        let patch = LimiterPatch {
+            rms_enabled: Some(true),
+            rms_threshold_vrms: None,
+            rms_attack_ms: None,
+            rms_release_multiplier: None,
+            peak_enabled: None,
+            peak_threshold_vp: None,
+            peak_hold_ms: None,
+            peak_release_ms: None,
+        };
+        assert_eq!(merge_rms(&patch, &rms), Some((true, 31.5, 120, 4)));
+        assert_eq!(merge_peak(&patch, &peak), None);
+    }
+
+    #[test]
+    fn names_are_trimmed_ascii_within_width() {
+        assert_eq!(validate_name("name", "  Sub L ", 16).unwrap(), "Sub L");
+        assert!(validate_name("name", "Süd", 16).is_err());
+        assert!(validate_name("name", "a\0b", 16).is_err());
+        assert!(validate_name("name", "abcdef", 5).is_err());
+    }
 
     #[test]
     fn busy_retry_budget_outlasts_a_stalled_request() {

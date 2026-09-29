@@ -21,7 +21,7 @@ use ampcore_core::data::amp_push::{adopt_device_facts, plan_push, AmpPushPlan, P
 use ampcore_core::data::capability::SourceKind;
 use ampcore_core::data::edit_lock::LiveAmpReading;
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
-use ampcore_core::data::project::{ChannelEq, EqDirection, Project};
+use ampcore_core::data::project::{ChannelEq, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config::{ChannelConfigSnapshot, EqChainWire};
@@ -246,13 +246,6 @@ pub fn projects_plan_amp_push(
 // Encoding — one planned action to its packet(s)
 // ---------------------------------------------------------------------------
 
-fn in_out_flag(direction: EqDirection) -> u8 {
-    match direction {
-        EqDirection::Input => 0,
-        EqDirection::Output => 1,
-    }
-}
-
 /// Lays a `ChannelEq` out into the ten positional slots FC=52 expects: slot 0
 /// is the HP crossover, slots 1..=8 the parametric bands, slot 9 the LP — the
 /// same numbering `channel_config_v118::parse_eq_block` reads back and that
@@ -324,7 +317,7 @@ fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec<Vec
             vec![write::build_set_source_trim(firmware, *channel, family.segment(), *trim_db as f32, *delay_ms as f32)?]
         }
         PushAction::EqChain { channel, direction, eq, wire } => {
-            vec![write::build_set_eq_chain(firmware, *channel, in_out_flag(*direction), &eq_chain_bands(eq, wire), wire.chain_bypass)?]
+            vec![write::build_set_eq_chain(firmware, *channel, write::in_out_flag(*direction), &eq_chain_bands(eq, wire), wire.chain_bypass)?]
         }
         PushAction::MatrixCrosspoint { channel, source_index, gain_db, active } => {
             vec![write::build_set_matrix_crosspoint(firmware, *channel, *source_index, *gain_db as f32, *active)?]
@@ -376,7 +369,7 @@ fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec<Vec
             if !name.is_ascii() {
                 return None;
             }
-            vec![write::build_set_channel_name(firmware, *channel, in_out_flag(*direction), name)?]
+            vec![write::build_set_channel_name(firmware, *channel, write::in_out_flag(*direction), name)?]
         }
         PushAction::Bridge { pair_index, bridged } => {
             vec![write::build_set_output_bridge(firmware, *pair_index, *bridged)?]

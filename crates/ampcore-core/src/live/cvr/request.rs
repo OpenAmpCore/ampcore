@@ -295,7 +295,7 @@ fn resolve_frames(function_code: u8, frames: Vec<Vec<u8>>) -> Result<Vec<u8>, Re
         // This check is 1.1.8-shaped (imports its constants directly) even
         // though `resolve_frames` itself is firmware-agnostic — there's no
         // other known-good shape to validate against yet (1.1.9 has none;
-        // see `channel_config_v119.rs`). Revisit if/when a second firmware's
+        // it reuses the 1.1.8 parser). Revisit if/when a second firmware's
         // real geometry is confirmed.
         let inner_len = body.len().saturating_sub(super::protocol::STRUCT_HEADER_LEN + super::protocol::CHECKSUM_LEN);
         let plausible = inner_len >= TRAILER_SIZE_V118

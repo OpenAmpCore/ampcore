@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Spinner, Tooltip } from "@heroui/react";
-import { notifications } from "../lib/notify";
+import { toast } from "@heroui/react";
 import { Lock, LockOpen } from "lucide-react";
 import { commands } from "../lib/bindings";
 
@@ -25,7 +25,7 @@ export function RotaryLockToggle({
     const result = await commands.liveControlSetRotaryLock(deviceId, !rotaryLocked);
     setPending(false);
     if (result.status === "error") {
-      notifications.show({ color: "red", title: "Front panel lock failed", message: result.error.message });
+      toast.danger("Front panel lock failed", { description: result.error.message });
     }
   }
 

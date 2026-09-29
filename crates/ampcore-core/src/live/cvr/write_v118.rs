@@ -351,7 +351,7 @@ pub fn build_set_matrix_crosspoint(
 ///
 /// 1.1.8 carries no threshold on the wire — the 2-byte
 /// `[enable][threshold]` form is a 1.1.9+ extension (see
-/// `write_v119::build_set_noise_gate`). That matches
+/// `write::build_set_noise_gate`). That matches
 /// `CvrFirmwareCapability.noise_gate_threshold`, which this app already uses
 /// to hide the threshold input on 1.1.8.
 pub fn build_set_noise_gate(channel_index: u8, enabled: bool) -> Vec<u8> {

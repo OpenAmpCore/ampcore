@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { commands, type DeviceBridge, type DeviceBridgeSnapshot } from "../lib/bindings";
+import { useEffect, useRef } from "react";
+import { commands } from "../lib/bindings";
+import { useLiveMap } from "./useLiveMap";
 
-/** Keyed by `DiscoveredDevice.id`. Mirrors `useLivePresets`'s store/listen
- * halves, and additionally *primes* a device the first time it is asked for:
+/** Keyed by `DiscoveredDevice.id`. A `useLiveMap` that additionally *primes* a device the first time it is asked for:
  * `live_control_fetch_bridge` reads every pair and waits, so bridge state is
  * there in tens of ms instead of whenever the driver's bridge tick comes
  * round to each pair. That matters because a project amp's fingerprint is
@@ -17,29 +16,9 @@ import { commands, type DeviceBridge, type DeviceBridgeSnapshot } from "../lib/b
  * `live/cvr/bridge.rs` for why reading it out of the sync trailer produces
  * wrong values on 1.1.8. */
 export function useLiveBridge(deviceId: string | undefined) {
-  const [bridgeById, setBridgeById] = useState<Record<string, DeviceBridgeSnapshot>>({});
+  const [bridgeById, setBridgeById] = useLiveMap("live_bridge:updated", commands.liveControlGetBridge, (d) => d.bridge);
   // Device ids already fetched, so remounts and re-renders don't re-ask.
   const primed = useRef(new Set<string>());
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-
-    (async () => {
-      unlisten = await listen<DeviceBridge>("live_bridge:updated", (event) => {
-        setBridgeById((prev) => ({ ...prev, [event.payload.deviceId]: event.payload.bridge }));
-      });
-      const initial = await commands.liveControlGetBridge();
-      if (!cancelled && initial.status === "ok") {
-        setBridgeById(Object.fromEntries(initial.data.map((d) => [d.deviceId, d.bridge])));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
 
   useEffect(() => {
     if (!deviceId || primed.current.has(deviceId)) return;
