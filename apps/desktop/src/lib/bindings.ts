@@ -196,13 +196,8 @@ export const commands = {
 	 */
 	liveControlRefreshNow: (deviceId: string) => typedError<DeviceChannelConfig, AppError>(__TAURI_INVOKE("live_control_refresh_now", { deviceId })),
 	/**
-	 *  Fetches the full preset slot-name list (FC=59 mode=0) and the currently
-	 *  active preset's name (mode=4) as one command — deliberately not two
-	 *  independently-callable commands, since both share the same FC=59 request
-	 *  registry key and must not overlap (see `send_request_with_retry`'s doc). The
-	 *  mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
-	 *  the result and emits `live_presets:updated`, same pattern as
-	 *  `live_control_refresh_now`/`parse_and_store_sync_data`.
+	 *  Fetches the preset slot list + active preset and emits `live_presets:updated`;
+	 *  the request sequencing lives in `ampcore_core::live::write_helpers::fetch_presets`.
 	 */
 	liveControlFetchPresets: (deviceId: string) => typedError<DevicePresets, AppError>(__TAURI_INVOKE("live_control_fetch_presets", { deviceId })),
 	/**
@@ -371,6 +366,20 @@ export const commands = {
 	 *  packet its DSP has no handler for.
 	 */
 	liveControlSetFirBypass: (deviceId: string, channelIndex: number, bypassed: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_fir_bypass", { deviceId, channelIndex, bypassed })),
+	/**
+	 *  FC=43 write (the vendor's Import): a 2093-byte frame that needs outbound
+	 *  fragmentation (see `send_fragmented_write`/`fir::build_set_fir_data`).
+	 *  `coefficients` longer than the device's fixed 512-tap array is rejected —
+	 *  silently truncating an import would drop the tail of the caller's filter.
+	 */
+	liveControlSetChannelFirData: (deviceId: string, channelIndex: number, name: string, coefficients: (number | null)[]) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_fir_data", { deviceId, channelIndex, name, coefficients })),
+	/**  FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram. */
+	liveControlClearChannelFirData: (deviceId: string, channelIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_clear_channel_fir_data", { deviceId, channelIndex })),
+	/**
+	 *  Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
+	 *  no-op inside Tauri. Returns `false` when the user cancels the dialog.
+	 */
+	firExportFile: (defaultName: string, contents: string) => typedError<boolean, AppError>(__TAURI_INVOKE("fir_export_file", { defaultName, contents })),
 	/**
 	 *  Partial update of a channel's output trim/volume/delay — mirrors
 	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
@@ -1030,7 +1039,7 @@ export type AmpParamRanges = {
 };
 
 /**
- *  Identifies which `AmpDriver` controls a catalog model — a brand-protocol-
+ *  Identifies which driver controls a catalog model — a brand-protocol-
  *  family concept, not a firmware version (firmware is a runtime property of
  *  a physical unit, detected at discovery time, not a fixed catalog attribute).
  */
@@ -1856,7 +1865,7 @@ export type Telemetry = {
 	/**
 	 *  dB relative to the device's rated RMS output voltage (`0dB` = rated
 	 *  max output) — `None` per-channel until `driver.rs` fills it in, since
-	 *  the wire-format adapters (`telemetry_v118`/`telemetry_v119`) only see
+	 *  the wire-format adapters (`telemetry_v118`) only see
 	 *  raw packet bytes, not the device's firmware-version string needed to
 	 *  look up a real reference voltage (see
 	 *  `capability::cvr::rated_rms_voltage_from_firmware_string`). Stays

@@ -351,7 +351,7 @@ pub fn build_set_matrix_crosspoint(
 ///
 /// 1.1.8 carries no threshold on the wire — the 2-byte
 /// `[enable][threshold]` form is a 1.1.9+ extension (see
-/// `write_v119::build_set_noise_gate`). That matches
+/// `write::build_set_noise_gate`). That matches
 /// `CvrFirmwareCapability.noise_gate_threshold`, which this app already uses
 /// to hide the threshold input on 1.1.8.
 pub fn build_set_noise_gate(channel_index: u8, enabled: bool) -> Vec<u8> {
@@ -519,6 +519,17 @@ pub fn build_set_output_bridge(pair_index: u8, bridged: bool) -> Vec<u8> {
 pub fn build_set_fir_bypass(channel_index: u8, bypassed: bool) -> Vec<u8> {
     let body = [u8::from(bypassed)];
     build_control_packet(FC_FIR_BYPASS, channel_index, 0, 0, IN_OUT_FLAG_OUTPUT, &body)
+}
+
+/// FC=43, the write (Import) side — see `fir::build_set_fir_data`'s doc for
+/// the frame shape and fragmentation.
+pub fn build_set_fir_data(channel_index: u8, name: &str, coefficients: &[f32]) -> Vec<Vec<u8>> {
+    super::fir::build_set_fir_data(channel_index, name, coefficients)
+}
+
+/// FC=43, `status_code=6` — the vendor's Remove.
+pub fn build_clear_fir_data(channel_index: u8) -> Vec<u8> {
+    super::fir::build_clear_fir_data(channel_index)
 }
 
 /// FC=48 RMS_LIMITER_AUTO, `in_out_flag=1` (output). Wire body: one byte,

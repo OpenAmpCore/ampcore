@@ -4,10 +4,11 @@
 //! FC=0 BASIC_INFO's `Machine_state`. All four are the same one-byte vendor
 //! enum, so they all decode through here.
 //!
-//! Split into a shared enum plus per-firmware tables (`channel_state_v118.rs`,
-//! `channel_state_v119.rs`) for the same reason `telemetry.rs` and `write.rs`
-//! are: a firmware whose state numbering turns out to differ can be corrected
-//! without touching another firmware's already-ground-truthed path.
+//! Split into a shared enum plus the per-firmware table
+//! (`channel_state_v118.rs`, which 1.1.9 reuses until it can be verified) for
+//! the same reason `telemetry.rs` and `write.rs` are: a firmware whose
+//! numbering turns out to differ gets its own table without touching the
+//! already-ground-truthed one.
 
 use serde::Serialize;
 use specta::Type;
@@ -46,11 +47,7 @@ pub enum AmpChannelState {
 /// guessing a numbering would render confident, wrong state text (a faulted
 /// amp reading "Normal") instead of an honest gap.
 pub fn decode(firmware_family: Option<&str>, raw: i32) -> Option<AmpChannelState> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::channel_state_v118::decode(raw)),
-        Some("1.1.9") => Some(super::channel_state_v119::decode(raw)),
-        _ => None,
-    }
+    super::protocol::is_known_family(firmware_family).then(|| super::channel_state_v118::decode(raw))
 }
 
 /// Decodes a whole array of raw per-channel state values, preserving length.

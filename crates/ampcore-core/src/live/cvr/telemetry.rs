@@ -4,11 +4,9 @@
 //! its `firmware_family` (detected once at discovery time from the BASIC_INFO
 //! reply, see `protocol.rs`'s `detect_firmware_family`).
 //!
-//! Each firmware family gets its own file (`telemetry_v118.rs`,
-//! `telemetry_v119.rs`) rather than one parser branching internally on
-//! version, so a firmware's wire format can diverge — or get corrected once
-//! real hardware is available to verify against — without touching another
-//! firmware's already-ground-truthed code path.
+//! The parser lives in `telemetry_v118.rs`; 1.1.9 reuses it verbatim until
+//! real 1.1.9 heartbeat traffic can be captured (see `is_known_family`). A
+//! diverging firmware gets its own file, not branches inside the v118 one.
 
 use serde::Serialize;
 use specta::Type;
@@ -25,7 +23,7 @@ pub struct Telemetry {
     pub output_impedance: Vec<f32>,
     /// dB relative to the device's rated RMS output voltage (`0dB` = rated
     /// max output) — `None` per-channel until `driver.rs` fills it in, since
-    /// the wire-format adapters (`telemetry_v118`/`telemetry_v119`) only see
+    /// the wire-format adapters (`telemetry_v118`) only see
     /// raw packet bytes, not the device's firmware-version string needed to
     /// look up a real reference voltage (see
     /// `capability::cvr::rated_rms_voltage_from_firmware_string`). Stays
@@ -92,9 +90,8 @@ pub struct Telemetry {
 /// there is deliberately no generic fallback parser, since guessing wrong
 /// would silently produce plausible-looking garbage instead of an honest gap.
 pub fn parse_heartbeat_telemetry(firmware_family: Option<&str>, raw: &[u8]) -> Option<Telemetry> {
-    match firmware_family {
-        Some("1.1.8") => super::telemetry_v118::parse_heartbeat_telemetry(raw),
-        Some("1.1.9") => super::telemetry_v119::parse_heartbeat_telemetry(raw),
-        _ => None,
+    if !super::protocol::is_known_family(firmware_family) {
+        return None;
     }
+    super::telemetry_v118::parse_heartbeat_telemetry(raw)
 }

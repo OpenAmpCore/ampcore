@@ -9,8 +9,8 @@ import {
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
+import { usePreference } from "../lib/preferences";
 import { FIELD_INPUT } from "./fieldClasses";
-import { useListPreference } from "../lib/listPreferences";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
@@ -111,8 +111,8 @@ export function LimiterEditor({
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
   const ohms = channel.ohms ?? 8;
   const ranges = capability.paramRanges;
-  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
-  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
+  const peakHoldSurfaces = usePreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
 
   async function patch(fields: {
     rmsEnabled?: boolean;

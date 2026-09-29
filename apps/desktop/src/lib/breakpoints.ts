@@ -28,9 +28,9 @@ function useMediaQuery(query: string): boolean {
  * `compact` is the main one: below it, side rails collapse into inline
  * pickers and multi-pane pages stack vertically. `tight` is the second
  * step, for layouts that still don't fit once stacked (phone-ish widths and
- * the modals that go full-screen there). `short` covers vertical squeeze —
- * a wide-but-short window still needs scrolling panes rather than
- * vertically-centered ones.
+ * the modals that go full-screen there). Vertical squeeze needs no
+ * breakpoint: `CenteredScrollPane` centers while content fits and scrolls
+ * once it doesn't.
  *
  * `useMediaQuery` returns `undefined` on the very first render (before the
  * listener attaches); every hook here coerces that to `false` so the
@@ -38,7 +38,6 @@ function useMediaQuery(query: string): boolean {
  * after a real match — never a flash of the wrong one at full size. */
 export const COMPACT_MAX_WIDTH = 900;
 export const TIGHT_MAX_WIDTH = 640;
-export const SHORT_MAX_HEIGHT = 620;
 
 export function useIsCompact(): boolean {
   return useMediaQuery(`(max-width: ${COMPACT_MAX_WIDTH}px)`) ?? false;
@@ -48,6 +47,3 @@ export function useIsTight(): boolean {
   return useMediaQuery(`(max-width: ${TIGHT_MAX_WIDTH}px)`) ?? false;
 }
 
-export function useIsShort(): boolean {
-  return useMediaQuery(`(max-height: ${SHORT_MAX_HEIGHT}px)`) ?? false;
-}

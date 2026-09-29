@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { notifications } from "../lib/notify";
+import { toast } from "@heroui/react";
 import { commands, type AmpEditLock, type Project } from "../lib/bindings";
 
 /** Keeps a matched project amp following its linked online amp.
@@ -83,11 +83,9 @@ export function useLinkedSync({
           ? response.error.message
           : "the amps still differ after copying the settings";
       setFollowing(false);
-      notifications.show({
-        color: "red",
-        title: `Stopped following ${nameRef.current ?? "the amp"}`,
-        message: `${reason} — this project amp no longer updates itself. Use the comparison to match them again.`,
-        autoClose: false,
+      toast.danger(`Stopped following ${nameRef.current ?? "the amp"}`, {
+        description: `${reason} — this project amp no longer updates itself. Use the comparison to match them again.`,
+        timeout: 0,
       });
     });
 

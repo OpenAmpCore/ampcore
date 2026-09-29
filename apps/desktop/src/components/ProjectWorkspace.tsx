@@ -7,11 +7,10 @@ import { WorkspaceView } from "./WorkspaceView";
 import { useAmpEditLock } from "../hooks/useAmpEditLock";
 import { useLinkedSync } from "../hooks/useLinkedSync";
 import { useLiveBridge } from "../hooks/useLiveBridge";
-import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
 import { useLiveDevices } from "../hooks/useLiveDevices";
 import { useLiveDriver } from "../hooks/useLiveDriver";
 import { useLivePolling } from "../hooks/useLivePolling";
-import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
+import { useLiveChannelConfig, useLiveTelemetry } from "../hooks/useLiveMap";
 import { linkedDeviceFor } from "../lib/ampLinkStatus";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 

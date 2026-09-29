@@ -7,10 +7,9 @@
 //!
 //! Firmware 1.1.9 is known to differ from 1.1.8 in byte offsets *and*
 //! function codes for at least some commands, but no 1.1.9 reference/spec
-//! exists yet — `detect_firmware_family` below buckets a device into the
-//! V118 or V119 wire adapter (used by `channel_config.rs`, `telemetry.rs`,
-//! and `write.rs` to pick which firmware-specific parser/encoder to use),
-//! not just for display. BASIC_INFO parsing already handles multiple
+//! exists yet — `detect_firmware_family` below labels a device's family, and
+//! 1.1.9 currently reuses the 1.1.8 parsers/encoders verbatim; only families
+//! passing `is_known_family` get parsed/written at all. BASIC_INFO parsing already handles multiple
 //! body-length variants generically and has been verified against real
 //! 1.1.8 hardware; whether it also holds unmodified for 1.1.9 remains
 //! unconfirmed.
@@ -70,7 +69,7 @@ pub enum CvrFirmwareFamily {
 /// of silently dropped. 118 is the baseline: any detected vNum below 119
 /// (including older strings such as 116/117) routes to the V118 adapter as
 /// an honest best-effort, the same caveat already applied to
-/// `channel_config_v119.rs`/`telemetry_v119.rs` reusing v118's parser. The
+/// 1.1.9 reusing v118's parser (see `is_known_family`). The
 /// precise raw string is untouched and still fully visible via
 /// `DiscoveredDevice.firmware_version` — this only changes which adapter
 /// file handles a device, not what's displayed.
@@ -86,6 +85,15 @@ impl CvrFirmwareFamily {
             CvrFirmwareFamily::Unknown => None,
         }
     }
+}
+
+/// True for a `firmware_family` label this app has wire adapters for. 1.1.9
+/// currently reuses the 1.1.8 parsers/encoders verbatim — no 1.1.9 hardware
+/// exists to ground-truth against — so a real 1.1.9 divergence gets its own
+/// `match` arm at the affected call site. Unknown families get no fallback:
+/// guessing wrong would produce plausible garbage instead of an honest gap.
+pub fn is_known_family(firmware_family: Option<&str>) -> bool {
+    matches!(firmware_family, Some("1.1.8" | "1.1.9"))
 }
 
 pub fn detect_firmware_family(version_string: &str) -> CvrFirmwareFamily {

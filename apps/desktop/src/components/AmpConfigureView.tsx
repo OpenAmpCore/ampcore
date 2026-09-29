@@ -104,7 +104,6 @@ import {
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
 import { usePreference } from "../lib/preferences";
-import { useListPreference } from "../lib/listPreferences";
 import { useElementWidth } from "../hooks/useElementWidth";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
@@ -850,7 +849,7 @@ function InputChannelRow({
   const muted = channel.inputMuted ?? false;
   const delayInMs = channel.delayInMs ?? 0;
   const eqActive = activeFilterCount(channel.inputEq);
-  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
+  const peakHoldSurfaces = usePreference("peakHoldSurfaces");
 
   return (
     <div>
@@ -1180,8 +1179,8 @@ function OutputChannelRow({
   const muted = channel.outputMuted ?? false;
   const powerMode = channel.powerMode ?? "lowOhm";
   const eqActive = activeFilterCount(channel.outputEq);
-  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
-  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
+  const peakHoldSurfaces = usePreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
   const showLimiterThresholds = limiterThresholdSurfaces.includes("output");
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
 
@@ -1757,6 +1756,14 @@ function OutputTab({
               capability={capability}
               bypassed={subChannel.firBypassed ?? false}
               onBypassChange={(next) => actions.setChannelFirBypass(subChannel.channelIndex, next)}
+              onImportData={
+                actions.setChannelFirData
+                  ? (name, coefficients) => actions.setChannelFirData!(subChannel.channelIndex, name, coefficients)
+                  : undefined
+              }
+              onClearData={
+                actions.clearChannelFirData ? () => actions.clearChannelFirData!(subChannel.channelIndex) : undefined
+              }
             />
           ) : view === "eq" ? (
             <div className="h-full overflow-y-auto">
@@ -2015,7 +2022,7 @@ function RoutingTab({
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const sourceCount = capability.topology.matrixInputCount;
   const sourceCounts = capability.topology.sourceCounts;
-  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
+  const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const [hoveredCell, setHoveredCell] = useState<{
     channelIndex: number;
     sourceIndex: number;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Spinner, Tooltip } from "@heroui/react";
-import { notifications } from "../lib/notify";
+import { toast } from "@heroui/react";
 import { Power, PowerOff } from "lucide-react";
 import { commands } from "../lib/bindings";
 
@@ -37,7 +37,7 @@ export function StandbyToggle({
     const result = await commands.liveControlSetStandby(deviceId, !standby);
     setPending(false);
     if (result.status === "error") {
-      notifications.show({ color: "red", title: "Standby failed", message: result.error.message });
+      toast.danger("Standby failed", { description: result.error.message });
     }
   }
 

@@ -1,9 +1,7 @@
 pub mod channel_config;
 pub mod channel_config_v118;
-pub mod channel_config_v119;
 pub mod channel_state;
 pub mod channel_state_v118;
-pub mod channel_state_v119;
 pub mod driver;
 pub mod fir;
 pub mod bridge;
@@ -12,7 +10,5 @@ pub mod protocol;
 pub mod request;
 pub mod telemetry;
 pub mod telemetry_v118;
-pub mod telemetry_v119;
 pub mod write;
 pub mod write_v118;
-pub mod write_v119;

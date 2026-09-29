@@ -1,11 +1,33 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, ButtonGroup, Spinner, Switch, Tooltip } from "@heroui/react";
-import { Copy, RefreshCw } from "lucide-react";
+import { Copy, Download, RefreshCw, Trash2, Upload } from "lucide-react";
 
 import type { ActionResult } from "../lib/actionResult";
 import { commands, type AmpCapability, type ChannelFirSnapshot } from "../lib/bindings";
 import { buildFirResponseCurve } from "../lib/filterResponse";
+import { useConfirm } from "./ConfirmDialog";
 import { FIR_MIN_DB, FirFrequencyGraph, FirImpulseGraph } from "./FirGraph";
+
+/** Parses an imported FIR file: one coefficient per line, tolerating the
+ * vendor's own `"index value"`/`"index, value"` export shapes by taking the
+ * text after the last space or comma. Unparsable lines are skipped rather
+ * than aborting the whole import — mirrors the vendor's `ReadFIR_file`. No
+ * tap cap here: the backend rejects an over-long import instead of this
+ * silently dropping its tail. */
+function parseFirTextFile(text: string): number[] {
+  const values: number[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line) continue;
+    const lastSpace = line.lastIndexOf(" ");
+    const lastComma = line.lastIndexOf(",");
+    const cut = Math.max(lastSpace, lastComma);
+    if (cut > -1) line = line.slice(cut + 1);
+    const value = Number.parseFloat(line);
+    if (Number.isFinite(value)) values.push(value);
+  }
+  return values;
+}
 
 const CAPTION_STYLE = {
   color: "var(--amp-color-dimmed)",
@@ -28,16 +50,16 @@ const CAPTION_STYLE = {
  * piece of FIR state that also lives in the project file, so it stays settable
  * on an offline amp even though the coefficients do not.
  *
- * Three things this panel cannot do, each for a different reason:
- * - **Import / Remove coefficients** — a 2093-byte frame needing outbound
- *   fragmentation the write path doesn't have yet.
+ * Two things this panel cannot do, each for a different reason:
  * - **Plot an offline amp** — the coefficients are not in FC=27 and are not
  *   persisted, so there is nothing to draw without a reachable device.
  * - **Anything on pre-1.1.8 firmware** — `capability.firmware.firFilters` is
- *   false, which gates the FC=43 read and the FC=44 write alike.
+ *   false, which gates the FC=43 read/write and the FC=44 write alike.
  *
- * All three say so rather than rendering a dead control, per
- * `configureActions.ts`'s "absence must explain itself" rule. */
+ * Both say so rather than rendering a dead control, per
+ * `configureActions.ts`'s "absence must explain itself" rule. Import/Export/
+ * Clear (FC=43's write side) need a device for the same reason as the read —
+ * see `onImportData`/`onClearData`. */
 export function FirPanel({
   deviceId,
   channelIndex,
@@ -45,6 +67,8 @@ export function FirPanel({
   capability,
   bypassed = false,
   onBypassChange,
+  onImportData,
+  onClearData,
 }: {
   /** The live amp this editor can actually reach right now — Direct Edit's
    * own device, or the online amp a project amp is following. `undefined` for
@@ -61,6 +85,11 @@ export function FirPanel({
   /** Omitted when the source cannot write the flag at all, in which case no
    * toggle renders rather than a dead one. */
   onBypassChange?: (bypassed: boolean) => Promise<ActionResult>;
+  /** FC=43 Import. Omitted (no button renders) wherever coefficients can't be
+   * written — Project mode, an offline amp, or edit-locked. */
+  onImportData?: (name: string, coefficients: number[]) => Promise<ActionResult>;
+  /** FC=43 Remove. Same absence rule as `onImportData`. */
+  onClearData?: () => Promise<ActionResult>;
 }) {
   const supported = capability.firmware.firFilters;
   const [fir, setFir] = useState<ChannelFirSnapshot | null>(null);
@@ -69,6 +98,9 @@ export function FirPanel({
   const [copied, setCopied] = useState(false);
   const [view, setView] = useState<"graph" | "json">("graph");
   const [writeError, setWriteError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { confirm, dialog } = useConfirm();
 
   const fetchFir = useCallback(
     async (signal: { cancelled: boolean }) => {
@@ -160,6 +192,55 @@ export function FirPanel({
     window.setTimeout(() => setCopied(false), 1500);
   }
 
+  async function handleExport() {
+    if (!fir) return;
+    // One coefficient per line — the vendor's own `ExportFIR_file` shape, for
+    // round-trip compatibility with files the original vendor software wrote.
+    const text = fir.coefficients.map((c) => c ?? 0).join("\n");
+    const result = await commands.firExportFile(`${fir.name?.trim() || `out${label}-fir`}.txt`, text);
+    if (result.status === "error") setWriteError(result.error.message);
+  }
+
+  async function handleImportFile(file: File) {
+    if (!onImportData) return;
+    const text = await file.text();
+    const coefficients = parseFirTextFile(text);
+    const name = file.name.replace(/\.[^./\\]+$/, "");
+    // An empty parse would still write 512 zero taps — silencing the output.
+    if (coefficients.length === 0) {
+      setWriteError(`"${file.name}" contains no FIR coefficients.`);
+      return;
+    }
+    if (
+      !(await confirm({
+        title: "Import FIR filter",
+        description: `Replace the FIR filter on Out${label} with ${coefficients.length} taps from "${file.name}"?`,
+        confirmLabel: "Import",
+      }))
+    ) {
+      return;
+    }
+    setBusy(true);
+    setWriteError(null);
+    const result = await onImportData(name, coefficients);
+    setBusy(false);
+    if (result.ok) void fetchFir({ cancelled: false });
+    else setWriteError(result.message);
+  }
+
+  async function handleClear() {
+    if (!onClearData) return;
+    if (!(await confirm({ title: "Clear FIR filter", description: `Remove the FIR filter loaded on Out${label}?`, confirmLabel: "Clear", tone: "danger" }))) {
+      return;
+    }
+    setBusy(true);
+    setWriteError(null);
+    const result = await onClearData();
+    setBusy(false);
+    if (result.ok) void fetchFir({ cancelled: false });
+    else setWriteError(result.message);
+  }
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col gap-2 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -198,7 +279,44 @@ export function FirPanel({
         <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleCopy()}>
           <Copy size={14} /> {copied ? "Copied" : "Copy JSON"}
         </Button>
+        <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleExport()}>
+          <Download size={14} /> Export
+        </Button>
+        {onImportData && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.csv"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) void handleImportFile(file);
+              }}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              isDisabled={busy}
+              onPress={() => fileInputRef.current?.click()}
+            >
+              <Upload size={14} /> Import
+            </Button>
+          </>
+        )}
+        {onClearData && (
+          <Button size="sm" variant="secondary" isDisabled={busy || !fir} onPress={() => void handleClear()}>
+            <Trash2 size={14} /> Clear
+          </Button>
+        )}
       </div>
+
+      {!onImportData && (
+        <span style={CAPTION_STYLE}>
+          Import and Clear write the amp directly, so they&apos;re only available in Direct Edit.
+        </span>
+      )}
 
       {error && (
         <Alert status="danger">
@@ -212,11 +330,12 @@ export function FirPanel({
       {writeError && (
         <Alert status="danger">
           <Alert.Content>
-            <Alert.Title>Could not change FIR bypass</Alert.Title>
+            <Alert.Title>Could not write FIR data</Alert.Title>
             <Alert.Description>{writeError}</Alert.Description>
           </Alert.Content>
         </Alert>
       )}
+      {dialog}
 
       {loading && !fir && (
         <div className="flex justify-center py-6">

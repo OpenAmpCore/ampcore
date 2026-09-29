@@ -1,9 +1,13 @@
 //! Write/control command dispatch — the write-side counterpart to
-//! `channel_config.rs`/`telemetry.rs`: one dispatch point per logical action
-//! that routes to a firmware-specific encoder (`write_v118.rs`,
-//! `write_v119.rs`) based on `DiscoveredDevice.firmware_family`, rather than
-//! hardcoding one firmware's function codes/body layout directly in a Tauri
-//! command.
+//! `channel_config.rs`/`telemetry.rs`: one entry point per logical action,
+//! gated on `DiscoveredDevice.firmware_family`, rather than hardcoding one
+//! firmware's function codes/body layout directly in a Tauri command.
+//!
+//! 1.1.9 reuses the 1.1.8 encoders (`write_v118.rs`) for everything but the
+//! noise gate: no 1.1.9 hardware exists to verify a write path against, so
+//! these WILL silently send the wrong bytes if 1.1.9 has diverged. Give a
+//! diverging action its own `match` arm (see `build_set_noise_gate`) once
+//! real 1.1.9 hardware can ground-truth it.
 //!
 //! Writes are delivery-confirmed, but not *value*-confirmed. `send_control`
 //! submits through the driver's socket and resolves only once the device has
@@ -25,9 +29,33 @@ use std::net::Ipv4Addr;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::data::capability::PowerMode;
+use crate::data::project::{CrossoverSlotKind, EqDirection};
 
-use super::protocol::{wire_log_enabled, CHECKSUM_LEN, NETWORK_HEADER_LEN, STRUCT_HEADER_LEN};
+use super::protocol::{is_known_family, wire_log_enabled, CHECKSUM_LEN, NETWORK_HEADER_LEN, STRUCT_HEADER_LEN};
 use super::request::{write_max_attempts, WriteError, WriteOutcome, WriteSpec};
+
+/// Wire `in_out_flag`: 0 = input side of a channel, 1 = output side.
+pub fn in_out_flag(direction: EqDirection) -> u8 {
+    match direction {
+        EqDirection::Input => 0,
+        EqDirection::Output => 1,
+    }
+}
+
+/// Wire `segment` of parametric band `band_index` (0-7). The fixed 10-slot
+/// chain reserves 0 for HP and 9 for LP, so band `i` is always `i + 1` —
+/// passing it unshifted silently aims band 0 at the HP crossover slot.
+pub fn eq_band_segment(band_index: u8) -> u8 {
+    band_index + 1
+}
+
+/// Wire `segment` of a crossover slot, per the reference's `getCrossoverSegment`.
+pub fn crossover_segment(slot: CrossoverSlotKind) -> u8 {
+    match slot {
+        CrossoverSlotKind::Hp => 0,
+        CrossoverSlotKind::Lp => 9,
+    }
+}
 
 /// Routes a "set output mute" request to the adapter for `firmware_family`.
 /// A family this dispatch doesn't recognize (`None`/unknown) builds no
@@ -35,85 +63,45 @@ use super::request::{write_max_attempts, WriteError, WriteOutcome, WriteSpec};
 /// silently send bytes the device might misinterpret instead of an honest
 /// error (see `commands/live_control.rs`).
 pub fn build_set_output_mute(firmware_family: Option<&str>, channel_index: u8, muted: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_output_mute(channel_index, muted)),
-        Some("1.1.9") => Some(super::write_v119::build_set_output_mute(channel_index, muted)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_output_mute(channel_index, muted))
 }
 
 pub fn build_set_input_mute(firmware_family: Option<&str>, channel_index: u8, muted: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_input_mute(channel_index, muted)),
-        Some("1.1.9") => Some(super::write_v119::build_set_input_mute(channel_index, muted)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_input_mute(channel_index, muted))
 }
 
 pub fn build_set_output_trim(firmware_family: Option<&str>, channel_index: u8, trim_db: f32) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_output_trim(channel_index, trim_db)),
-        Some("1.1.9") => Some(super::write_v119::build_set_output_trim(channel_index, trim_db)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_output_trim(channel_index, trim_db))
 }
 
 pub fn build_set_output_volume(firmware_family: Option<&str>, channel_index: u8, volume_db: f32) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_output_volume(channel_index, volume_db)),
-        Some("1.1.9") => Some(super::write_v119::build_set_output_volume(channel_index, volume_db)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_output_volume(channel_index, volume_db))
 }
 
 pub fn build_set_delay_in(firmware_family: Option<&str>, channel_index: u8, delay_ms: f32) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_delay_in(channel_index, delay_ms)),
-        Some("1.1.9") => Some(super::write_v119::build_set_delay_in(channel_index, delay_ms)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_delay_in(channel_index, delay_ms))
 }
 
 pub fn build_set_delay_out(firmware_family: Option<&str>, channel_index: u8, delay_ms: f32) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_delay_out(channel_index, delay_ms)),
-        Some("1.1.9") => Some(super::write_v119::build_set_delay_out(channel_index, delay_ms)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_delay_out(channel_index, delay_ms))
 }
 
 pub fn build_set_phase_invert(firmware_family: Option<&str>, channel_index: u8, inverted: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_phase_invert(channel_index, inverted)),
-        Some("1.1.9") => Some(super::write_v119::build_set_phase_invert(channel_index, inverted)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_phase_invert(channel_index, inverted))
 }
 
 /// Routes an amp-level standby set to the adapter for `firmware_family`.
 /// Amp-wide, not per channel — `chx` is 0 and there is no channel parameter.
 pub fn build_set_standby(firmware_family: Option<&str>, standby: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_standby(standby)),
-        Some("1.1.9") => Some(super::write_v119::build_set_standby(standby)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_standby(standby))
 }
 
 pub fn build_set_rotary_lock(firmware_family: Option<&str>, locked: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_rotary_lock(locked)),
-        Some("1.1.9") => Some(super::write_v119::build_set_rotary_lock(locked)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_rotary_lock(locked))
 }
 
 pub fn build_set_power_mode(firmware_family: Option<&str>, channel_index: u8, mode: PowerMode) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_power_mode(channel_index, mode)),
-        Some("1.1.9") => Some(super::write_v119::build_set_power_mode(channel_index, mode)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_power_mode(channel_index, mode))
 }
 
 pub fn build_set_eq_filter_type(
@@ -124,11 +112,7 @@ pub fn build_set_eq_filter_type(
     type_code: u8,
     active: bool,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_eq_filter_type(channel_index, in_out_flag, segment, type_code, active)),
-        Some("1.1.9") => Some(super::write_v119::build_set_eq_filter_type(channel_index, in_out_flag, segment, type_code, active)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_eq_filter_type(channel_index, in_out_flag, segment, type_code, active))
 }
 
 pub fn build_set_eq_freq(
@@ -138,11 +122,7 @@ pub fn build_set_eq_freq(
     segment: u8,
     freq_hz: f32,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_eq_freq(channel_index, in_out_flag, segment, freq_hz)),
-        Some("1.1.9") => Some(super::write_v119::build_set_eq_freq(channel_index, in_out_flag, segment, freq_hz)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_eq_freq(channel_index, in_out_flag, segment, freq_hz))
 }
 
 pub fn build_set_eq_gain(
@@ -152,11 +132,7 @@ pub fn build_set_eq_gain(
     band_index: u8,
     gain_db: f32,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_eq_gain(channel_index, in_out_flag, band_index, gain_db)),
-        Some("1.1.9") => Some(super::write_v119::build_set_eq_gain(channel_index, in_out_flag, band_index, gain_db)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_eq_gain(channel_index, in_out_flag, band_index, gain_db))
 }
 
 pub fn build_set_eq_q(
@@ -166,11 +142,7 @@ pub fn build_set_eq_q(
     band_index: u8,
     q: f32,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_eq_q(channel_index, in_out_flag, band_index, q)),
-        Some("1.1.9") => Some(super::write_v119::build_set_eq_q(channel_index, in_out_flag, band_index, q)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_eq_q(channel_index, in_out_flag, band_index, q))
 }
 
 pub fn build_set_matrix_crosspoint(
@@ -180,15 +152,26 @@ pub fn build_set_matrix_crosspoint(
     gain_db: f32,
     active: bool,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active)),
-        Some("1.1.9") => Some(super::write_v119::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active))
 }
 
 /// `threshold_dbu` is ignored on 1.1.8, whose wire body carries only the
 /// enable flag — see `write_v118::build_set_noise_gate`.
+///
+/// 1.1.9 is the one write with a divergent body: the reference documents a
+/// 2-byte `[enable][threshold]` form, `threshold_dbu` as a signed byte. This
+/// matches `CvrFirmwareCapability.noise_gate_threshold`, which decides
+/// whether the UI offers a threshold at all.
+///
+/// **Unresolved: the vendor source disagrees with the reference here.** It
+/// never sends a 2-byte FC=69. It sends the enable flag on FC=69 (1 byte,
+/// `Variable\Channels_out.cs:772`) and the threshold on **FC=87**
+/// `Noise_Gate` (1 signed byte, `Channels_out.cs:799-805`) as two separate
+/// packets — and only 1.1.9 stores a threshold at all (`SynData_Flow_n.cs:67`;
+/// the vendor fabricates `-70` when upconverting a 1.1.8 payload). So this
+/// body is likely wrong, inherited from a reference bug rather than a capture.
+/// Left as-is: no 1.1.9 hardware to ground-truth against, and the threshold
+/// has no readback and is not hashed. Port FC=87 once such a unit exists.
 pub fn build_set_noise_gate(
     firmware_family: Option<&str>,
     channel_index: u8,
@@ -197,7 +180,10 @@ pub fn build_set_noise_gate(
 ) -> Option<Vec<u8>> {
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_noise_gate(channel_index, enabled)),
-        Some("1.1.9") => Some(super::write_v119::build_set_noise_gate(channel_index, enabled, threshold_dbu)),
+        Some("1.1.9") => {
+            let body = [if enabled { 0x00 } else { 0x01 }, threshold_dbu as u8];
+            Some(super::protocol::build_control_packet(super::write_v118::FC_NOISE_GATE, channel_index, 0, 0, 1, &body))
+        }
         _ => None,
     }
 }
@@ -210,11 +196,7 @@ pub fn build_set_rms_limiter(
     attack_ms: u16,
     release_multiplier: u8,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)),
-        Some("1.1.9") => Some(super::write_v119::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier))
 }
 
 pub fn build_set_peak_limiter(
@@ -225,11 +207,7 @@ pub fn build_set_peak_limiter(
     hold_ms: u16,
     release_ms: u16,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms)),
-        Some("1.1.9") => Some(super::write_v119::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms))
 }
 
 pub fn build_set_channel_name(
@@ -238,36 +216,20 @@ pub fn build_set_channel_name(
     in_out_flag: u8,
     name: &str,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_channel_name(channel_index, in_out_flag, name)),
-        Some("1.1.9") => Some(super::write_v119::build_set_channel_name(channel_index, in_out_flag, name)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_channel_name(channel_index, in_out_flag, name))
 }
 
 pub fn build_set_source_select(firmware_family: Option<&str>, channel_index: u8, source_code: u8) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_source_select(channel_index, source_code)),
-        Some("1.1.9") => Some(super::write_v119::build_set_source_select(channel_index, source_code)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_source_select(channel_index, source_code))
 }
 
 pub fn build_set_analog_input(firmware_family: Option<&str>, channel_index: u8, analog_input_index: u8) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_analog_input(channel_index, analog_input_index)),
-        Some("1.1.9") => Some(super::write_v119::build_set_analog_input(channel_index, analog_input_index)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_analog_input(channel_index, analog_input_index))
 }
 
 /// `pair_index`, not a channel index — see `write_v118::build_set_output_bridge`.
 pub fn build_set_output_bridge(firmware_family: Option<&str>, pair_index: u8, bridged: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_output_bridge(pair_index, bridged)),
-        Some("1.1.9") => Some(super::write_v119::build_set_output_bridge(pair_index, bridged)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_output_bridge(pair_index, bridged))
 }
 
 /// One whole 10-band EQ chain in a single packet — see
@@ -281,39 +243,31 @@ pub fn build_set_eq_chain(
     bands: &[super::write_v118::EqChainBand; super::write_v118::EQ_CHAIN_BANDS],
     chain_bypass: u8,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass)),
-        Some("1.1.9") => Some(super::write_v119::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass))
 }
 
 pub fn build_set_fir_bypass(firmware_family: Option<&str>, channel_index: u8, bypassed: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_fir_bypass(channel_index, bypassed)),
-        Some("1.1.9") => Some(super::write_v119::build_set_fir_bypass(channel_index, bypassed)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_fir_bypass(channel_index, bypassed))
+}
+
+pub fn build_set_fir_data(firmware_family: Option<&str>, channel_index: u8, name: &str, coefficients: &[f32]) -> Option<Vec<Vec<u8>>> {
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_fir_data(channel_index, name, coefficients))
+}
+
+pub fn build_clear_fir_data(firmware_family: Option<&str>, channel_index: u8) -> Option<Vec<u8>> {
+    is_known_family(firmware_family).then(|| super::write_v118::build_clear_fir_data(channel_index))
 }
 
 /// Auto travels on its own function code (FC=48), not inside the FC=55 record
 /// — see `write_v118::build_set_rms_limiter_auto`.
 pub fn build_set_rms_limiter_auto(firmware_family: Option<&str>, channel_index: u8, auto: bool) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_rms_limiter_auto(channel_index, auto)),
-        Some("1.1.9") => Some(super::write_v119::build_set_rms_limiter_auto(channel_index, auto)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_rms_limiter_auto(channel_index, auto))
 }
 
 /// Amp-level, not per channel: `chx` is always 0 (see
 /// `write_v118::build_set_device_name`).
 pub fn build_set_device_name(firmware_family: Option<&str>, name: &str) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_device_name(name)),
-        Some("1.1.9") => Some(super::write_v119::build_set_device_name(name)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_device_name(name))
 }
 
 /// `segment` selects the source family: 0=Analog, 1=Dante. Trim and delay
@@ -325,11 +279,7 @@ pub fn build_set_source_trim(
     trim_db: f32,
     delay_ms: f32,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
-        Some("1.1.9") => Some(super::write_v119::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms))
 }
 
 /// `first`/`second` are `FC_SOURCE_SELECT` source codes (0=Analog, 1=Dante)
@@ -344,15 +294,7 @@ pub fn build_set_backup_priority(
     enabled: bool,
     threshold_db: i8,
 ) -> Option<Vec<u8>> {
-    match firmware_family {
-        Some("1.1.8") => {
-            Some(super::write_v118::build_set_backup_priority(channel_index, first, second, enabled, threshold_db))
-        }
-        Some("1.1.9") => {
-            Some(super::write_v119::build_set_backup_priority(channel_index, first, second, enabled, threshold_db))
-        }
-        _ => None,
-    }
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_backup_priority(channel_index, first, second, enabled, threshold_db))
 }
 
 /// Fixed 10-byte follow-up packet the device expects after any crossover

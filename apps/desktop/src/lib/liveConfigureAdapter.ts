@@ -1,4 +1,4 @@
-import { notifications } from "./notify";
+import { toast } from "@heroui/react";
 
 import {
   commands,
@@ -172,12 +172,7 @@ async function reportWrite(
   const result = await call;
   if (result.status === "error") {
     console.error(`${label} failed`, result.error);
-    notifications.show({
-      color: "red",
-      title: `${label} failed`,
-      message: result.error.message,
-      autoClose: false,
-    });
+    toast.danger(`${label} failed`, { description: result.error.message, timeout: 0 });
     return actionFailed(result.error.message);
   }
   notifySuccess(label, result.data);
@@ -196,9 +191,8 @@ async function reportWrite(
  * missing one costs nothing, whereas missing a failure costs a wrong value on
  * the amp.
  *
- * Rolling goes through `showRollingNotification` rather than a stable `id`,
- * because `notifications.show()` silently *ignores* a repeated id instead of
- * replacing it — see that helper's doc for why.
+ * Rolling goes through `showRollingNotification`, since HeroUI's `toast()`
+ * always stacks — see that helper's doc.
  *
  * Two deliberate silences:
  * - a command whose packets were *all* coalesced never reached the wire; the
@@ -214,12 +208,7 @@ function notifySuccess(label: string, ack: LiveWriteAck): void {
   if (ack.attempts > 1) parts.push(`${ack.attempts} attempts`);
   if (ack.coalesced > 0) parts.push(`${ack.coalesced} coalesced`);
 
-  showRollingNotification(label, {
-    color: "green",
-    title: `${label} confirmed`,
-    message: `Acknowledged by device — ${parts.join(", ")}`,
-    autoClose: 1500,
-  });
+  showRollingNotification(label, `${label} confirmed`, `Acknowledged by device — ${parts.join(", ")}`);
 }
 
 /** Every write goes straight to the device, and each call now resolves only
@@ -252,6 +241,15 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     },
     async setChannelFirBypass(channelIndex, bypassed) {
       return reportWrite("Set FIR bypass", commands.liveControlSetFirBypass(deviceId, channelIndex, bypassed));
+    },
+    async setChannelFirData(channelIndex, name, coefficients) {
+      return reportWrite(
+        "Import FIR data",
+        commands.liveControlSetChannelFirData(deviceId, channelIndex, name, coefficients),
+      );
+    },
+    async clearChannelFirData(channelIndex) {
+      return reportWrite("Clear FIR data", commands.liveControlClearChannelFirData(deviceId, channelIndex));
     },
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));

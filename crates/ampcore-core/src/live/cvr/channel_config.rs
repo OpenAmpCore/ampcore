@@ -109,9 +109,8 @@ pub struct ChannelConfigSnapshot {
 /// channel 0 starting at offset 0 (the driver does this slicing before
 /// calling in — see `driver.rs`).
 pub fn parse_channel_config(firmware_family: Option<&str>, body: &[u8]) -> Option<ChannelConfigSnapshot> {
-    match firmware_family {
-        Some("1.1.8") => super::channel_config_v118::parse_channel_config(body),
-        Some("1.1.9") => super::channel_config_v119::parse_channel_config(body),
-        _ => None,
+    if !super::protocol::is_known_family(firmware_family) {
+        return None;
     }
+    super::channel_config_v118::parse_channel_config(body)
 }

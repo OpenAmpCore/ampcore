@@ -9,12 +9,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use ampcore_core::data::capability::cvr::{cvr_param_ranges, AmpParamRanges};
 use ampcore_core::data::capability::{eq_filter_capabilities, EqFilterCapabilityEntry};
 use ampcore_core::data::project::{
-    CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch, PeakLimiter, RmsLimiter,
+    CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
 };
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::{preset, write};
-use ampcore_core::live::driver::all_drivers;
 use ampcore_core::live::cvr::request::WriteOutcome;
 use ampcore_core::live::state::{DiscoveredDevice, EventEmitter, LiveDeviceState, LiveEvent, LiveEventSink, LiveWriteAck};
 use ampcore_core::live::write_helpers::{self, send_write, WriteTally};
@@ -41,28 +40,12 @@ fn sink(app: AppHandle, state: &LiveDeviceState) -> LiveEventSink {
 
 #[tauri::command]
 fn discovery_start(app: AppHandle, state: State<LiveDeviceState>) -> Result<(), String> {
-    if !state.0.lock().map_err(|e| e.to_string())?.handles.is_empty() {
-        return Ok(()); // idempotent — already running
-    }
-    // Lock is released before `start()`: the driver locks the same mutex
-    // itself (to store its request/write channels) and it isn't reentrant.
-    let sink = sink(app, &state);
-    let runtime = tauri::async_runtime::handle().inner().clone();
-    let handles: Vec<_> = all_drivers().into_iter().map(|driver| driver.start(sink.clone(), &runtime)).collect();
-    state.0.lock().map_err(|e| e.to_string())?.handles.extend(handles);
-    Ok(())
+    state.start(sink(app, &state), tauri::async_runtime::handle().inner()).map_err(|e| e.message)
 }
 
 #[tauri::command]
 fn discovery_stop(state: State<LiveDeviceState>) -> Result<(), String> {
-    let handles = {
-        let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-        inner.request_tx = None;
-        inner.write_tx = None;
-        std::mem::take(&mut inner.handles)
-    };
-    handles.into_iter().for_each(|h| h.request_stop());
-    Ok(())
+    state.stop().map_err(|e| e.message)
 }
 
 #[tauri::command]
@@ -76,13 +59,7 @@ fn discovery_list(state: State<LiveDeviceState>) -> Result<Vec<DiscoveredDevice>
 /// `live_control_set_poll_subscription`.
 #[tauri::command]
 fn poll_subscribe(state: State<LiveDeviceState>, token: String, device_ids: Vec<String>) -> Result<(), String> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    if device_ids.is_empty() {
-        inner.poll_subscriptions.remove(&token);
-    } else {
-        inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
-    }
-    Ok(())
+    state.set_poll_subscription(token, device_ids).map_err(|e| e.message)
 }
 
 // Writes: the amp's new state comes back via the next FC=27 poll. Each command
@@ -157,18 +134,6 @@ async fn set_rotary_lock(state: State<'_, LiveDeviceState>, device_id: String, l
     send_write(&state, &device_id, |fw| write::build_set_rotary_lock(fw, locked)).await.map(ack).map_err(|e| e.message)
 }
 
-/// Names are fixed-width ASCII on the wire; same rules as desktop's rename commands.
-fn valid_name(name: &str, max: usize) -> Result<&str, String> {
-    let name = name.trim();
-    if !name.is_ascii() || name.bytes().any(|b| b == 0) {
-        return Err("name must be plain ASCII".into());
-    }
-    if name.len() > max {
-        return Err(format!("name is limited to {max} characters"));
-    }
-    Ok(name)
-}
-
 /// `output` picks which side of the channel is renamed (wire `in_out_flag` 1 = output, 0 = input).
 #[tauri::command]
 async fn set_channel_name(
@@ -178,7 +143,7 @@ async fn set_channel_name(
     output: bool,
     name: String,
 ) -> Result<LiveWriteAck, String> {
-    let name = valid_name(&name, CHANNEL_NAME_FIELD_LEN)?;
+    let name = write_helpers::validate_name("channel name", &name, CHANNEL_NAME_FIELD_LEN).map_err(|e| e.message)?;
     send_write(&state, &device_id, |fw| write::build_set_channel_name(fw, channel_index, output as u8, name))
         .await
         .map(ack)
@@ -187,32 +152,12 @@ async fn set_channel_name(
 
 #[tauri::command]
 async fn set_device_name(state: State<'_, LiveDeviceState>, device_id: String, name: String) -> Result<LiveWriteAck, String> {
-    let name = valid_name(&name, DEVICE_NAME_FIELD_LEN)?;
+    let name = write_helpers::validate_name("device name", &name, DEVICE_NAME_FIELD_LEN).map_err(|e| e.message)?;
     send_write(&state, &device_id, |fw| write::build_set_device_name(fw, name)).await.map(ack).map_err(|e| e.message)
 }
 
-// EQ. Both 10-band chains per channel: segment 0 is the HP crossover slot,
-// 1-8 the parametric bands, 9 the LP slot — so a band's wire segment is
-// always its array index + 1. Writing `band_index` unshifted would aim every
-// band-1 edit at the HP crossover instead.
-fn eq_segment(band_index: u8) -> u8 {
-    band_index + 1
-}
-
-fn crossover_segment(slot: CrossoverSlotKind) -> u8 {
-    match slot {
-        CrossoverSlotKind::Hp => 0,
-        CrossoverSlotKind::Lp => 9,
-    }
-}
-
-fn in_out_flag(direction: EqDirection) -> u8 {
-    match direction {
-        EqDirection::Input => 0,
-        EqDirection::Output => 1,
-    }
-}
-
+// EQ. Both 10-band chains per channel; segment mapping lives in core's
+// `write::eq_band_segment`/`crossover_segment`.
 /// Partial update of one parametric band (index 0-7) — port of desktop's
 /// `live_control_set_eq_band`. `filter_type`/`active` share one wire byte
 /// (FC=30), so touching either merges in the other's current value from the
@@ -228,8 +173,8 @@ async fn set_eq_band(
     band_index: u8,
     patch: EqBandPatch,
 ) -> Result<LiveWriteAck, String> {
-    let flag = in_out_flag(direction);
-    let segment = eq_segment(band_index);
+    let flag = write::in_out_flag(direction);
+    let segment = write::eq_band_segment(band_index);
     let mut tally = WriteTally::default();
 
     if patch.filter_type.is_some() || patch.active.is_some() {
@@ -283,8 +228,8 @@ async fn set_crossover_slot(
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
 ) -> Result<LiveWriteAck, String> {
-    let flag = in_out_flag(direction);
-    let segment = crossover_segment(slot);
+    let flag = write::in_out_flag(direction);
+    let segment = write::crossover_segment(slot);
     let mut tally = WriteTally::default();
     let mut wrote_anything = false;
 
@@ -323,27 +268,6 @@ async fn set_crossover_slot(
 // configured threshold. Ported from desktop's
 // `live_control_set_matrix_crosspoint` / `live_control_set_channel_limiter`.
 
-/// Merged RMS stage, as `build_set_rms_limiter` wants it. Pure so the
-/// no-clobber rule has a test that doesn't need a live amp.
-fn merge_rms(patch: &LimiterPatch, rms: &RmsLimiter) -> (bool, f32, u16, u8) {
-    (
-        patch.rms_enabled.unwrap_or(rms.enabled),
-        patch.rms_threshold_vrms.unwrap_or(rms.threshold_vrms) as f32,
-        patch.rms_attack_ms.unwrap_or(rms.attack_ms) as u16,
-        patch.rms_release_multiplier.unwrap_or(rms.release_multiplier) as u8,
-    )
-}
-
-/// Merged peak stage — same rule as `merge_rms`.
-fn merge_peak(patch: &LimiterPatch, peak: &PeakLimiter) -> (bool, f32, u16, u16) {
-    (
-        patch.peak_enabled.unwrap_or(peak.enabled),
-        patch.peak_threshold_vp.unwrap_or(peak.threshold_vp) as f32,
-        patch.peak_hold_ms.unwrap_or(peak.hold_ms) as u16,
-        patch.peak_release_ms.unwrap_or(peak.release_ms) as u16,
-    )
-}
-
 /// FC=55 RMS_LIMITER / FC=54 PEAK_LIMITER. One packet per stage the patch
 /// actually touches — an RMS-only patch leaves the peak stage alone instead
 /// of rewriting it. Both are tallied into the single `LiveWriteAck` the UI
@@ -358,12 +282,7 @@ async fn set_limiter(
     let channel = write_helpers::current_channel(&state, &device_id, channel_index).map_err(|e| e.message)?;
     let mut tally = WriteTally::default();
 
-    if patch.rms_enabled.is_some()
-        || patch.rms_threshold_vrms.is_some()
-        || patch.rms_attack_ms.is_some()
-        || patch.rms_release_multiplier.is_some()
-    {
-        let (enabled, threshold_vrms, attack_ms, release_multiplier) = merge_rms(&patch, &channel.limiter.rms);
+    if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = write_helpers::merge_rms(&patch, &channel.limiter.rms) {
         send_write(&state, &device_id, |fw| {
             write::build_set_rms_limiter(fw, channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)
         })
@@ -371,19 +290,11 @@ async fn set_limiter(
         .map(|o| tally.record(o))
         .map_err(|e| e.message)?;
     }
-
-    if patch.peak_enabled.is_some()
-        || patch.peak_threshold_vp.is_some()
-        || patch.peak_hold_ms.is_some()
-        || patch.peak_release_ms.is_some()
-    {
-        let (enabled, threshold_vp, hold_ms, release_ms) = merge_peak(&patch, &channel.limiter.peak);
-        send_write(&state, &device_id, |fw| {
-            write::build_set_peak_limiter(fw, channel_index, enabled, threshold_vp, hold_ms, release_ms)
-        })
-        .await
-        .map(|o| tally.record(o))
-        .map_err(|e| e.message)?;
+    if let Some((enabled, threshold_vp, hold_ms, release_ms)) = write_helpers::merge_peak(&patch, &channel.limiter.peak) {
+        send_write(&state, &device_id, |fw| write::build_set_peak_limiter(fw, channel_index, enabled, threshold_vp, hold_ms, release_ms))
+            .await
+            .map(|o| tally.record(o))
+            .map_err(|e| e.message)?;
     }
 
     Ok(tally.finish())
@@ -451,50 +362,6 @@ async fn recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slo
         .await
         .map(ack)
         .map_err(|e| e.message)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The one silent-wrong-amp bug in this file: band 0 must land on wire
-    /// segment 1, never on segment 0 (the HP crossover).
-    #[test]
-    fn band_segments_skip_the_crossover_slots() {
-        assert_eq!(eq_segment(0), 1);
-        assert_eq!(eq_segment(7), 8);
-        assert_eq!(crossover_segment(CrossoverSlotKind::Hp), 0);
-        assert_eq!(crossover_segment(CrossoverSlotKind::Lp), 9);
-    }
-
-    /// A patch that touches one limiter field must not rewrite the other
-    /// three: each stage is a whole-record packet, so an unmerged write
-    /// would push a 0 V threshold to a live amp.
-    #[test]
-    fn limiter_patch_preserves_untouched_fields() {
-        let rms = RmsLimiter {
-            enabled: false,
-            threshold_vrms: 31.5,
-            attack_ms: 120.0,
-            release_multiplier: 4.0,
-            auto: false,
-            max_vrms: 0.0,
-        };
-        let patch = LimiterPatch {
-            rms_enabled: Some(true),
-            rms_threshold_vrms: None,
-            rms_attack_ms: None,
-            rms_release_multiplier: None,
-            peak_enabled: None,
-            peak_threshold_vp: None,
-            peak_hold_ms: None,
-            peak_release_ms: None,
-        };
-        assert_eq!(merge_rms(&patch, &rms), (true, 31.5, 120, 4));
-
-        let peak = PeakLimiter { enabled: true, threshold_vp: 44.0, hold_ms: 20.0, release_ms: 300.0, max_vp: 0.0 };
-        assert_eq!(merge_peak(&patch, &peak), (true, 44.0, 20, 300));
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

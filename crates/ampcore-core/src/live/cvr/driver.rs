@@ -7,9 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::data::amp_model::AmpProtocol;
 use crate::data::capability::cvr::rated_rms_voltage_from_firmware_string;
 use crate::data::common::now_millis;
-use crate::live::driver::{AmpDriver, DriverHandle};
 use crate::live::dsp::voltage_to_db;
-use crate::live::state::{DiscoveredDevice, LiveEventSink};
+use crate::live::state::{DiscoveredDevice, DriverHandle, LiveEventSink};
 
 use super::channel_config;
 use super::channel_state;
@@ -141,35 +140,27 @@ impl DeviceStats {
     }
 }
 
-pub struct CvrDriver;
-
-impl AmpDriver for CvrDriver {
-    fn protocol(&self) -> AmpProtocol {
-        AmpProtocol::CvrUdp
+/// Spawns the CVR driver task on `runtime` and returns immediately.
+///
+/// `runtime` is threaded in explicitly (rather than calling `tokio::spawn`)
+/// because this is called from a synchronous command handler that isn't
+/// itself running inside a tokio task — bare `tokio::spawn` would panic with
+/// "no reactor running". Locks `sink.state`, so the caller must not hold it.
+pub fn start(sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHandle {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (request_tx, request_rx) = mpsc::unbounded_channel();
+    let (write_tx, write_rx) = mpsc::unbounded_channel();
+    {
+        let mut inner = sink.state.lock().unwrap();
+        inner.request_tx = Some(request_tx);
+        inner.write_tx = Some(write_tx);
     }
-
-    fn brand(&self) -> &'static str {
-        "CVR"
-    }
-
-    fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHandle {
-        let (stop_tx, stop_rx) = oneshot::channel();
-        let (request_tx, request_rx) = mpsc::unbounded_channel();
-        let (write_tx, write_rx) = mpsc::unbounded_channel();
-        {
-            let mut inner = sink.state.lock().unwrap();
-            inner.request_tx = Some(request_tx);
-            inner.write_tx = Some(write_tx);
+    runtime.spawn(async move {
+        if let Err(e) = run(sink, stop_rx, request_rx, write_rx, AmpProtocol::CvrUdp.slug(), "CVR").await {
+            eprintln!("[cvr driver] exited with error: {e}");
         }
-        let protocol_slug = self.protocol().slug();
-        let brand = self.brand();
-        runtime.spawn(async move {
-            if let Err(e) = run(sink, stop_rx, request_rx, write_rx, protocol_slug, brand).await {
-                eprintln!("[cvr driver] exited with error: {e}");
-            }
-        });
-        DriverHandle::new(stop_tx)
-    }
+    });
+    DriverHandle { stop_tx }
 }
 
 async fn run(
@@ -808,7 +799,7 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
             sink.touch_by_ip(&ip);
             // Firmware string only arrives via BASIC_INFO, not the heartbeat
             // body itself — dispatch to the firmware-specific adapter
-            // (telemetry_v118/telemetry_v119) by the family already detected
+            // (see `telemetry::parse_heartbeat_telemetry`) by the family already detected
             // at discovery time. Unrecognized families get no telemetry.
             let device = {
                 let inner = sink.state.lock().unwrap();

@@ -4,7 +4,6 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Button, Chip, Modal, Spinner, Switch } from "@heroui/react";
 import { setPreference, usePreference } from "../lib/preferences";
-import { setListPreference, useListPreference } from "../lib/listPreferences";
 import { MultiSelect } from "./MultiSelect";
 
 const PEAK_HOLD_OPTIONS = [
@@ -83,8 +82,8 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const autoUpdateChecks = usePreference("autoUpdateChecks");
   const showFingerprintMenu = usePreference("showFingerprintMenu");
   const showRawTelemetry = usePreference("showRawTelemetry");
-  const peakHoldSurfaces = useListPreference("peakHoldSurfaces");
-  const limiterThresholdSurfaces = useListPreference("limiterThresholdSurfaces");
+  const peakHoldSurfaces = usePreference("peakHoldSurfaces");
+  const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
 
   useEffect(() => {
     if (!opened) return;
@@ -151,7 +150,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                   <MultiSelect
                     data={PEAK_HOLD_OPTIONS}
                     values={peakHoldSurfaces}
-                    onChange={(values) => setListPreference("peakHoldSurfaces", values)}
+                    onChange={(values) => setPreference("peakHoldSurfaces", values)}
                   />
                 </SettingRow>
 
@@ -159,7 +158,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                   <MultiSelect
                     data={LIMITER_THRESHOLD_OPTIONS}
                     values={limiterThresholdSurfaces}
-                    onChange={(values) => setListPreference("limiterThresholdSurfaces", values)}
+                    onChange={(values) => setPreference("limiterThresholdSurfaces", values)}
                   />
                 </SettingRow>
               </SettingsSection>

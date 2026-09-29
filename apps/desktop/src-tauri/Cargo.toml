@@ -20,16 +20,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 ampcore-core = { path = "../../../crates/ampcore-core" }
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-process = "2"
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 tauri-specta = { version = "2.0.0-rc.25", features = ["derive", "typescript"] }
 specta-typescript = "0.0.12"
-uuid = { version = "1.23.4", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["net", "time", "rt-multi-thread", "macros", "sync"] }
-if-addrs = "0.13"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

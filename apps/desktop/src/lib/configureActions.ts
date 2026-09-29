@@ -28,9 +28,11 @@ import { actionFailed, toActionResult, type ActionResult } from "./actionResult"
  * `ConfigureCapabilities.ohmsEditable` so it explains itself rather than
  * sitting inert. Every other member has a live wire command. FIR is partly
  * here: its bypass flag (FC=44) is an ordinary action on both sources, while
- * importing or clearing coefficients has none — that needs outbound
- * fragmentation the write path doesn't have, and the FIR tab says so rather
- * than offering a dead control.
+ * `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) are
+ * Direct-Edit-only — coefficients aren't part of the project file (see
+ * `AmpChannel.fir_bypassed`, the only persisted FIR field), so Project mode
+ * leaves them undefined and the FIR tab says so rather than offering a dead
+ * control.
  *
  * Note that an early-return on `undefined` is silent by design *only* where
  * a capability flag already explains the absence. Adding a new optional
@@ -49,6 +51,12 @@ export interface ConfigureActions {
   setChannelOutputMute(channelIndex: number, muted: boolean): Promise<ActionResult>;
   setChannelFirBypass(channelIndex: number, bypassed: boolean): Promise<ActionResult>;
   setChannelPowerMode(channelIndex: number, mode: PowerMode): Promise<ActionResult>;
+
+  /** FC=43 Import — coefficients live on the amp only, never in the project
+   * file, so this is undefined outside Direct Edit. */
+  setChannelFirData?(channelIndex: number, name: string, coefficients: number[]): Promise<ActionResult>;
+  /** FC=43 Remove — same live-only reasoning as `setChannelFirData`. */
+  clearChannelFirData?(channelIndex: number): Promise<ActionResult>;
 
   setChannelName?(channelIndex: number, side: EqDirection, name: string | null): Promise<ActionResult>;
   setOutputBridge?(pairLeaderChannelIndex: number, bridged: boolean): Promise<ActionResult>;
