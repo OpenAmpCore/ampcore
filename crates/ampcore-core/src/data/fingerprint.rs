@@ -40,8 +40,9 @@
 //! coefficients are read-only and absent from the project file: a live amp with
 //! a filter loaded could never match its offline twin, which would lock the
 //! editor on a difference no push could resolve. Not covered at all: the FIR
-//! coefficients themselves (not in FC=27), the noise-gate threshold (no 1.1.8
-//! readback), MAC/IP (identity, not config).
+//! coefficients themselves (not in FC=27) and MAC/IP (identity, not config).
+//! The noise-gate threshold is hashed only where the firmware stores it (1.1.9+,
+//! read back by `channel_config_v119`) and only while the gate is on.
 //!
 //! **What the JSON shows vs. what is hashed.** The JSON shows what the amp
 //! actually stores, in natural units, including a bypassed band's or a
@@ -69,7 +70,7 @@ use serde::Serialize;
 use specta::Type;
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-use super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
+use super::capability::{resolve, CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use super::device_link::{resolve_device_model, DeviceModelLink};
 use super::project::{
     AmpAssignment, AmpChannel, BackupPriority, ChannelEq, ChannelSource, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint,
@@ -110,7 +111,9 @@ use crate::live::state::DiscoveredDevice;
 ///
 /// 10: AES3 removed (no supported model has it), dropping its trim/delay pair
 /// from every channel's digest.
-pub const FINGERPRINT_VERSION: u8 = 10;
+///
+/// 11: noise-gate threshold added (1.1.9+ only, while the gate is on).
+pub const FINGERPRINT_VERSION: u8 = 11;
 
 /// `_XXXX` — separator plus 4 hex chars appended to an output name.
 pub const HASH_SUFFIX_LEN: usize = 5;
@@ -281,6 +284,9 @@ pub struct ChannelAmpCanonical {
     pub output_trim_db: f64,
     pub output_volume_db: f64,
     pub noise_gate_enabled: bool,
+    /// Whole dBu. `None` when the firmware stores no threshold (1.1.8) or the
+    /// gate is off, where it doesn't affect the sound.
+    pub noise_gate_threshold_dbu: Option<f64>,
     /// Trimmed; empty when unnamed or still the default "In{n}" label.
     pub input_name: String,
     pub input_muted: bool,
@@ -388,6 +394,8 @@ struct ChannelInput<'a> {
     output_eq: &'a ChannelEq,
     limiter: &'a Limiter,
     noise_gate_enabled: bool,
+    /// `None` where the firmware stores no threshold.
+    noise_gate_threshold_dbu: Option<f64>,
     output_phase_inverted: bool,
     input_name: Option<&'a str>,
     output_name: Option<&'a str>,
@@ -410,7 +418,9 @@ struct AmpInput<'a> {
 }
 
 impl<'a> ChannelInput<'a> {
-    fn from_project(channel: &'a AmpChannel) -> Self {
+    /// `has_gate_threshold`: whether the planned firmware stores a gate
+    /// threshold at all (`CvrFirmwareCapability.noise_gate_threshold`).
+    fn from_project(channel: &'a AmpChannel, has_gate_threshold: bool) -> Self {
         Self {
             channel_index: channel.channel_index,
             source: Some(channel.source),
@@ -424,6 +434,7 @@ impl<'a> ChannelInput<'a> {
             output_eq: &channel.output_eq,
             limiter: &channel.limiter,
             noise_gate_enabled: channel.noise_gate_enabled,
+            noise_gate_threshold_dbu: has_gate_threshold.then_some(channel.noise_gate_threshold_dbu),
             output_phase_inverted: channel.output_phase_inverted,
             input_name: channel.input_name.as_deref(),
             output_name: channel.output_name.as_deref(),
@@ -452,6 +463,7 @@ impl<'a> ChannelInput<'a> {
             output_eq: &config.output_eq,
             limiter: &config.limiter,
             noise_gate_enabled: config.noise_gate_enabled,
+            noise_gate_threshold_dbu: config.noise_gate_threshold_dbu.map(f64::from),
             output_phase_inverted: config.output_phase_inverted,
             input_name: config.input_name.as_deref(),
             output_name: config.output_name.as_deref(),
@@ -510,7 +522,9 @@ pub fn fingerprint_project_amp(
         mac: assignment.mac.clone(),
         label: assignment.device_name.clone(),
     };
-    let inputs = channels.into_iter().map(ChannelInput::from_project).collect();
+    let has_gate_threshold =
+        model.is_some_and(|m| resolve(m, assignment.firmware_version.as_deref()).firmware.noise_gate_threshold);
+    let inputs = channels.into_iter().map(|c| ChannelInput::from_project(c, has_gate_threshold)).collect();
     let amp_input = AmpInput {
         device_name: assignment.device_name.as_deref(),
         status: AmpStatus::default(),
@@ -777,6 +791,10 @@ fn canonical_amp_fields(input: &ChannelInput, matrix_input_count: u32) -> Channe
         output_trim_db: round_to_step(input.output_trim_db, GAIN_STEPS),
         output_volume_db: round_to_step(input.output_volume_db, GAIN_STEPS),
         noise_gate_enabled: input.noise_gate_enabled,
+        noise_gate_threshold_dbu: input
+            .noise_gate_threshold_dbu
+            .filter(|_| input.noise_gate_enabled)
+            .map(|t| round_to_step(t, WHOLE_STEPS)),
         input_name: canonical_input_name(input.channel_index, input.input_name),
         input_muted: input.input_muted,
         output_muted: input.output_muted,
@@ -1016,6 +1034,7 @@ fn encode_channel_amp(h: &mut HashInput, channel_index: u32, speaker_hash: u16, 
     h.i32(steps(fields.output_trim_db, GAIN_STEPS));
     h.i32(steps(fields.output_volume_db, GAIN_STEPS));
     h.bool(fields.noise_gate_enabled);
+    h.opt_i32(fields.noise_gate_threshold_dbu.map(|t| steps(t, WHOLE_STEPS)));
     h.str(&fields.input_name);
     h.bool(fields.input_muted);
     h.bool(fields.output_muted);
@@ -1156,7 +1175,11 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Source", source);
         eq_entries(&mut out, &group, "Input EQ", &fields.input_eq);
         push_entry(&mut out, &group, "Input delay", format!("{:.2} ms", fields.delay_in_ms));
-        push_entry(&mut out, &group, "Noise gate", if fields.noise_gate_enabled { "on" } else { "off" });
+        let gate = match (fields.noise_gate_enabled, fields.noise_gate_threshold_dbu) {
+            (true, Some(threshold)) => format!("on · {threshold:+.0} dBu"),
+            (enabled, _) => on_off(enabled).to_string(),
+        };
+        push_entry(&mut out, &group, "Noise gate", gate);
         let name = if fields.input_name.is_empty() { "(default)".to_string() } else { fields.input_name.clone() };
         push_entry(&mut out, &group, "Name", name);
         push_entry(&mut out, &group, "Mute", on_off(fields.input_muted));
@@ -1343,16 +1366,6 @@ pub fn split_hash_suffix(name: &str) -> (&str, Option<String>) {
     (name, None)
 }
 
-/// Builds `"<base>_<hash>"`, truncating the base so the whole name fits
-/// `name_max_len` bytes (`AmpParamRanges.channel_name_max_length`). Non-ASCII
-/// characters are dropped — the device name field is ASCII only.
-#[allow(dead_code)] // used once the name-write step of the online/offline phase lands
-pub fn embed_hash_in_name(base: &str, hash: &str, name_max_len: usize) -> String {
-    let base_max = name_max_len.saturating_sub(HASH_SUFFIX_LEN);
-    let base: String = base.trim().chars().filter(|c| c.is_ascii()).take(base_max).collect();
-    format!("{base}_{hash}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::project::{PeakLimiter, RmsLimiter};
@@ -1396,6 +1409,7 @@ mod tests {
             output_eq: eq,
             limiter,
             noise_gate_enabled: false,
+            noise_gate_threshold_dbu: None,
             output_phase_inverted: false,
             input_name: None,
             output_name: None,
@@ -1489,6 +1503,28 @@ mod tests {
         // A channel holding only the unit impulse has no filter loaded.
         attach_fir_stats(&mut fp, &[snapshot(1)]);
         assert!(!fp.channels[0].fir.as_ref().unwrap().loaded);
+    }
+
+    /// The 1.1.9 gate threshold counts only while the gate is on, and a
+    /// firmware without one (`None`) hashes the same whatever the project holds.
+    #[test]
+    fn gate_threshold_is_hashed_only_where_stored_and_while_on() {
+        let limiter = limiter();
+        let eq = eq(0.1, 1.41);
+        let gate = |enabled: bool, threshold: Option<f64>| ChannelInput {
+            noise_gate_enabled: enabled,
+            noise_gate_threshold_dbu: threshold,
+            ..input(&eq, &limiter, 0.0)
+        };
+
+        assert_ne!(amp_hash(vec![gate(true, Some(-40.0))], 0), amp_hash(vec![gate(true, Some(-30.0))], 0));
+        assert_eq!(amp_hash(vec![gate(false, Some(-40.0))], 0), amp_hash(vec![gate(false, Some(-30.0))], 0));
+        assert_eq!(
+            amp_hash(vec![gate(true, Some(-40.0))], 0),
+            amp_hash(vec![gate(true, Some(-40.2))], 0),
+            "whole dBu, as the wire stores it"
+        );
+        assert_ne!(amp_hash(vec![gate(true, None)], 0), amp_hash(vec![gate(true, Some(-40.0))], 0));
     }
 
     #[test]
@@ -1634,11 +1670,8 @@ mod tests {
     }
 
     #[test]
-    fn name_suffix_round_trip() {
-        let name = embed_hash_in_name("  Top Left Speaker ", "A91C", 16);
-        assert_eq!(name, "Top Left Sp_A91C");
-        assert_eq!(name.len(), 16);
-        assert_eq!(split_hash_suffix(&name), ("Top Left Sp", Some("A91C".to_string())));
+    fn name_suffix_split() {
+        assert_eq!(split_hash_suffix("Top Left Sp_A91C"), ("Top Left Sp", Some("A91C".to_string())));
         assert_eq!(split_hash_suffix("Sub_a91c").1.as_deref(), Some("A91C"));
         assert_eq!(split_hash_suffix("Sub_XYZ1"), ("Sub_XYZ1", None));
         assert_eq!(split_hash_suffix("Sub"), ("Sub", None));

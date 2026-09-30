@@ -4,7 +4,6 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
-	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	projectsList: () => typedError<Project[], AppError>(__TAURI_INVOKE("projects_list")),
 	projectsGet: (id: string) => typedError<{
 	id: string,
@@ -106,6 +105,16 @@ export const commands = {
 	 *  stages) — Output tab's Limiter sub-tab.
 	 */
 	projectsSetChannelLimiter: (projectId: string, assignmentId: string, channelIndex: number, patch: LimiterPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_limiter", { projectId, assignmentId, channelIndex, patch })),
+	/**
+	 *  Copies one channel section (an EQ chain or a limiter stage) for pasting —
+	 *  see `data/channel_clipboard.rs`. Read-only.
+	 */
+	projectsCopyChannelSection: (projectId: string, assignmentId: string, channelIndex: number, section: ClipSection) => typedError<ChannelClip, AppError>(__TAURI_INVOKE("projects_copy_channel_section", { projectId, assignmentId, channelIndex, section })),
+	/**
+	 *  Pastes a `ChannelClip` into one channel section. The clip may come from a
+	 *  project or a live amp alike.
+	 */
+	projectsPasteChannelSection: (projectId: string, assignmentId: string, channelIndex: number, section: ClipSection, clip: ChannelClip) => typedError<Project, AppError>(__TAURI_INVOKE("projects_paste_channel_section", { projectId, assignmentId, channelIndex, section, clip })),
 	/**
 	 *  Partial update of a channel's noise gate — Output tab. The threshold is
 	 *  always persisted regardless of firmware; the frontend only shows it as
@@ -284,9 +293,8 @@ export const commands = {
 	 */
 	liveControlSetMatrixCrosspoint: (deviceId: string, channelIndex: number, sourceIndex: number, gainDb: number | null, active: boolean | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_matrix_crosspoint", { deviceId, channelIndex, sourceIndex, gainDb, active })),
 	/**
-	 *  FC=69 NOISE_GATE. `threshold_dbu` is only carried on 1.1.9+ — on 1.1.8 the
-	 *  wire body is the enable flag alone, matching
-	 *  `CvrFirmwareCapability.noise_gate_threshold`.
+	 *  FC=69 NOISE_GATE, plus FC=87 for the threshold on 1.1.9+ — on 1.1.8 only
+	 *  the enable flag is sent, matching `CvrFirmwareCapability.noise_gate_threshold`.
 	 */
 	liveControlSetChannelNoiseGate: (deviceId: string, channelIndex: number, enabled: boolean, thresholdDbu: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_noise_gate", { deviceId, channelIndex, enabled, thresholdDbu })),
 	/**
@@ -299,6 +307,17 @@ export const commands = {
 	 *  from the current snapshot (see `current_channel`).
 	 */
 	liveControlSetChannelLimiter: (deviceId: string, channelIndex: number, patch: LimiterPatch) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_limiter", { deviceId, channelIndex, patch })),
+	/**
+	 *  Copies one channel section out of the last FC=27 snapshot — see
+	 *  `data/channel_clipboard.rs`. Reads the cache, sends nothing.
+	 */
+	liveControlCopyChannelSection: (deviceId: string, channelIndex: number, section: ClipSection) => typedError<ChannelClip, AppError>(__TAURI_INVOKE("live_control_copy_channel_section", { deviceId, channelIndex, section })),
+	/**
+	 *  Pastes a `ChannelClip` onto a live channel: an EQ is one FC=52 whole-chain
+	 *  write, a limiter stage its FC=54/55 record (plus the other stage when the
+	 *  peak floor is raised). Planned in core, encoded by `action_packets`.
+	 */
+	liveControlPasteChannelSection: (deviceId: string, channelIndex: number, section: ClipSection, clip: ChannelClip) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_paste_channel_section", { deviceId, channelIndex, section, clip })),
 	/**
 	 *  FC=77 SPEAKER_NAME. `direction` picks which side of the channel is
 	 *  renamed — the only wire difference is `in_out_flag`.
@@ -374,7 +393,7 @@ export const commands = {
 	liveControlSetFirBypass: (deviceId: string, channelIndex: number, bypassed: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_fir_bypass", { deviceId, channelIndex, bypassed })),
 	/**
 	 *  FC=43 write (the vendor's Import): a 2093-byte frame that needs outbound
-	 *  fragmentation (see `send_fragmented_write`/`fir::build_set_fir_data`).
+	 *  fragmentation (see `send_writes`/`fir::build_set_fir_data`).
 	 *  `coefficients` longer than the device's fixed 512-tap array is rejected —
 	 *  silently truncating an import would drop the tail of the caller's filter.
 	 */
@@ -1163,6 +1182,11 @@ export type ChannelAmpCanonical = {
 	outputTrimDb: number | null,
 	outputVolumeDb: number | null,
 	noiseGateEnabled: boolean,
+	/**
+	 *  Whole dBu. `None` when the firmware stores no threshold (1.1.8) or the
+	 *  gate is off, where it doesn't affect the sound.
+	 */
+	noiseGateThresholdDbu: number | null,
 	/**  Trimmed; empty when unnamed or still the default "In{n}" label. */
 	inputName: string,
 	inputMuted: boolean,
@@ -1176,6 +1200,8 @@ export type ChannelAmpCanonical = {
 	/**  Shown, never hashed — see the module doc comment. */
 	backupPriority: BackupPriority,
 };
+
+export type ChannelClip = { kind: "eq"; eq: ChannelEq } | { kind: "rmsLimiter"; rms: RmsLimiter } | { kind: "peakLimiter"; peak: PeakLimiter };
 
 export type ChannelConfig = {
 	channelIndex: number,
@@ -1219,6 +1245,11 @@ export type ChannelConfig = {
 	 */
 	loadOhms: number | null,
 	backupPriority: BackupPriority,
+	/**
+	 *  Output gate threshold (dBu), written by FC=87. 1.1.9 only
+	 *  (`channel_config_v119`); `None` on 1.1.8, which stores none.
+	 */
+	noiseGateThresholdDbu: number | null,
 };
 
 export type ChannelConfigSnapshot = {
@@ -1349,6 +1380,9 @@ export type ChannelSource = {
 	kind: SourceKind,
 	index: number,
 };
+
+/**  Where a clip comes from or goes to on a channel. */
+export type ClipSection = "inputEq" | "outputEq" | "rmsLimiter" | "peakLimiter";
 
 export type CrossoverCanonical = {
 	filterType: CrossoverFilterType,

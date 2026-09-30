@@ -21,7 +21,8 @@ use commands::live_control::{
     live_control_fetch_bridge, live_control_fetch_channel_fir, live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
     live_control_get_telemetry, live_control_list_devices, live_control_recall_preset, live_control_refresh_now,
     live_control_store_preset, live_control_get_bridge, live_control_set_matrix_crosspoint, live_control_set_channel_noise_gate,
-    live_control_set_channel_limiter, live_control_set_channel_name, live_control_set_channel_source,
+    live_control_set_channel_limiter, live_control_copy_channel_section, live_control_paste_channel_section,
+    live_control_set_channel_name, live_control_set_channel_source,
     live_control_set_output_bridge,
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
@@ -33,7 +34,8 @@ use commands::live_control::{
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
     projects_remove_amp_assignment, projects_set_amp_device_name, projects_set_amp_model, projects_set_channel_delay_in,
-    projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_set_channel_name,
+    projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_copy_channel_section,
+    projects_paste_channel_section, projects_set_channel_name,
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
     projects_set_channel_source, projects_set_crossover_slot, projects_set_eq_band,
@@ -43,18 +45,10 @@ use commands::projects::{
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-#[specta::specta]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let specta_builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
-            greet,
             projects_list,
             projects_get,
             projects_create,
@@ -75,6 +69,8 @@ pub fn run() {
             projects_set_crossover_slot,
             projects_set_eq_band,
             projects_set_channel_limiter,
+            projects_copy_channel_section,
+            projects_paste_channel_section,
             projects_set_channel_noise_gate,
             projects_set_channel_phase_invert,
             projects_set_channel_name,
@@ -105,6 +101,8 @@ pub fn run() {
             live_control_set_matrix_crosspoint,
             live_control_set_channel_noise_gate,
             live_control_set_channel_limiter,
+            live_control_copy_channel_section,
+            live_control_paste_channel_section,
             live_control_set_channel_name,
             live_control_set_channel_source,
             live_control_set_source_trim,

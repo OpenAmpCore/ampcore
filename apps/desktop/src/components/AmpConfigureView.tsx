@@ -92,15 +92,11 @@ import {
 import {
   createProjectConfigureActions,
   lockConfigureActions,
-  LOCKED_CONFIGURE_CAPABILITIES,
-  PROJECT_CONFIGURE_CAPABILITIES,
   type ConfigureActions,
-  type ConfigureCapabilities,
 } from "../lib/configureActions";
 import {
   buildLiveAssignmentViewModel,
   createLiveConfigureActions,
-  LIVE_CONFIGURE_CAPABILITIES,
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
 import { usePreference } from "../lib/preferences";
@@ -584,7 +580,6 @@ interface ConfigurableTabProps {
    * yet) are simply absent; a handler guards with `if (!actions.setX)
    * return;` rather than assuming every field is always writable. */
   actions: ConfigureActions;
-  capabilities: ConfigureCapabilities;
   /** The live amp this editor can reach right now, if any — Direct Edit's own
    * device or the online amp a project amp is following, and `undefined` once
    * that amp is offline or deliberately disengaged (see `liveAmpDeviceId`).
@@ -1617,7 +1612,6 @@ function OutputTab({
   assignment,
   capability,
   actions,
-  capabilities,
   telemetry,
   deviceId,
 }: ConfigurableTabProps) {
@@ -1789,7 +1783,6 @@ function OutputTab({
                 )}
                 capability={capability}
                 actions={actions}
-                capabilities={capabilities}
               />
             </CenteredScrollPane>
           ) : (
@@ -2614,11 +2607,11 @@ function PresetConfigurationTab({
     );
   }
 
-  if (firmwareFamily !== "1.1.8") {
+  if (firmwareFamily !== "1.1.8" && firmwareFamily !== "1.1.9") {
     return (
       <div className="flex h-full items-center justify-center">
         <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
-          Preset fetching requires firmware 1.1.8 (detected:{" "}
+          Preset fetching requires firmware 1.1.8 or 1.1.9 (detected:{" "}
           {firmwareFamily ?? "unknown"}).
         </span>
       </div>
@@ -2860,11 +2853,6 @@ export function AmpConfigureView({
             source.onProjectUpdate,
           )
       : undefined;
-  const capabilities: ConfigureCapabilities = live
-    ? LIVE_CONFIGURE_CAPABILITIES
-    : locked
-      ? LOCKED_CONFIGURE_CAPABILITIES
-      : PROJECT_CONFIGURE_CAPABILITIES;
 
   const [mismatchOpen, setMismatchOpen] = useState(false);
   // Opens the comparison straight onto the differing rows instead of its
@@ -3199,7 +3187,6 @@ export function AmpConfigureView({
               capability={capability}
               telemetry={telemetry}
               actions={actions}
-              capabilities={capabilities}
               deviceId={liveAmpDeviceId}
             />
           );

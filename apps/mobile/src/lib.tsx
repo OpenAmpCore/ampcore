@@ -293,19 +293,21 @@ export function applyScheme(s: Scheme) {
 // ---------------------------------------------------------------------------
 // Data hooks
 
-/** Slider/name bounds from core, fetched once. */
-let ranges: Promise<Ranges> | undefined;
-export function useRanges(): Ranges | null {
+/** Slider/name bounds from core, fetched once per device (some depend on its
+ * firmware, e.g. 1.1.9's longer input delay). */
+const ranges = new Map<string, Promise<Ranges>>();
+export function useRanges(deviceId: string): Ranges | null {
   const [r, setR] = useState<Ranges | null>(null);
   useEffect(() => {
-    ranges ??= invoke<Ranges>("amp_ranges");
-    ranges.then(setR, () => setR(null));
-  }, []);
+    let p = ranges.get(deviceId);
+    if (!p) ranges.set(deviceId, (p = invoke<Ranges>("amp_ranges", { deviceId })));
+    p.then(setR, () => setR(null));
+  }, [deviceId]);
   return r;
 }
 
 /** Which filter types expose gain/Q, resolved by core. Device-independent
- * today, so fetched once like `useRanges`. */
+ * today, so fetched once. */
 type Caps = Record<string, { supportsGain: boolean; supportsQ: boolean }>;
 let eqCaps: Promise<Caps> | undefined;
 export function useEqFilterCaps(): Caps | null {

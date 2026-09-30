@@ -278,9 +278,10 @@ async fn run(
                         // stay cheap and unlogged. `on_ack` is a no-op unless
                         // this device has a write awaiting confirmation.
                         //
-                        // Verified on 1.1.8 hardware: these arrive as a bare
-                        // 10-byte header with `packets_lastlen = 0`, NOT an
-                        // echo of what we sent — which is why `on_ack`
+                        // Verified on hardware: these arrive as a bare 10-byte
+                        // header, NOT an echo of what we sent, and its
+                        // `packets_count/lastlen` differ by firmware (1.1.8
+                        // `1/0`, 1.1.9 `0/450`) — which is why `on_ack`
                         // correlates by IP rather than by any header field.
                         for t in writes.on_ack(&ip, Instant::now()) {
                             let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
@@ -636,7 +637,7 @@ pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -
     let Some(device) = device else {
         return Err(format!("no known device for ip {}", ip));
     };
-    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body) {
+    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body, device.output_channels) {
         Some(cfg) => {
             sink.set_channel_config(device.id, cfg.clone());
             Ok(cfg)
@@ -711,9 +712,6 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
                             println!("[cvr driver] FC=50 request to {} timed out — no bridge reply", resolved.ip);
                         }
                     }
-                    Err(RequestError::ShapeMismatch(len)) => {
-                        eprintln!("[cvr driver] FC=50 reply from {} had an implausible shape ({len} bytes)", resolved.ip)
-                    }
                     Err(RequestError::Busy) => {
                         if wire_log_enabled() {
                             println!("[cvr driver] FC=50 request to {} was rejected as busy", resolved.ip);
@@ -736,9 +734,6 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
                 },
                 Err(RequestError::Timeout) => {
                     eprintln!("[cvr driver] FC=27 request to {} timed out", resolved.ip);
-                }
-                Err(RequestError::ShapeMismatch(len)) => {
-                    eprintln!("[cvr driver] FC=27 response from {} had an implausible shape ({len} bytes)", resolved.ip);
                 }
                 // Never actually produced for a *registered* Internal request —
                 // `Busy` is only ever sent from the `request_rx` arm's rejection

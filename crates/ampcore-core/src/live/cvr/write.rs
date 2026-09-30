@@ -3,11 +3,11 @@
 //! gated on `DiscoveredDevice.firmware_family`, rather than hardcoding one
 //! firmware's function codes/body layout directly in a Tauri command.
 //!
-//! 1.1.9 reuses the 1.1.8 encoders (`write_v118.rs`) for everything but the
-//! noise gate: no 1.1.9 hardware exists to verify a write path against, so
-//! these WILL silently send the wrong bytes if 1.1.9 has diverged. Give a
-//! diverging action its own `match` arm (see `build_set_noise_gate`) once
-//! real 1.1.9 hardware can ground-truth it.
+//! 1.1.9 reuses the 1.1.8 encoders (`write_v118.rs`); the noise gate adds a
+//! 1.1.9-only threshold packet. Mute, EQ, delay and trim have been read back correctly on
+//! 1.1.9 hardware; the rest is unverified there and would silently send the
+//! wrong bytes if 1.1.9 has diverged. Give a diverging action its own `match`
+//! arm (see `build_set_noise_gate`).
 //!
 //! Writes are delivery-confirmed, but not *value*-confirmed. `send_control`
 //! submits through the driver's socket and resolves only once the device has
@@ -155,34 +155,33 @@ pub fn build_set_matrix_crosspoint(
     is_known_family(firmware_family).then(|| super::write_v118::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active))
 }
 
-/// `threshold_dbu` is ignored on 1.1.8, whose wire body carries only the
-/// enable flag — see `write_v118::build_set_noise_gate`.
-///
-/// 1.1.9 is the one write with a divergent body: the reference documents a
-/// 2-byte `[enable][threshold]` form, `threshold_dbu` as a signed byte. This
-/// matches `CvrFirmwareCapability.noise_gate_threshold`, which decides
-/// whether the UI offers a threshold at all.
-///
-/// **Unresolved: the vendor source disagrees with the reference here.** It
-/// never sends a 2-byte FC=69. It sends the enable flag on FC=69 (1 byte,
-/// `Variable\Channels_out.cs:772`) and the threshold on **FC=87**
-/// `Noise_Gate` (1 signed byte, `Channels_out.cs:799-805`) as two separate
-/// packets — and only 1.1.9 stores a threshold at all (`SynData_Flow_n.cs:67`;
-/// the vendor fabricates `-70` when upconverting a 1.1.8 payload). So this
-/// body is likely wrong, inherited from a reference bug rather than a capture.
-/// Left as-is: no 1.1.9 hardware to ground-truth against, and the threshold
-/// has no readback and is not hashed. Port FC=87 once such a unit exists.
+/// The enable flag is FC=69's single byte on every firmware (the vendor's
+/// `Channels_out.cs:772`; Hagen's clone confirms it on 1.1.9 by read-back).
+/// Only 1.1.9 stores a threshold (`SynData_Flow_n.cs:67`), which the vendor
+/// sends as a second packet: FC=87 `Noise_Gate`, one signed byte
+/// (`Channels_out.cs:804`). FC=87 is vendor-sourced, not yet seen on the wire;
+/// its value reads back via `channel_config_v119`, which is what keeps a gate
+/// toggle from resending a stale threshold. `threshold_dbu` is ignored on 1.1.8, matching
+/// `CvrFirmwareCapability.noise_gate_threshold`.
 pub fn build_set_noise_gate(
     firmware_family: Option<&str>,
     channel_index: u8,
     enabled: bool,
     threshold_dbu: i8,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<Vec<u8>>> {
+    let enable = super::write_v118::build_set_noise_gate(channel_index, enabled);
     match firmware_family {
-        Some("1.1.8") => Some(super::write_v118::build_set_noise_gate(channel_index, enabled)),
+        Some("1.1.8") => Some(vec![enable]),
         Some("1.1.9") => {
-            let body = [if enabled { 0x00 } else { 0x01 }, threshold_dbu as u8];
-            Some(super::protocol::build_control_packet(super::write_v118::FC_NOISE_GATE, channel_index, 0, 0, 1, &body))
+            let threshold = super::protocol::build_control_packet(
+                super::write_v118::FC_NOISE_GATE_THRESHOLD,
+                channel_index,
+                0,
+                0,
+                1,
+                &[threshold_dbu as u8],
+            );
+            Some(vec![enable, threshold])
         }
         _ => None,
     }
@@ -414,4 +413,28 @@ pub async fn send_control(
         Err(e) => eprintln!("[cvr driver] write to {ip} FAILED: {e}"),
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1.1.9's threshold rides on its own FC=87 packet; 1.1.8 sends only the
+    /// 1-byte FC=69 enable. Never the old 2-byte FC=69 body.
+    #[test]
+    fn noise_gate_threshold_is_a_separate_fc87_packet_on_1_1_9() {
+        let fc = |p: &Vec<u8>| p[NETWORK_HEADER_LEN + 1];
+        let body = |p: &Vec<u8>| p[NETWORK_HEADER_LEN + STRUCT_HEADER_LEN..p.len() - CHECKSUM_LEN].to_vec();
+
+        let v118 = build_set_noise_gate(Some("1.1.8"), 2, true, -40).unwrap();
+        assert_eq!(v118.len(), 1);
+        assert_eq!((fc(&v118[0]), body(&v118[0])), (69, vec![0x00]));
+
+        let v119 = build_set_noise_gate(Some("1.1.9"), 2, false, -40).unwrap();
+        assert_eq!(v119.len(), 2);
+        assert_eq!((fc(&v119[0]), body(&v119[0])), (69, vec![0x01]));
+        assert_eq!((fc(&v119[1]), body(&v119[1])), (87, vec![-40i8 as u8]));
+
+        assert!(build_set_noise_gate(None, 2, true, -40).is_none());
+    }
 }

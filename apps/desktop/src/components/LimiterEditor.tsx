@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Button, Slider } from "@heroui/react";
 import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability } from "../lib/bindings";
-import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
+import type { ConfigureActions } from "../lib/configureActions";
+import { ClipboardButtons } from "./ClipboardButtons";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } from "./VuMeter";
 import {
   buildLimiterThresholdVisuals,
@@ -86,7 +87,6 @@ interface LimiterEditorProps {
   telemetry?: ChannelTelemetry;
   capability: AmpCapability;
   actions: ConfigureActions;
-  capabilities: ConfigureCapabilities;
 }
 
 /** Output protection editor for one channel — independent RMS and Peak
@@ -103,7 +103,6 @@ export function LimiterEditor({
   channelIndex,
   capability,
   actions,
-  capabilities,
   telemetry,
 }: LimiterEditorProps) {
   const tight = useIsTight();
@@ -252,6 +251,19 @@ export function LimiterEditor({
           Bridged with Out{partnerLetter} — showing combined values
         </span>
       )}
+      <div className="flex w-full flex-wrap justify-between gap-2">
+        {(["rmsLimiter", "peakLimiter"] as const).map((section) => (
+          <ClipboardButtons
+            key={section}
+            actions={actions}
+            channelIndex={channelIndex}
+            section={section}
+            label={`${assignment.deviceName ?? "Amp"} · Out ${String.fromCharCode(65 + channelIndex)} ${
+              section === "rmsLimiter" ? "RMS" : "Peak"
+            } limiter`}
+          />
+        ))}
+      </div>
       {/* `1fr` is `minmax(auto, 1fr)`, so four columns can't shrink below
        * their content and would push the window into a horizontal scroll.
        * Below `useIsTight` they fold to 2x2 — same order, two rows. */}
@@ -328,7 +340,7 @@ export function LimiterEditor({
             suffix=" Ω"
             min={isBridged ? 4 : 0.5}
             value={effectiveOhms}
-            disabled={!capabilities.ohmsEditable}
+            disabled={!actions.setChannelOhms}
             onChange={(value) => handleOhmsChange(value)}
           />
         </div>

@@ -4,15 +4,10 @@
 //! "empirically confirmed by diffing live snapshots with known [device]
 //! states" — this is real, not guessed, data.
 //!
-//! Unlike that reference (and unlike this app's own earlier heartbeat
-//! telemetry work before this file), channel/trailer geometry here is
-//! derived from the device's *real known* `firmware_family` (1.1.8's fixed
-//! trailer size — see `TRAILER_SIZE_V118`), not from guessing the layout by
-//! testing which length-modulo-515 arithmetic happens to divide evenly — see
-//! `channel_config.rs`'s module doc for why that guess-based approach is
-//! being deliberately avoided. Note the trailer size itself was corrected
-//! from the reference's documented value based on real hardware traffic —
-//! see `TRAILER_SIZE_V118`'s doc.
+//! Unlike that reference, the layout is not guessed from the payload length:
+//! this is the vendor's `SynData_Tecnare118` exactly (header, 4 × 515-byte
+//! channel bodies, 172-byte trailer). 1.1.9 wraps this whole payload — see
+//! `channel_config_v119.rs`.
 //!
 //! `prmsW`/`ppeakW` (wattage computed from limiter thresholds × load
 //! impedance) are not parsed here — the reference computes them downstream,
@@ -26,19 +21,8 @@ use crate::data::project::{
 
 use super::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
 
-/// 172, NOT the reference implementation's documented 192 — this value is
-/// corrected from direct measurement against real hardware (a 1.1.8
-/// `DSP-2004`), not carried over from the reference. Its FC=27 replies
-/// consistently assemble to exactly `4*515 + 172 + 13 (StructHeader+
-/// checksum) = 2245` bytes, an exact division with no remainder — the
-/// reference's 192 does not divide evenly against this device's real
-/// traffic at all. The trailer's *internal* field offsets below
-/// (muteIn@132, analog-matrix@136, rotary-lock@33, backup-priority@140/176)
-/// are still only as verified as the reference documented them — this fix
-/// corrects the trailer's total *size* (and therefore channel-count
-/// derivation), not necessarily every byte's meaning within it. Worth
-/// testing those specifically (e.g. toggle a real channel's mute and confirm
-/// the parsed `inputMuted` flips) now that geometry derivation succeeds.
+/// Measured on a 1.1.8 DSP-2004 (the reference's documented 192 does not
+/// divide real traffic) and matching the vendor struct's tail.
 pub const TRAILER_SIZE_V118: usize = 172;
 pub const BYTES_PER_CHANNEL: usize = 515;
 
@@ -361,6 +345,7 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         dante_delay_ms: f32_le(body, at(48)),
         load_ohms: f32_le(body, at(410)),
         backup_priority,
+        noise_gate_threshold_dbu: None, // 1.1.8 stores none
     }
 }
 
@@ -371,25 +356,26 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
 /// `body` = the pure per-channel-data region (StructHeader/checksum already
 /// stripped by the caller — see `channel_config.rs`'s dispatcher doc).
 /// Returns `None` on any geometry failure: too short, remainder doesn't
-/// divide evenly by 515, or channel count outside 1..=4 — a real parse
-/// failure surfaced as an honest gap, never a silent best-effort fallback
-/// (contrast the reference's `detectPayloadLayout`, which falls back to
-/// `floor(len/515)` and assumes the 118 trailer on any unrecognized shape).
-pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
-    if body.len() < TRAILER_SIZE_V118 {
-        return None;
-    }
-    let remainder = body.len() - TRAILER_SIZE_V118;
+/// divide evenly by 515, body count outside 1..=4, or no channel count — a
+/// real parse failure surfaced as an honest gap, never a silent best-effort
+/// fallback (contrast the reference's `detectPayloadLayout`, which falls back
+/// to `floor(len/515)` and assumes the 118 trailer on any unrecognized shape).
+///
+/// The body count only locates the trailer. The channels parsed are the first
+/// `output_channels` (FC=0's count) of them, because a 2-channel DSP-3302D
+/// still sends four bodies, the last two placeholders.
+pub fn parse_channel_config(body: &[u8], output_channels: u32) -> Option<ChannelConfigSnapshot> {
+    let remainder = body.len().checked_sub(TRAILER_SIZE_V118)?;
     if remainder % BYTES_PER_CHANNEL != 0 {
         return None;
     }
-    let channel_count = remainder / BYTES_PER_CHANNEL;
-    if !(1..=4).contains(&channel_count) {
+    let body_count = remainder / BYTES_PER_CHANNEL;
+    if !(1..=4).contains(&body_count) || output_channels == 0 {
         return None;
     }
-    let trailer_base = channel_count * BYTES_PER_CHANNEL;
+    let trailer_base = body_count * BYTES_PER_CHANNEL;
 
-    let channels = (0..channel_count as u32).map(|c| parse_channel(body, c, trailer_base)).collect();
+    let channels = (0..output_channels.min(body_count as u32)).map(|c| parse_channel(body, c, trailer_base)).collect();
 
     // Header (absolute, before channel A's fields): `Machine_Dname[32]` — on a
     // real DSP-2004 this holds the firmware/model ID string, not the user's
@@ -461,7 +447,7 @@ mod tests {
             let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
             body[85] = code; // channel 0's source selector
             body[4 * BYTES_PER_CHANNEL + 136] = 3; // channel 0's analog matrix index
-            parse_channel_config(&body).unwrap().channels[0].source.map(|s| (s.kind, s.index))
+            parse_channel_config(&body, 4).unwrap().channels[0].source.map(|s| (s.kind, s.index))
         };
 
         assert_eq!(source_of(2), None, "AES3 must not be folded into a supported kind");
@@ -476,7 +462,7 @@ mod tests {
         body[32] = 1; // standby
         body[33] = 1; // knob lock
         body[4 * BYTES_PER_CHANNEL + 33] = 7; // the old, wrong offset
-        let snapshot = parse_channel_config(&body).unwrap();
+        let snapshot = parse_channel_config(&body, 4).unwrap();
         assert_eq!(snapshot.standby, Some(true));
         assert_eq!(snapshot.rotary_locked, Some(true));
     }
@@ -489,12 +475,25 @@ mod tests {
         let read = |value: u8| {
             let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
             body[32] = value;
-            let snapshot = parse_channel_config(&body).unwrap();
+            let snapshot = parse_channel_config(&body, 4).unwrap();
             (snapshot.standby, snapshot.standby_locked)
         };
         assert_eq!(read(0), (Some(false), Some(false)));
         assert_eq!(read(1), (Some(true), Some(false)));
         assert_eq!(read(2), (Some(true), Some(true)));
         assert_eq!(read(3), (None, None), "an unexpected value stays honestly unknown");
+    }
+
+    /// A 2-channel DSP-3302D sends the same 4×515 + 172 as a 4-channel amp;
+    /// the trailer still follows all four bodies.
+    #[test]
+    fn trailer_follows_bodies_and_channel_count_comes_from_discovery() {
+        let trailer = 4 * BYTES_PER_CHANNEL;
+        let mut body = vec![1u8; trailer + TRAILER_SIZE_V118];
+        body[trailer + 133] = 0; // ch1 muted
+        let snapshot = parse_channel_config(&body, 2).unwrap();
+        assert_eq!(snapshot.channels.len(), 2, "placeholder bodies are not channels");
+        assert!(snapshot.channels[1].input_muted);
+        assert!(parse_channel_config(&body, 0).is_none(), "no count, no guess");
     }
 }

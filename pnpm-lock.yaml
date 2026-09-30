@@ -14,15 +14,6 @@ importers:
       '@heroui/react':
         specifier: ^3.2.5
         version: 3.2.5(@react-aria/i18n@3.13.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@react-aria/ssr@3.10.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@react-aria/utils@3.34.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@react-spectrum/provider@3.11.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-aria-components@1.21.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-aria@3.52.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@4.3.2)
-      '@react-aria/i18n':
-        specifier: ^3.13.1
-        version: 3.13.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@react-aria/ssr':
-        specifier: ^3.10.1
-        version: 3.10.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@react-aria/utils':
-        specifier: ^3.34.1
-        version: 3.34.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tailwindcss/vite':
         specifier: ^4.3.2
         version: 4.3.2(vite@7.3.6(jiti@2.7.0)(lightningcss@1.32.0)(sugarss@5.0.1(postcss@8.5.16)))
@@ -41,9 +32,6 @@ importers:
       react:
         specifier: ^19.1.0
         version: 19.2.7
-      react-aria:
-        specifier: ^3.52.1
-        version: 3.52.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       react-aria-components:
         specifier: ^1.21.1
         version: 1.21.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)

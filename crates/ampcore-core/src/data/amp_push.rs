@@ -37,6 +37,9 @@ use super::fingerprint::{
 };
 use super::project::{AmpAssignment, AmpChannel, ChannelEq, CrossoverSlot, EqBand, EqDirection, SourceTrim};
 use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
+use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use crate::live::cvr::write;
+use crate::live::cvr::write_v118::{EqChainBand, EQ_CHAIN_BANDS};
 
 /// Which source family an FC=62 trim applies to. The wire carries this in the
 /// packet's `segment` field, not its body.
@@ -60,7 +63,7 @@ impl SourceTrimFamily {
 
 /// One planned write. Typed rather than pre-encoded bytes so a plan can be
 /// reasoned about and tested independently of the wire encoding — the
-/// packet(s) each one becomes are built in `commands/amp_push.rs`.
+/// packet(s) each one becomes are built by `action_packets` below.
 #[derive(Debug, Clone)]
 pub enum PushAction {
     DeviceName { name: String },
@@ -529,14 +532,18 @@ fn plan_speaker(stages: &mut Vec<PlannedStage>, channel: &AmpChannel, config: &C
     if channel.fir_bypassed != config.fir_bypassed {
         stage.push(PushAction::FirBypass { channel: ch, bypassed: channel.fir_bypassed });
     }
-    // Only the on/off flag is hashed — and on 1.1.8 the threshold has no
-    // readback at all, so it can never be diffed. It rides along on the same
-    // packet for 1.1.9, the only firmware whose body carries it.
-    if channel.noise_gate_enabled != config.noise_gate_enabled {
+    // The threshold exists only where the amp reports one (1.1.9+) and, like a
+    // disabled limiter's, only counts while the gate is on — the same rule the
+    // hash follows. It is sent rounded, as the hash rounds it; a plain `as i8`
+    // would truncate and never converge.
+    let threshold_differs = config.noise_gate_threshold_dbu.is_some_and(|live| {
+        channel.noise_gate_enabled && differs(channel.noise_gate_threshold_dbu, f64::from(live), WHOLE_STEPS)
+    });
+    if channel.noise_gate_enabled != config.noise_gate_enabled || threshold_differs {
         stage.push(PushAction::NoiseGate {
             channel: ch,
             enabled: channel.noise_gate_enabled,
-            threshold_dbu: channel.noise_gate_threshold_dbu as i8,
+            threshold_dbu: channel.noise_gate_threshold_dbu.round() as i8,
         });
     }
 
@@ -683,175 +690,151 @@ pub fn adopt_device_facts(assignment: &mut AmpAssignment, snapshot: &ChannelConf
     }
 }
 
+// ---------------------------------------------------------------------------
+// Encoding — one planned action to its packet(s)
+// ---------------------------------------------------------------------------
+
+/// Lays a `ChannelEq` out into the ten positional slots FC=52 expects: slot 0
+/// is the HP crossover, slots 1..=8 the parametric bands, slot 9 the LP — the
+/// same numbering `channel_config_v118::parse_eq_block` reads back and that
+/// the per-band `segment` field uses.
+///
+/// The HP/LP slots take their gain and Q from `wire`, echoing whatever the amp
+/// reported: a `CrossoverSlot` has no such fields (its slope type implies Q),
+/// so there is no project value to write and inventing one would change the
+/// amp behind the user's back.
+///
+/// A band the project is missing keeps the amp's own values rather than a
+/// fabricated default; the caller has already refused a push whose band counts
+/// disagree, so this is a belt-and-braces fallback, not a normal path.
+pub fn eq_chain_bands(eq: &ChannelEq, wire: &EqChainWire) -> [EqChainBand; EQ_CHAIN_BANDS] {
+    std::array::from_fn(|slot| match slot {
+        0 => EqChainBand {
+            type_code: crossover_filter_type_code(eq.hp.filter_type),
+            active: eq.hp.active,
+            gain_db: wire.hp_gain_db,
+            freq_hz: eq.hp.freq_hz as f32,
+            q: wire.hp_q,
+        },
+        9 => EqChainBand {
+            type_code: crossover_filter_type_code(eq.lp.filter_type),
+            active: eq.lp.active,
+            gain_db: wire.lp_gain_db,
+            freq_hz: eq.lp.freq_hz as f32,
+            q: wire.lp_q,
+        },
+        _ => match eq.bands.get(slot - 1) {
+            Some(band) => EqChainBand {
+                type_code: eq_filter_type_code(band.filter_type),
+                active: band.active,
+                gain_db: band.gain_db as f32,
+                freq_hz: band.freq_hz as f32,
+                q: band.q as f32,
+            },
+            None => EqChainBand { type_code: 0, active: false, gain_db: 0.0, freq_hz: 0.0, q: 0.0 },
+        },
+    })
+}
+
+/// Builds the packets for one action, in send order.
+///
+/// `None` means this firmware has no encoding for the action, which the caller
+/// turns into the same "unrecognized/unknown firmware" error every write
+/// command uses. Nothing here invents a fallback encoding.
+pub fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec<Vec<u8>>> {
+    let packets = match action {
+        PushAction::DeviceName { name } => vec![write::build_set_device_name(firmware, name)?],
+        PushAction::Source { channel, kind, analog_index } => {
+            let source_code = match kind {
+                SourceKind::Analog => 0,
+                SourceKind::Dante => 1,
+                // Rejected at plan time — FC=11 cannot select backup.
+                SourceKind::Backup => return None,
+            };
+            let mut out = vec![write::build_set_source_select(firmware, *channel, source_code)?];
+            if let Some(index) = analog_index {
+                out.push(write::build_set_analog_input(firmware, *channel, *index)?);
+            }
+            out
+        }
+        PushAction::InputMute { channel, muted } => vec![write::build_set_input_mute(firmware, *channel, *muted)?],
+        PushAction::DelayIn { channel, delay_ms } => {
+            vec![write::build_set_delay_in(firmware, *channel, *delay_ms as f32)?]
+        }
+        PushAction::SourceTrim { channel, family, trim_db, delay_ms } => {
+            vec![write::build_set_source_trim(firmware, *channel, family.segment(), *trim_db as f32, *delay_ms as f32)?]
+        }
+        PushAction::EqChain { channel, direction, eq, wire } => {
+            vec![write::build_set_eq_chain(firmware, *channel, write::in_out_flag(*direction), &eq_chain_bands(eq, wire), wire.chain_bypass)?]
+        }
+        PushAction::MatrixCrosspoint { channel, source_index, gain_db, active } => {
+            vec![write::build_set_matrix_crosspoint(firmware, *channel, *source_index, *gain_db as f32, *active)?]
+        }
+        PushAction::OutputTrim { channel, trim_db } => {
+            vec![write::build_set_output_trim(firmware, *channel, *trim_db as f32)?]
+        }
+        PushAction::OutputVolume { channel, volume_db } => {
+            vec![write::build_set_output_volume(firmware, *channel, *volume_db as f32)?]
+        }
+        PushAction::OutputMute { channel, muted } => vec![write::build_set_output_mute(firmware, *channel, *muted)?],
+        PushAction::DelayOut { channel, delay_ms } => {
+            vec![write::build_set_delay_out(firmware, *channel, *delay_ms as f32)?]
+        }
+        PushAction::PhaseInvert { channel, inverted } => {
+            vec![write::build_set_phase_invert(firmware, *channel, *inverted)?]
+        }
+        PushAction::PowerMode { channel, mode } => vec![write::build_set_power_mode(firmware, *channel, *mode)?],
+        PushAction::FirBypass { channel, bypassed } => vec![write::build_set_fir_bypass(firmware, *channel, *bypassed)?],
+        PushAction::NoiseGate { channel, enabled, threshold_dbu } => {
+            write::build_set_noise_gate(firmware, *channel, *enabled, *threshold_dbu)?
+        }
+        PushAction::RmsLimiter { channel, enabled, threshold_vrms, attack_ms, release_multiplier } => {
+            vec![write::build_set_rms_limiter(
+                firmware,
+                *channel,
+                *enabled,
+                *threshold_vrms as f32,
+                *attack_ms as u16,
+                *release_multiplier as u8,
+            )?]
+        }
+        PushAction::RmsLimiterAuto { channel, auto } => {
+            vec![write::build_set_rms_limiter_auto(firmware, *channel, *auto)?]
+        }
+        PushAction::PeakLimiter { channel, enabled, threshold_vp, hold_ms, release_ms } => {
+            vec![write::build_set_peak_limiter(
+                firmware,
+                *channel,
+                *enabled,
+                *threshold_vp as f32,
+                *hold_ms as u16,
+                *release_ms as u16,
+            )?]
+        }
+        PushAction::ChannelName { channel, direction, name } => {
+            // The device field is fixed-width ASCII; a non-ASCII name would
+            // be truncated mid-sequence, so it is refused rather than mangled.
+            if !name.is_ascii() {
+                return None;
+            }
+            vec![write::build_set_channel_name(firmware, *channel, write::in_out_flag(*direction), name)?]
+        }
+        PushAction::Bridge { pair_index, bridged } => {
+            vec![write::build_set_output_bridge(firmware, *pair_index, *bridged)?]
+        }
+    };
+    Some(packets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::amp_merge::mirror_live_into_assignment;
-    use super::super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-    use super::super::capability::cvr::builtin_topology;
-    use super::super::capability::{CrossoverFilterType, EqFilterType};
-    use super::super::device_link::DeviceModelLink;
     use super::super::edit_lock::LiveAmpReading;
     use super::super::fingerprint::{fingerprint_live_device, fingerprint_project_amp};
-    use super::super::project::{
-        BackupPriority, ChannelEq, ChannelSource, Limiter, MatrixCrosspoint, PeakLimiter, Project, RmsLimiter,
-    };
+    use super::super::project::{ChannelSource, Project};
+    use super::super::test_fixtures::*;
     use super::*;
     use crate::live::cvr::bridge::DeviceBridgeSnapshot;
-    use crate::live::cvr::channel_state::AmpChannelState;
-    use crate::live::state::DiscoveredDevice;
-
-    const MAC: &str = "6A:20:67:18:B5:8A";
-    const MODEL_ID: &str = "builtin-dsp-2004";
-    const DEVICE_NAME: &str = "AMP-2004-ETH";
-
-    fn models() -> Vec<AmpModelCatalogEntry> {
-        let mut entry = AmpModelCatalogEntry::new_builtin(MODEL_ID, "CVR", "DSP-2004", 4, false, AmpProtocol::CvrUdp);
-        entry.topology = builtin_topology("DSP-2004", 4, false);
-        vec![entry]
-    }
-
-    fn links() -> Vec<DeviceModelLink> {
-        vec![DeviceModelLink {
-            mac: MAC.to_string(),
-            amp_model_id: MODEL_ID.to_string(),
-            auto_matched: false,
-            updated_at: 0.0,
-        }]
-    }
-
-    /// A freshly planned DSP-2004 — every setting at its default.
-    fn assignment() -> AmpAssignment {
-        let mut assignment =
-            AmpAssignment::new(Some(MAC.to_string()), None, 4, Some(MODEL_ID.to_string()), Some("1.1.8".to_string()));
-        assignment.reconcile_matrix_size(4);
-        assignment.reconcile_eq_bands(10);
-        assignment
-    }
-
-    /// A value as the FC=27 parser hands it over: through `f32`.
-    fn wire(value: f64) -> f64 {
-        value as f32 as f64
-    }
-
-
-    /// The companion bytes of a chain, as the amp reports them. Non-default on
-    /// purpose: a push echoes these rather than deriving them, so if
-    /// `eq_chain_bands` mapped the HP/LP slots wrong the round-trip test would
-    /// still pass with zeros here.
-    fn live_eq_wire() -> EqChainWire {
-        EqChainWire { chain_bypass: 0, hp_gain_db: 1.5, hp_q: 0.71, lp_gain_db: -2.25, lp_q: 1.41 }
-    }
-
-    fn live_eq(gain_db: f64) -> ChannelEq {
-        ChannelEq {
-            hp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth24, freq_hz: wire(110.0), active: true },
-            bands: (0..8)
-                .map(|i| EqBand {
-                    filter_type: if i == 0 { EqFilterType::LowShelf } else { EqFilterType::Peaking },
-                    freq_hz: wire(100.0 * (i + 1) as f64 + 0.3),
-                    gain_db: wire(gain_db),
-                    q: wire(0.7),
-                    active: i % 3 == 0,
-                })
-                .collect(),
-            lp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth12, freq_hz: wire(19900.0), active: false },
-        }
-    }
-
-    /// A tuned channel as the amp reports it: nothing at its default.
-    fn live_channel(index: u32) -> ChannelConfig {
-        ChannelConfig {
-            channel_index: index,
-            delay_in_ms: 1.23,
-            input_muted: index == 2,
-            matrix_crosspoints: (0..4)
-                .map(|source_index| MatrixCrosspoint {
-                    source_index,
-                    gain_db: wire(-3.1),
-                    active: source_index == index || source_index == 0,
-                })
-                .collect(),
-            input_eq: live_eq(12.0),
-            output_eq: live_eq(-1.5),
-            // Deliberately non-zero: these are echoed rather than derived, so
-            // zeros here would hide a mapping bug in `eq_chain_bands`.
-            input_eq_wire: live_eq_wire(),
-            output_eq_wire: live_eq_wire(),
-            output_trim_db: -18.0,
-            output_volume_db: -20.0,
-            output_muted: false,
-            delay_out_ms: 7.87,
-            output_phase_inverted: index == 1,
-            noise_gate_enabled: index == 3,
-            limiter: Limiter {
-                rms: RmsLimiter {
-                    enabled: true,
-                    threshold_vrms: wire(56.99),
-                    attack_ms: 25.0,
-                    release_multiplier: 8.0,
-                    auto: true,
-                    max_vrms: wire(127.35),
-                },
-                peak: PeakLimiter {
-                    enabled: true,
-                    threshold_vp: wire(84.84),
-                    hold_ms: 0.0,
-                    release_ms: 75.0,
-                    max_vp: wire(179.89),
-                },
-            },
-            fir_bypassed: true,
-            power_mode: Some(PowerMode::LowOhm),
-            source: Some(ChannelSource { kind: SourceKind::Analog, index }),
-            input_name: Some(format!("In{}", index + 1)),
-            output_name: Some(
-                match index {
-                    0 => "Kick_A91C",
-                    1 => "OutB",
-                    _ => "TR",
-                }
-                .to_string(),
-            ),
-            analog_trim_db: 1.5,
-            analog_delay_ms: 0.25,
-            dante_trim_db: 0.0,
-            dante_delay_ms: 0.0,
-            load_ohms: 4.0,
-            backup_priority: BackupPriority { enabled: true, first: 1, second: 2, threshold_db: -80 },
-        }
-    }
-
-    fn snapshot() -> ChannelConfigSnapshot {
-        ChannelConfigSnapshot {
-            channels: (0..4).map(live_channel).collect(),
-            standby: Some(false),
-            standby_locked: Some(false),
-            rotary_locked: Some(true),
-            preset_name: Some("Lab".to_string()),
-            received_at: 0.0,
-        }
-    }
-
-    fn device() -> DiscoveredDevice {
-        DiscoveredDevice {
-            id: format!("cvr:{MAC}"),
-            driver_id: "cvr".to_string(),
-            brand: "CVR".to_string(),
-            name: DEVICE_NAME.to_string(),
-            mac: MAC.to_string(),
-            ip: "192.168.1.50".to_string(),
-            firmware_version: "1.1.8".to_string(),
-            firmware_family: Some("1.1.8".to_string()),
-            gain_max: 0,
-            analog_input_channels: 4,
-            digital_input_channels: 4,
-            output_channels: 4,
-            machine_state: 0,
-            machine_state_decoded: Some(AmpChannelState::Normal),
-            online: true,
-            last_seen_at: 0.0,
-        }
-    }
 
     fn bridged() -> Vec<Option<bool>> {
         vec![Some(true), Some(false)]
@@ -962,11 +945,14 @@ mod tests {
                 let i = channel_of(snapshot, *channel);
                 snapshot.channels[i].fir_bypassed = *bypassed;
             }
-            PushAction::NoiseGate { channel, enabled, .. } => {
+            PushAction::NoiseGate { channel, enabled, threshold_dbu } => {
                 let i = channel_of(snapshot, *channel);
-                // 1.1.8 has no threshold readback at all, so only the flag
-                // ever comes back.
-                snapshot.channels[i].noise_gate_enabled = *enabled;
+                let config = &mut snapshot.channels[i];
+                config.noise_gate_enabled = *enabled;
+                // Only 1.1.9+ stores a threshold (FC=87); 1.1.8 reports none.
+                if config.noise_gate_threshold_dbu.is_some() {
+                    config.noise_gate_threshold_dbu = Some(*threshold_dbu);
+                }
             }
             PushAction::RmsLimiter { channel, enabled, threshold_vrms, attack_ms, release_multiplier } => {
                 let i = channel_of(snapshot, *channel);
@@ -1048,6 +1034,46 @@ mod tests {
         );
         assert!(live_after.missing.is_empty(), "{:?}", live_after.missing);
         assert_eq!(after.amp_hash, live_after.amp_hash, "a fully replayed push must converge");
+    }
+
+    /// On 1.1.9 a gate threshold that differs by itself must be pushed, sent
+    /// rounded (not truncated), and converge; with the gate off it is ignored.
+    #[test]
+    fn gate_threshold_pushes_on_1_1_9_only_while_on() {
+        let (models, links) = (models(), links());
+        let project = Project::new("Test".to_string(), String::new());
+        let mut device = device();
+        device.firmware_version = "1.1.9".to_string();
+        device.firmware_family = Some("1.1.9".to_string());
+        let mut snapshot = snapshot();
+        for config in &mut snapshot.channels {
+            config.noise_gate_threshold_dbu = Some(-37);
+        }
+        let reading =
+            LiveAmpReading { device: device.clone(), snapshot: Some(snapshot.clone()), bridge: Some(DeviceBridgeSnapshot { bridged: bridged(), received_at: 0.0 }) };
+        let mut assignment = assignment();
+        assignment.firmware_version = Some("1.1.9".to_string());
+        let mut assignment = mirror_live_into_assignment(&assignment, &reading, 4);
+        // Channel 3 has its gate on in the fixture; channel 0 has it off.
+        assignment.channels[3].noise_gate_threshold_dbu = -45.6;
+        assignment.channels[0].noise_gate_threshold_dbu = -10.0;
+
+        let plan = plan_push(&assignment, &snapshot, DEVICE_NAME, &bridged(), 4).expect("plan");
+        let gates: Vec<_> = plan
+            .stages
+            .iter()
+            .flat_map(|s| &s.actions)
+            .filter_map(|a| match a {
+                PushAction::NoiseGate { channel, threshold_dbu, .. } => Some((*channel, *threshold_dbu)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gates, [(3, -46)]);
+
+        let (mut name, mut bridged) = (DEVICE_NAME.to_string(), bridged());
+        replay(&plan, &mut snapshot, &mut name, &mut bridged);
+        let live = fingerprint_live_device(&device, &snapshot, Some(&DeviceBridgeSnapshot { bridged, received_at: 0.0 }), &models, &links);
+        assert_eq!(fingerprint_project_amp(&project, &assignment, &models).amp_hash, live.amp_hash);
     }
 
     /// A second push against an amp that already matches must plan no work —

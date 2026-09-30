@@ -84,18 +84,17 @@ pub fn unknown_firmware_error(device_id: &str) -> AppError {
     AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
 }
 
-/// FC=59 preset fetch/recall has no confirmed 1.1.9 spec in either reference
-/// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
-/// only rather than guessing it also works there, matching this app's
-/// "no generic fallback encoding" write philosophy.
+/// FC=59 presets run on every known family: the 34-byte layout in
+/// `live/cvr/preset.rs` matches Hagen's hardware notes, whose test amps
+/// include a 1.1.9 DSP-3004D. Unknown firmware stays gated.
 pub fn presets_supported(firmware_family: Option<&str>) -> bool {
-    firmware_family == Some("1.1.8")
+    super::cvr::protocol::is_known_family(firmware_family)
 }
 
 pub fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
     if !presets_supported(firmware_family) {
         return Err(AppError::from(format!(
-            "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
+            "device {} preset fetch/recall requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
             device_id, firmware_family
         )));
     }
@@ -119,16 +118,15 @@ pub async fn send_write(
     Ok(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?)
 }
 
-/// Same shape as `send_write`, for a command whose packet doesn't fit one
-/// datagram (today: FIR coefficient import — see `fir::split_into_fragments`).
-/// Sends each fragment through `send_control` **sequentially**, awaiting one
-/// fragment's ACK before building the next, matching the vendor's own
-/// stop-and-wait fragment loop — this is what keeps at most one fragment ever
-/// queued in `WriteRegistry` at a time, so ordering and coalescing stay sound
-/// with no changes to that registry beyond `coalesce_key`'s continuation-
-/// fragment guard. Aborts on the first fragment that fails rather than
-/// sending the rest of a frame the device already missed part of.
-pub async fn send_fragmented_write(
+/// `send_write` for a command that sends several packets — several fields, or
+/// one frame split into fragments (FIR import, see `fir::split_into_fragments`).
+/// All packets are built first, so an unknown firmware fails before anything
+/// is sent. They then go out through `send_control` **sequentially**, each
+/// awaiting its ACK before the next, matching the vendor's own stop-and-wait
+/// loop — this keeps at most one packet queued in `WriteRegistry` at a time,
+/// so ordering and coalescing stay sound (see `coalesce_key`'s continuation-
+/// fragment guard). Aborts on the first packet that fails.
+pub async fn send_writes(
     state: &LiveDeviceState,
     device_id: &str,
     build: impl FnOnce(Option<&str>) -> Option<Vec<Vec<u8>>>,
@@ -447,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_gated_to_1_1_8_only() {
+    fn presets_are_gated_to_known_firmware() {
         assert!(presets_supported(Some("1.1.8")));
-        assert!(!presets_supported(Some("1.1.9")));
+        assert!(presets_supported(Some("1.1.9")));
         assert!(!presets_supported(None));
     }
 }

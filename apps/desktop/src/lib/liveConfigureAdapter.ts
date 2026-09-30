@@ -12,63 +12,17 @@ import {
   type LiveWriteAck,
 } from "./bindings";
 import { ACTION_OK, actionFailed, type ActionResult } from "./actionResult";
-import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
+import type { ConfigureActions } from "./configureActions";
 import { showRollingNotification } from "./rollingNotification";
-
-/** Direct Edit mode has no Project — manually authored `ohms` is genuinely
- * inapplicable to a live device, not just "not implemented yet" (see
- * `ConfigureActions`'s per-field split). */
-export const LIVE_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  ohmsEditable: false,
-};
-
-/** The `AmpChannel` fields `mapLiveChannel` fills from what a device actually
- * reported (FC=27, plus FC=50 for bridging). Every other field it sets is a
- * placeholder, there only so the configure tabs have a complete channel to
- * render.
- *
- * Anything that compares or copies live state against a Project (offline↔
- * online amp matching) must restrict itself to these fields — otherwise the
- * placeholders read as real mismatches, or get written into the project as if
- * the amp had reported them.
- *
- * Two entries are only real per snapshot, which a static list can't express:
- * `powerMode` when `ChannelConfig.powerMode` is non-null (otherwise it falls
- * back to "lowOhm"), and `outputBridged` once the device has answered FC=50
- * for that pair (otherwise `false`). A channel synthesized before the first
- * FC=27 poll carries no real fields at all. */
-export const LIVE_READABLE_CHANNEL_FIELDS: readonly (keyof AmpChannel)[] = [
-  "source",
-  "matrixCrosspoints",
-  "delayInMs",
-  "inputMuted",
-  "outputTrimDb",
-  "outputVolumeDb",
-  "delayOutMs",
-  "inputEq",
-  "outputEq",
-  "limiter",
-  "noiseGateEnabled",
-  "outputPhaseInverted",
-  "inputName",
-  "outputName",
-  "outputMuted",
-  "outputBridged",
-  "powerMode",
-  "ohms",
-  "firBypassed",
-  "sourceTrims",
-  "backupPriority",
-];
 
 /** Maps one polled `ChannelConfig` onto the shape `AmpConfigureView`'s tabs
  * already expect (`AmpAssignment["channels"][number]`) — most fields are a
  * direct passthrough since `ChannelEq`/`Limiter`/`MatrixCrosspoint`/
  * `ChannelSource` are literally the same Rust types on both sides (see
- * `channel_config.rs`). `ohms` is the amp's own `loadOhms`; fields with no
- * read-side parsing yet (`noiseGateThresholdDbu`) get placeholder defaults,
- * never a value implied to be live-accurate — `LIVE_READABLE_CHANNEL_FIELDS`
- * is the exact split.
+ * `channel_config.rs`). `ohms` is the amp's own `loadOhms`.
+ * `noiseGateThresholdDbu` is read back on 1.1.9 only (1.1.8 stores none, so it
+ * gets a placeholder). The read-back matters: a gate toggle resends it, so a placeholder would
+ * overwrite the amp's real threshold.
  * `channelIndex` with no config yet (poll still pending) synthesizes an
  * all-default channel rather than leaving a hole for callers to crash on. */
 function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
@@ -91,7 +45,7 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
     outputEq: config.outputEq,
     limiter: config.limiter,
     noiseGateEnabled: config.noiseGateEnabled,
-    noiseGateThresholdDbu: 0,
+    noiseGateThresholdDbu: config.noiseGateThresholdDbu ?? 0,
     outputPhaseInverted: config.outputPhaseInverted,
     inputName: config.inputName,
     outputName: config.outputName,
@@ -301,6 +255,13 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     },
     async setDeviceName(name) {
       return reportWrite("Set device name", commands.liveControlSetDeviceName(deviceId, name ?? ""));
+    },
+    async copyChannelSection(channelIndex, section) {
+      const result = await commands.liveControlCopyChannelSection(deviceId, channelIndex, section);
+      return result.status === "ok" ? result.data : null;
+    },
+    async pasteChannelSection(channelIndex, section, clip) {
+      return reportWrite("Paste", commands.liveControlPasteChannelSection(deviceId, channelIndex, section, clip));
     },
   };
 }

@@ -88,7 +88,15 @@ function EmbeddedHashBadge({ channel }: { channel: ChannelFingerprint }) {
 
 /** Minimal copy-to-clipboard button, replacing Mantine's `CopyButton` render
  * prop — flips to "Copied" for 1.5s then reverts. */
-function CopyJsonButton({ value, disabled }: { value: string; disabled: boolean }) {
+export function CopyJsonButton({
+  value,
+  disabled,
+  label = "Copy JSON",
+}: {
+  value: string;
+  disabled: boolean;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <Button
@@ -102,7 +110,7 @@ function CopyJsonButton({ value, disabled }: { value: string; disabled: boolean 
         });
       }}
     >
-      {copied ? "Copied" : "Copy JSON"}
+      {copied ? "Copied" : label}
     </Button>
   );
 }

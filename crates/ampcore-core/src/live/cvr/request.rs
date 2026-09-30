@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::data::common::now_millis;
 
-use super::protocol::{FC_SYNC_DATA, NETWORK_HEADER_LEN};
+use super::protocol::NETWORK_HEADER_LEN;
 
 pub const REQUEST_TIMEOUT_MS: u64 = 2000;
 pub const REQUEST_RETRY_TIMEOUT_MS: u64 = 2200;
@@ -40,10 +40,6 @@ pub const FRAGMENT_MAX_AGE_MS: f64 = 3_000.0;
 #[derive(Debug)]
 pub enum RequestError {
     Timeout,
-    /// The concatenated response didn't match any plausible shape for its
-    /// function code (see `RequestRegistry::resolve`'s FC=27 check) — a real
-    /// surfaced error, never silently handed to a byte parser as if valid.
-    ShapeMismatch(usize),
     /// Another request was already pending for this IP (any function code)
     /// when this one was submitted — rejected before ever registering it.
     /// Necessary because `FragmentReassembler`'s `by_ip` map (see below) has
@@ -262,8 +258,14 @@ impl RequestRegistry {
             // Reached "done" either via the settle timer firing after at
             // least one frame arrived (resolve it), or via the hard deadline
             // with retries exhausted and nothing ever arrived (timeout).
-            let result =
-                if pending.frames.is_empty() { Err(RequestError::Timeout) } else { resolve_frames(function_code, pending.frames) };
+            // Frames are concatenated unchecked: shape checks belong to the
+            // firmware-aware parsers (FC=27's geometry differs per family —
+            // see `channel_config::parse_channel_config`), not this transport.
+            let result = if pending.frames.is_empty() {
+                Err(RequestError::Timeout)
+            } else {
+                Ok(pending.frames.into_iter().flatten().collect())
+            };
             resolved.push(ResolvedRequest { ip, function_code, result, sink: pending.sink });
         }
 
@@ -279,34 +281,6 @@ fn build_request_packet(function_code: u8, chx: u8, in_out_flag: u8, body: &[u8]
     super::protocol::build_control_packet_with_status(function_code, 2, chx, 0, 0, in_out_flag, body)
 }
 
-/// Concatenates accumulated frames and, for FC=27 specifically, sanity-checks
-/// the result's shape before accepting it — a mismatch becomes a real
-/// surfaced error rather than silently corrupt data handed to the channel
-/// parser. Other function codes have no known fixed shape to check against
-/// (they degenerate to "whatever came back"), so they pass through as-is.
-fn resolve_frames(function_code: u8, frames: Vec<Vec<u8>>) -> Result<Vec<u8>, RequestError> {
-    let body: Vec<u8> = frames.into_iter().flatten().collect();
-    if function_code == FC_SYNC_DATA {
-        use super::channel_config_v118::{BYTES_PER_CHANNEL, TRAILER_SIZE_V118};
-        // The frame here still includes StructHeader+checksum; the pure
-        // per-channel body starts after StructHeader (10) and ends before
-        // the checksum (3) — see channel_config.rs's slicing convention.
-        //
-        // This check is 1.1.8-shaped (imports its constants directly) even
-        // though `resolve_frames` itself is firmware-agnostic — there's no
-        // other known-good shape to validate against yet (1.1.9 has none;
-        // it reuses the 1.1.8 parser). Revisit if/when a second firmware's
-        // real geometry is confirmed.
-        let inner_len = body.len().saturating_sub(super::protocol::STRUCT_HEADER_LEN + super::protocol::CHECKSUM_LEN);
-        let plausible = inner_len >= TRAILER_SIZE_V118
-            && (inner_len - TRAILER_SIZE_V118) % BYTES_PER_CHANNEL == 0
-            && (1..=4).contains(&((inner_len - TRAILER_SIZE_V118) / BYTES_PER_CHANNEL));
-        if !plausible {
-            return Err(RequestError::ShapeMismatch(body.len()));
-        }
-    }
-    Ok(body)
-}
 
 struct FragmentState {
     packets_count: u8,
@@ -545,7 +519,8 @@ impl WriteRegistry {
     /// reference's `UDP_tool.jugeOutTime(string IP)` does. This is not
     /// laziness: real 1.1.8 hardware, verified on the wire, replies with a
     /// bare 10-byte header whose `packets_lastlen` is **0** — it does *not*
-    /// echo the value we sent. An ACK carries no function code, no request id
+    /// echo the value we sent (and 1.1.9 fills `packets_count/lastlen` with
+    /// `0/450` instead, per Hagen's hardware notes). An ACK carries no function code, no request id
     /// and no usable length, so IP is the only thing to key on. Correlating on
     /// anything richer simply never matches, and every write times out despite
     /// being acknowledged every time (observed: writes failing 6/6 while the

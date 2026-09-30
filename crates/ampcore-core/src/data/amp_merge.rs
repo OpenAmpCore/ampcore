@@ -9,9 +9,9 @@
 //! `commands/amp_links.rs::projects_merge_amp_from_live`.
 //!
 //! Deliberately not copied: `backup_priority` (read from an unverified offset
-//! and not hashed — see the `fingerprint.rs` module doc) and
-//! `noise_gate_threshold_dbu` (no 1.1.8 readback). Both keep the project's
-//! values.
+//! and not hashed — see the `fingerprint.rs` module doc), which keeps the
+//! project's value. `noise_gate_threshold_dbu` is copied only where the amp
+//! reports one (1.1.9+); on 1.1.8 the project keeps its own.
 
 use serde::Serialize;
 use specta::Type;
@@ -120,6 +120,9 @@ fn mirror_channel(channel: &mut AmpChannel, config: &ChannelConfig, matrix_input
     channel.delay_out_ms = round_to_step(config.delay_out_ms as f64, DELAY_STEPS);
     channel.output_phase_inverted = config.output_phase_inverted;
     channel.noise_gate_enabled = config.noise_gate_enabled;
+    if let Some(threshold) = config.noise_gate_threshold_dbu {
+        channel.noise_gate_threshold_dbu = f64::from(threshold);
+    }
     channel.limiter = mirror_limiter(&config.limiter);
     channel.fir_bypassed = config.fir_bypassed;
     channel.ohms = round_to_step(config.load_ohms as f64, OHM_STEPS);
@@ -191,157 +194,18 @@ fn mirror_limiter(limiter: &Limiter) -> Limiter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-    use super::super::capability::cvr::builtin_topology;
-    use super::super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
-    use super::super::device_link::DeviceModelLink;
     use super::super::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp};
-    use super::super::project::{BackupPriority, ChannelSource};
+    use super::super::test_fixtures::*;
     use super::*;
     use crate::live::cvr::bridge::DeviceBridgeSnapshot;
-    use crate::live::cvr::channel_config::{ChannelConfigSnapshot, EqChainWire};
-    use crate::live::cvr::channel_state::AmpChannelState;
-    use crate::live::state::DiscoveredDevice;
-
-    const MAC: &str = "6A:20:67:18:B5:8A";
-    const MODEL_ID: &str = "builtin-dsp-2004";
-
-    fn models() -> Vec<AmpModelCatalogEntry> {
-        let mut entry = AmpModelCatalogEntry::new_builtin(MODEL_ID, "CVR", "DSP-2004", 4, false, AmpProtocol::CvrUdp);
-        entry.topology = builtin_topology("DSP-2004", 4, false);
-        vec![entry]
-    }
-
-    fn links() -> Vec<DeviceModelLink> {
-        vec![DeviceModelLink {
-            mac: MAC.to_string(),
-            amp_model_id: MODEL_ID.to_string(),
-            auto_matched: false,
-            updated_at: 0.0,
-        }]
-    }
-
-    /// A freshly planned DSP-2004 — every setting at its default.
-    fn assignment() -> AmpAssignment {
-        let mut assignment =
-            AmpAssignment::new(Some(MAC.to_string()), None, 4, Some(MODEL_ID.to_string()), Some("1.1.8".to_string()));
-        assignment.reconcile_matrix_size(4);
-        assignment.reconcile_eq_bands(10);
-        assignment
-    }
-
-    /// A value as the FC=27 parser hands it over: through `f32`.
-    fn wire(value: f64) -> f64 {
-        value as f32 as f64
-    }
-
-    fn live_eq(gain_db: f64) -> ChannelEq {
-        ChannelEq {
-            hp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth24, freq_hz: wire(110.0), active: true },
-            bands: (0..8)
-                .map(|i| EqBand {
-                    filter_type: if i == 0 { EqFilterType::LowShelf } else { EqFilterType::Peaking },
-                    freq_hz: wire(100.0 * (i + 1) as f64 + 0.3),
-                    gain_db: wire(gain_db),
-                    q: wire(0.7),
-                    active: i % 3 == 0,
-                })
-                .collect(),
-            lp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth12, freq_hz: wire(19900.0), active: false },
-        }
-    }
-
-    /// A tuned channel: nothing at its default.
-    fn live_channel(index: u32) -> ChannelConfig {
-        ChannelConfig {
-            channel_index: index,
-            delay_in_ms: 1.23,
-            input_muted: index == 2,
-            matrix_crosspoints: (0..4)
-                .map(|source_index| MatrixCrosspoint {
-                    source_index,
-                    gain_db: wire(-3.1),
-                    active: source_index == index || source_index == 0,
-                })
-                .collect(),
-            input_eq: live_eq(12.0),
-            output_eq: live_eq(-1.5),
-            // The merge ignores these (they have no project counterpart);
-            // `amp_push`'s own fixture gives them real values.
-            input_eq_wire: EqChainWire::default(),
-            output_eq_wire: EqChainWire::default(),
-            output_trim_db: -18.0,
-            output_volume_db: -20.0,
-            output_muted: false,
-            delay_out_ms: 7.87,
-            output_phase_inverted: index == 1,
-            noise_gate_enabled: index == 3,
-            limiter: Limiter {
-                rms: RmsLimiter {
-                    enabled: true,
-                    threshold_vrms: wire(56.99),
-                    attack_ms: 25.0,
-                    release_multiplier: 8.0,
-                    auto: true,
-                    max_vrms: wire(127.35),
-                },
-                peak: PeakLimiter {
-                    enabled: true,
-                    threshold_vp: wire(84.84),
-                    hold_ms: 0.0,
-                    release_ms: 75.0,
-                    max_vp: wire(179.89),
-                },
-            },
-            fir_bypassed: true,
-            power_mode: Some(PowerMode::LowOhm),
-            source: Some(ChannelSource { kind: SourceKind::Analog, index }),
-            input_name: Some(format!("In{}", index + 1)),
-            output_name: Some(
-                match index {
-                    0 => "Kick_A91C",
-                    1 => "OutB",
-                    _ => "TR",
-                }
-                .to_string(),
-            ),
-            analog_trim_db: 1.5,
-            analog_delay_ms: 0.25,
-            dante_trim_db: 0.0,
-            dante_delay_ms: 0.0,
-            load_ohms: 4.0,
-            backup_priority: BackupPriority { enabled: true, first: 1, second: 2, threshold_db: -80 },
-        }
-    }
 
     fn reading() -> LiveAmpReading {
+        // Padded, so the merge's trimming of the device name stays covered.
+        let mut device = device();
+        device.name = format!(" {DEVICE_NAME} ");
         LiveAmpReading {
-            device: DiscoveredDevice {
-                id: format!("cvr:{MAC}"),
-                driver_id: "cvr".to_string(),
-                brand: "CVR".to_string(),
-                name: " AMP-2004-ETH ".to_string(),
-                mac: MAC.to_string(),
-                ip: "192.168.1.50".to_string(),
-                firmware_version: "1.1.8".to_string(),
-                firmware_family: Some("1.1.8".to_string()),
-                gain_max: 0,
-                analog_input_channels: 4,
-                digital_input_channels: 4,
-                output_channels: 4,
-                machine_state: 0,
-                machine_state_decoded: Some(AmpChannelState::Normal),
-                online: true,
-                last_seen_at: 0.0,
-            },
-            snapshot: Some(ChannelConfigSnapshot {
-                channels: (0..4).map(live_channel).collect(),
-                standby: Some(false),
-                standby_locked: Some(false),
-                rotary_locked: Some(true),
-                preset_name: Some("Lab".to_string()),
-                received_at: 0.0,
-            }),
+            device,
+            snapshot: Some(snapshot()),
             bridge: Some(DeviceBridgeSnapshot { bridged: vec![Some(true), Some(false)], received_at: 0.0 }),
         }
     }
@@ -372,6 +236,27 @@ mod tests {
         assert_eq!(candidate.channels[0].noise_gate_threshold_dbu, -42.0);
         let priority = &candidate.channels[0].backup_priority;
         assert_eq!((priority.enabled, priority.first, priority.second, priority.threshold_db), (false, 0, 0, 0));
+    }
+
+    /// 1.1.9 reports the gate threshold, so a pull must take it — otherwise the
+    /// project's default would be pushed back over it on the next gate write.
+    #[test]
+    fn merge_takes_the_1_1_9_gate_threshold() {
+        let (models, links, mut reading) = (models(), links(), reading());
+        reading.device.firmware_version = "1.1.9".to_string();
+        reading.device.firmware_family = Some("1.1.9".to_string());
+        for channel in &mut reading.snapshot.as_mut().unwrap().channels {
+            channel.noise_gate_threshold_dbu = Some(-37);
+        }
+        let mut assignment = assignment();
+        assignment.firmware_version = Some("1.1.9".to_string());
+        let project = Project::new("Test".to_string(), String::new());
+
+        let candidate = mirror_live_into_assignment(&assignment, &reading, 4);
+        assert_eq!(candidate.channels[3].noise_gate_threshold_dbu, -37.0);
+        let live =
+            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &models, &links);
+        assert_eq!(fingerprint_project_amp(&project, &candidate, &models).amp_hash, live.amp_hash);
     }
 
     #[test]

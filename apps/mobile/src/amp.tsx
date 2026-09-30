@@ -57,7 +57,7 @@ export interface AmpCtx {
  * navbar and a bottom tab bar; a channel detail is its own page above them. */
 export function AmpScreen({ device, route }: { device: Device; route: Route }) {
   const { config, telemetry } = useLive([device.id])[device.id] ?? { config: null, telemetry: null };
-  const ranges = useRanges();
+  const ranges = useRanges(device.id);
   const presetsOk = usePresetsSupported(device.id);
 
   // Silent on success — the next poll is the confirmation. Core retries a
