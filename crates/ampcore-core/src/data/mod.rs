@@ -6,5 +6,6 @@ pub mod capability;
 pub mod common;
 pub mod device_link;
 pub mod edit_lock;
+pub mod filter_response;
 pub mod fingerprint;
 pub mod project;

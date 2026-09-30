@@ -11,7 +11,7 @@ use commands::amp_links::{
 };
 use commands::amp_push::{projects_plan_amp_push, projects_push_amp_to_live};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
-use commands::capability::amp_capability_resolve;
+use commands::capability::{amp_capability_resolve, eq_response_curve};
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::fingerprint::{
     fingerprint_live_device, fingerprint_live_device_with_fir, fingerprint_live_devices, fingerprint_project,
@@ -83,6 +83,7 @@ pub fn run() {
             projects_set_output_bridge,
             projects_set_channel_power_mode,
             amp_capability_resolve,
+            eq_response_curve,
             amp_models_list,
             amp_models_create,
             amp_models_update,

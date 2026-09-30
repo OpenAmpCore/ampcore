@@ -8,8 +8,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use ampcore_core::data::capability::cvr::{cvr_param_ranges, AmpParamRanges};
 use ampcore_core::data::capability::{eq_filter_capabilities, EqFilterCapabilityEntry};
+use ampcore_core::data::filter_response::{response_curve, EqStageRef, ResponsePoint, DEFAULT_CURVE_POINTS};
 use ampcore_core::data::project::{
-    CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
+    ChannelEq, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
 };
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
@@ -339,6 +340,13 @@ fn amp_eq_filter_capabilities() -> Vec<EqFilterCapabilityEntry> {
     eq_filter_capabilities()
 }
 
+/// EQ graph curve — core's `filter_response`, the same math desktop draws.
+/// `stage` isolates one HP/band/LP; `None` is the whole chain.
+#[tauri::command]
+fn eq_response_curve(eq: ChannelEq, stage: Option<EqStageRef>, points: Option<u32>) -> Vec<ResponsePoint> {
+    response_curve(&eq, stage, points.unwrap_or(DEFAULT_CURVE_POINTS))
+}
+
 // Presets (FC=59, firmware 1.1.8 only — the gate is core's `presets_supported`).
 
 #[tauri::command]
@@ -389,6 +397,7 @@ pub fn run() {
             set_limiter,
             set_matrix_crosspoint,
             amp_eq_filter_capabilities,
+            eq_response_curve,
             set_rotary_lock,
             set_channel_name,
             set_device_name,

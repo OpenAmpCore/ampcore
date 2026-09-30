@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Dropdown, Tooltip, dropdownVariants } from "@heroui/react";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { SimpleSelect } from "./SimpleSelect";
-import { buildBandResponseCurve, buildResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
+import { useResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
 import {
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
@@ -322,12 +322,8 @@ function ResponseGraph({
     { kind: "lp" },
   ];
 
-  const isolatedCurve = useMemo(() => {
-    if (!selectedRef) return null;
-    const info = stageInfo(eq, selectedRef, capsByType);
-    if (!info.active) return null;
-    return buildBandResponseCurve(eq, selectedRef);
-  }, [eq, selectedRef, capsByType]);
+  const selectedActive = selectedRef !== null && stageInfo(eq, selectedRef, capsByType).active;
+  const isolatedCurve = useResponseCurve(selectedActive ? eq : null, selectedRef);
 
   function beginDrag(event: React.PointerEvent<SVGElement>, ref: EqStageRef, mode: DragMode) {
     if (!interactive) return;
@@ -700,7 +696,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   }, [channelIndex, direction]);
 
   const displayEq = useMemo(() => applyPreview(eq, preview), [eq, preview]);
-  const points = useMemo(() => buildResponseCurve(displayEq), [displayEq]);
+  const points = useResponseCurve(displayEq) ?? [];
 
   const freqRange = capability.paramRanges.crossoverFreqHz;
   const gainRange = capability.paramRanges.eqBandGainDb;

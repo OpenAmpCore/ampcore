@@ -10,46 +10,10 @@
    min-height/min-width pair, a tablet passes it in either orientation. */
 @custom-variant tablet (@media (min-width: 600px) and (min-height: 600px));
 
-/* Global size knob: Tailwind v4's whole spacing scale is calc(var(--spacing) * N)
-   with --spacing: 0.25rem, and text sizes are rem too, so this one root
-   font-size scales nearly every padding/gap/size/text in the app uniformly —
-   more fits on screen, nothing individually re-tuned. rem-based, so it
-   composes correctly no matter how deep the element is nested. */
-html {
-  font-size: 87.5%; /* 16px -> 14px */
-}
-
-/* Toggle/Range don't shrink with the knob above: Konsta only forwards
-   `className` to their outer wrapper, never to the internal thumb/track — and
-   those parts' fixed-px math (the toggle's checked-state translate, the range
-   thumb's vertical-centering margin) is tuned to Konsta's default size, so a
-   plain class override on them would misalign rather than shrink. `transform`
-   sidesteps that: it scales the whole rendered subtree as one unit, so
-   Konsta's own internal offsets stay correct at the smaller size.
-   Requested explicitly, smaller than the knob above alone gives: this puts
-   both under the ~44px accessibility touch-target minimum. */
-.k-toggle {
-  transform: scale(0.72);
-}
-.k-range {
-  /* Y only — X is drag travel; scaling it would shorten the slider's range, not just its look. */
-  transform: scaleY(0.65);
-}
-
-/* Tablets have the room the phone knobs above don't: undo both rather than
-   inventing a third size. Same condition as the `tablet` variant at the top —
-   keep the two in sync. */
-@media (min-width: 600px) and (min-height: 600px) {
-  html {
-    font-size: 100%;
-  }
-  .k-toggle {
-    transform: scale(1);
-  }
-  .k-range {
-    transform: scaleY(1);
-  }
-}
+/* Konsta's own sizes are kept as-is: its controls are built around the ~44px
+   touch target, which is what matters with one thumb in a dark venue. (An
+   earlier build shrank them with a root font-size and transform: scale()
+   hacks; the overhaul dropped that for usability.) */
 
 /* Konsta sets --k-safe-area-* from env() on its own .safe-areas root. Because it
    redeclares them *there*, a value set on <html> is shadowed for the whole app

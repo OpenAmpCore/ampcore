@@ -1,6 +1,8 @@
 use tauri::State;
 
 use ampcore_core::data::capability::{resolve, AmpCapability};
+use ampcore_core::data::filter_response::{response_curve, EqStageRef, ResponsePoint, DEFAULT_CURVE_POINTS};
+use ampcore_core::data::project::ChannelEq;
 use crate::data::store::ProjectDataState;
 use ampcore_core::error::AppError;
 
@@ -22,4 +24,13 @@ pub fn amp_capability_resolve(
         .find(|m| m.id == amp_model_id)
         .ok_or_else(|| AppError::from(format!("amp model {} not found", amp_model_id)))?;
     Ok(resolve(model, firmware_version.as_deref()))
+}
+
+/// Magnitude response of one EQ chain for the EQ graph — the whole chain, or
+/// one stage isolated. Pure math over the passed-in values (a live preview of
+/// an uncommitted drag included), shared with the mobile app via core.
+#[tauri::command]
+#[specta::specta]
+pub fn eq_response_curve(eq: ChannelEq, stage: Option<EqStageRef>, points: Option<u32>) -> Vec<ResponsePoint> {
+    response_curve(&eq, stage, points.unwrap_or(DEFAULT_CURVE_POINTS))
 }

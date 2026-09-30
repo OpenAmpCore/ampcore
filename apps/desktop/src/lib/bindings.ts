@@ -149,6 +149,12 @@ export const commands = {
 	 *  catalog entry's topology and the (free-text) firmware version string.
 	 */
 	ampCapabilityResolve: (ampModelId: string, firmwareVersion: string | null) => typedError<AmpCapability_Serialize, AppError>(__TAURI_INVOKE("amp_capability_resolve", { ampModelId, firmwareVersion })),
+	/**
+	 *  Magnitude response of one EQ chain for the EQ graph — the whole chain, or
+	 *  one stage isolated. Pure math over the passed-in values (a live preview of
+	 *  an uncommitted drag included), shared with the mobile app via core.
+	 */
+	eqResponseCurve: (eq: ChannelEq, stage: { kind: "hp" } | { kind: "lp" } | { kind: "band"; bandIndex: number } | null, points: number | null) => __TAURI_INVOKE<ResponsePoint[]>("eq_response_curve", { eq, stage, points }),
 	ampModelsList: () => typedError<AmpModelCatalogEntry_Serialize[], AppError>(__TAURI_INVOKE("amp_models_list")),
 	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
 	/**
@@ -1609,6 +1615,12 @@ export type EqFilterCapabilityEntry = {
 export type EqFilterType = "peaking" | "lowShelf" | "highShelf" | "allPass1st" | "allPass2nd" | "generalLow" | "generalHigh" | "butterworthLow" | "butterworthHigh" | "besselLow" | "besselHigh";
 
 /**
+ *  One of the 10 chain stages: the HP/LP crossover slot or a parametric band
+ *  by its index into `ChannelEq.bands` (the same index `set_eq_band` takes).
+ */
+export type EqStageRef = { kind: "hp" } | { kind: "lp" } | { kind: "band"; bandIndex: number };
+
+/**
  *  Where a fingerprint came from. Flat rather than an internally tagged enum:
  *  `kind` says which of the optional ids are set.
  */
@@ -1764,6 +1776,11 @@ export type PushStage = {
 	group: string,
 	label: string,
 	packets: number,
+};
+
+export type ResponsePoint = {
+	freqHz: number | null,
+	db: number | null,
 };
 
 /**  RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`. */

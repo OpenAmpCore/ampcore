@@ -1,7 +1,6 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { List, ListItem, Toggle } from "konsta/react";
 
 // ponytail: hand-written camelCase subsets of ampcore_core's serialized types
 // (DiscoveredDevice, ChannelConfigSnapshot, Telemetry, DevicePresetsSnapshot).
@@ -16,11 +15,13 @@ export interface Device {
   analogInputChannels: number;
   digitalInputChannels: number;
   outputChannels: number;
+  /** Core's decoded FC=0 machine state; `null` when the firmware has no table. */
+  machineStateDecoded: string | null;
   online: boolean;
 }
-/** Core's `EqFilterType`/`CrossoverFilterType`, camelCase on the wire. The
- * parametric list is ordered as core declares it; `EQ_FILTER_TYPES` is what
- * the picker renders, `eqFilterCaps()` says which of gain/Q each one has. */
+/** Core's `EqFilterType`/`CrossoverFilterType`, camelCase on the wire, in
+ * core's declaration order. Which of gain/Q each one has is core's call
+ * (`useEqFilterCaps`), never a TS table. */
 export const EQ_FILTER_TYPES = [
   "peaking",
   "lowShelf",
@@ -49,6 +50,32 @@ export const CROSSOVER_FILTER_TYPES = [
   "linkwitzRiley48",
 ] as const;
 export type CrossoverFilterType = (typeof CROSSOVER_FILTER_TYPES)[number];
+
+/** Display names only — what the picker shows instead of core's identifiers. */
+export const FILTER_LABELS: Record<EqFilterType | CrossoverFilterType, string> = {
+  peaking: "Peaking",
+  lowShelf: "Low shelf",
+  highShelf: "High shelf",
+  allPass1st: "All-pass 1st order",
+  allPass2nd: "All-pass 2nd order",
+  generalLow: "Low-pass (Q)",
+  generalHigh: "High-pass (Q)",
+  butterworthLow: "Butterworth low-pass",
+  butterworthHigh: "Butterworth high-pass",
+  besselLow: "Bessel low-pass",
+  besselHigh: "Bessel high-pass",
+  butterworth12: "Butterworth 12 dB/oct",
+  bessel12: "Bessel 12 dB/oct",
+  linkwitzRiley12: "Linkwitz-Riley 12 dB/oct",
+  butterworth18: "Butterworth 18 dB/oct",
+  butterworth24: "Butterworth 24 dB/oct",
+  bessel24: "Bessel 24 dB/oct",
+  linkwitzRiley24: "Linkwitz-Riley 24 dB/oct",
+  butterworth36: "Butterworth 36 dB/oct",
+  butterworth48: "Butterworth 48 dB/oct",
+  bessel48: "Bessel 48 dB/oct",
+  linkwitzRiley48: "Linkwitz-Riley 48 dB/oct",
+};
 
 export interface EqBand {
   filterType: EqFilterType;
@@ -137,114 +164,113 @@ export interface Presets {
   slots: { index: number; name: string }[];
   activePresetName: string | null;
 }
-/** Core's `LiveWriteAck`: what one write command put on the wire. An ack proves
- * the amp received the packets, never that the parameter took the value — the
- * next poll is what shows the real state. */
-export interface WriteAck {
-  packets: number;
-  attempts: number;
-  elapsedMs: number;
-  coalesced: number;
-}
 
-/** Runs a command against the open amp; the result shows up as the screen's toast. */
+/** Runs a command against the open amp. Silent on success — the next poll
+ * shows the new state; a failure raises the screen's error toast. */
 export type Write = (cmd: string, args: Record<string, unknown>) => Promise<void>;
 
+export type Dir = "in" | "out";
 /** Outputs are lettered A, B, C… (repo convention; inputs are numbered). */
 export const outputLabel = (i: number) => String.fromCharCode(65 + i);
+export const channelLabel = (dir: Dir, ch: number) => (dir === "in" ? `${ch + 1}` : outputLabel(ch));
 
-// Hash routes:
-//   #/                        amps
-//   #/settings                settings
-//   #/amp/:id                 landing (meters, standby, device)
-//   #/amp/:id/presets         presets
-//   #/amp/:id/in|out/:ch      that channel's signal path
-//   #/amp/:id/in|out/:ch/:st  one stage of it
-// Writing location.hash pushes WebView history, and wry's WryActivity maps
-// Android's back button to canGoBack() → goBack(), so system back walks
-// stage → path → landing → amps with no router library.
-// ponytail: swap for wouter/react-router if nested layouts or guards appear.
-export type Dir = "in" | "out";
+/** How many channels a direction has. Counts come from the amp and are not
+ * assumed equal, but every control indexes `config.channels`, so a count
+ * can't outrun that array. */
+export const channelCount = (dir: Dir, config: Snapshot, d: Device) =>
+  Math.min(dir === "in" ? d.analogInputChannels : d.outputChannels, config.channels.length);
 
-/** The signal path itself. A plain table, not a backend call: `CvrUdp` is the
- * only protocol and the order is identical on 1.1.8 and 1.1.9, so a command
- * would return a constant. Everything that genuinely varies per model or
- * firmware already crosses the bridge — channel counts on `Device`, bounds via
- * `amp_ranges`, gain/Q support via `amp_eq_filter_capabilities`, presets via
- * `amp_presets_supported`. Nothing here is a DSP or capability fact.
- *
- * `short` is the strip glyph, `label` the screen title. Input has no source or
- * trim stage because mobile has no command to write either. */
-export const PATHS = {
-  in: [
-    { id: "in", short: "IN", label: "Input" },
-    { id: "delay", short: "DLY", label: "Delay" },
-    { id: "eq", short: "EQ", label: "Input EQ" },
-  ],
-  out: [
-    { id: "matrix", short: "MTX", label: "Sources" },
-    { id: "eq", short: "EQ", label: "Output EQ" },
-    { id: "limiter", short: "LIM", label: "Limiter" },
-    { id: "delay", short: "DLY", label: "Delay & Polarity" },
-    { id: "out", short: "OUT", label: "Output" },
-  ],
-} as const satisfies Record<Dir, readonly { id: string; short: string; label: string }[]>;
+/** Decoded AmpChannelState (core) → status. Anything unlisted is neutral.
+ * Status colours are fixed, never the accent. */
+export type Status = "success" | "warning" | "danger" | "default";
+const STATE_STATUS: Record<string, Status> = {
+  normal: "success",
+  run: "success",
+  clip: "warning",
+  limit: "warning",
+  temp: "warning",
+  fault: "danger",
+  overload: "danger",
+  dcp: "danger",
+  powerError: "danger",
+  open: "danger",
+};
+export const stateStatus = (s: string | null | undefined): Status => (s ? (STATE_STATUS[s] ?? "default") : "default");
+export const isNormal = (s: string | null | undefined) => !s || stateStatus(s) === "success";
 
-export type StageId = (typeof PATHS)[Dir][number]["id"];
-export const stagesFor = (dir: Dir): readonly { id: string; short: string; label: string }[] => PATHS[dir];
-
-const onHash = (cb: () => void) => {
-  addEventListener("hashchange", cb);
-  return () => removeEventListener("hashchange", cb);
+/** Konsta Chip colours for a status. */
+export const chipColors = (c: Status) => {
+  const bg = { success: "bg-green-600", warning: "bg-orange-500", danger: "bg-red-600", default: "" }[c];
+  const text = c === "default" ? "" : "text-white";
+  return { fillBgIos: bg, fillBgMaterial: bg, fillTextIos: text, fillTextMaterial: text };
 };
 
+// ---------------------------------------------------------------------------
+// Routes
+//   #/                          amps
+//   #/settings                  settings
+//   #/amp/:id                   Channels tab
+//   #/amp/:id/routing|presets|device   the other tabs
+//   #/amp/:id/in|out/:ch[/:st]  one channel's detail, optionally on a stage
+//
+// "Back" means one level up, everywhere: entering an amp, a detail or
+// Settings pushes a history entry; switching tab, channel or stage replaces
+// the current one. Android's back button (wry maps it to WebView goBack) and
+// the navbar's back link both land on history.back(), so the two can't drift.
+// ponytail: swap for a router library if nested layouts or guards appear.
+export type Tab = "channels" | "routing" | "presets" | "device";
 export interface Route {
   id: string | null;
-  dir: Dir;
-  /** `null` on the landing screen — no channel picked yet. */
-  ch: number | null;
-  /** `null` = the path overview; otherwise the open stage. */
-  stage: StageId | null;
-  presets: boolean;
   settings: boolean;
+  tab: Tab;
+  detail: { dir: Dir; ch: number; stage: string | null } | null;
 }
 
-/** An unknown stage falls back to the path overview rather than a blank
- * screen — same defensive shape the old tab route had. */
+const ROUTE_EVENT = "ampcore:route";
+const subscribeRoute = (cb: () => void) => {
+  for (const e of ["popstate", "hashchange", ROUTE_EVENT]) addEventListener(e, cb);
+  return () => {
+    for (const e of ["popstate", "hashchange", ROUTE_EVENT]) removeEventListener(e, cb);
+  };
+};
+
 export function useRoute(): Route {
-  const hash = useSyncExternalStore(onHash, () => location.hash);
-  const base: Route = { id: null, dir: "out", ch: null, stage: null, presets: false, settings: hash === "#/settings" };
-  const m = hash.match(/^#\/amp\/([^/]+)(?:\/(in|out|presets)(?:\/(\d+)(?:\/(\w+))?)?)?/);
+  const hash = useSyncExternalStore(subscribeRoute, () => location.hash);
+  const base: Route = { id: null, settings: hash === "#/settings", tab: "channels", detail: null };
+  const m = hash.match(/^#\/amp\/([^/]+)(?:\/(routing|presets|device)|\/(in|out)\/(\d+)(?:\/(\w+))?)?/);
   if (!m) return base;
   const id = decodeURIComponent(m[1]);
-  if (m[2] === "presets") return { ...base, id, presets: true, settings: false };
-  const dir: Dir = m[2] === "in" ? "in" : "out";
-  const ch = m[3] === undefined ? null : Number(m[3]);
-  const stage = stagesFor(dir).find((s) => s.id === m[4])?.id ?? null;
-  return { id, dir, ch, stage: (stage as StageId | null) ?? null, presets: false, settings: false };
+  if (m[2]) return { ...base, id, tab: m[2] as Tab };
+  if (m[3]) return { ...base, id, detail: { dir: m[3] as Dir, ch: Number(m[4]), stage: m[5] ?? null } };
+  return { ...base, id };
 }
 
-const amp = (id: string) => `#/amp/${encodeURIComponent(id)}`;
-
-export function go(id: string | null) {
-  location.hash = id ? amp(id) : "#/";
+/** `depth` counts our own pushed entries, so `back` knows whether there is
+ * anything of ours behind the current one (a cold start on a deep hash has none). */
+function nav(hash: string, replace = false) {
+  if (replace) history.replaceState(history.state, "", hash);
+  else history.pushState({ depth: ((history.state?.depth as number) ?? 0) + 1 }, "", hash);
+  dispatchEvent(new Event(ROUTE_EVENT));
 }
-export const goPath = (id: string, dir: Dir, ch: number) => {
-  location.hash = `${amp(id)}/${dir}/${ch}`;
-};
-export const goStage = (id: string, dir: Dir, ch: number, stage: string) => {
-  location.hash = `${amp(id)}/${dir}/${ch}/${stage}`;
-};
-export const goPresets = (id: string) => {
-  location.hash = `${amp(id)}/presets`;
-};
-export const goSettings = () => {
-  location.hash = "#/settings";
-};
+const ampHash = (id: string) => `#/amp/${encodeURIComponent(id)}`;
 
-/** Colour scheme: saved in localStorage, applied as the `dark` class on <html> (Konsta's dark
- * variant keys off it). index.html applies the saved value before first paint.
- * ponytail: "auto" is resolved once, not live-tracked. */
+export const openAmp = (id: string) => nav(ampHash(id));
+export const openSettings = () => nav("#/settings");
+export const goTab = (id: string, tab: Tab) => nav(tab === "channels" ? ampHash(id) : `${ampHash(id)}/${tab}`, true);
+export const openDetail = (id: string, dir: Dir, ch: number, stage: string | null = null, replace = false) =>
+  nav(`${ampHash(id)}/${dir}/${ch}${stage ? `/${stage}` : ""}`, replace);
+/** One level up; `fallback` is where "up" is when nothing of ours is behind. */
+export function back(fallback: string) {
+  if ((history.state?.depth ?? 0) > 0) history.back();
+  else nav(fallback, true);
+}
+export const upFromAmp = () => back("#/");
+export const upFromDetail = (id: string) => back(ampHash(id));
+
+// ---------------------------------------------------------------------------
+// Colour scheme: saved in localStorage, applied as the `dark` class on <html>
+// (Konsta's dark variant keys off it). index.html applies it before first paint.
+// ponytail: "auto" is resolved once, not live-tracked.
 export type Scheme = "dark" | "light" | "auto";
 const SCHEME_KEY = "ampcore-color-scheme";
 export const savedScheme = (): Scheme => {
@@ -264,6 +290,9 @@ export function applyScheme(s: Scheme) {
   document.documentElement.classList.toggle("dark", dark);
 }
 
+// ---------------------------------------------------------------------------
+// Data hooks
+
 /** Slider/name bounds from core, fetched once. */
 let ranges: Promise<Ranges> | undefined;
 export function useRanges(): Ranges | null {
@@ -275,11 +304,12 @@ export function useRanges(): Ranges | null {
   return r;
 }
 
-/** Which filter types expose gain/Q, resolved by core (never a TS table).
- * Device-independent today, so fetched once like `useRanges`. */
-let eqCaps: Promise<Record<string, { supportsGain: boolean; supportsQ: boolean }>> | undefined;
-export function useEqFilterCaps() {
-  const [caps, setCaps] = useState<Record<string, { supportsGain: boolean; supportsQ: boolean }> | null>(null);
+/** Which filter types expose gain/Q, resolved by core. Device-independent
+ * today, so fetched once like `useRanges`. */
+type Caps = Record<string, { supportsGain: boolean; supportsQ: boolean }>;
+let eqCaps: Promise<Caps> | undefined;
+export function useEqFilterCaps(): Caps | null {
+  const [caps, setCaps] = useState<Caps | null>(null);
   useEffect(() => {
     eqCaps ??= invoke<{ filterType: string; supportsGain: boolean; supportsQ: boolean }[]>("amp_eq_filter_capabilities").then((list) =>
       Object.fromEntries(list.map((e) => [e.filterType, { supportsGain: e.supportsGain, supportsQ: e.supportsQ }])),
@@ -287,6 +317,15 @@ export function useEqFilterCaps() {
     eqCaps.then(setCaps, () => setCaps(null));
   }, []);
   return caps;
+}
+
+/** Presets are firmware-gated; core decides (`write_helpers::presets_supported`). */
+export function usePresetsSupported(id: string): boolean {
+  const [ok, setOk] = useState(false);
+  useEffect(() => {
+    invoke<boolean>("amp_presets_supported", { deviceId: id }).then(setOk, () => setOk(false));
+  }, [id]);
+  return ok;
 }
 
 /** Discovered amps, sorted by ip (the backend hands over HashMap order, which
@@ -311,59 +350,61 @@ export function useDevices(): Device[] {
   return [...devices].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
 }
 
-/** Polls one amp (config + heartbeat) while the caller is mounted: subscribes
- * on mount, unsubscribes on unmount. State is the polled one, so a switch
- * reflects a write one poll cycle (~200ms) later. */
-export function useAmpLive(id: string) {
-  const [config, setConfig] = useState<Snapshot | null>(null);
-  const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+export interface Live {
+  config: Snapshot | null;
+  telemetry: Telemetry | null;
+}
+/** Polls the given amps (config + heartbeat) while mounted, keyed by device
+ * id. The amp list passes every online amp, an amp screen just its own.
+ * ponytail: every listed amp gets core's full 200ms poll; add a slow
+ * list-only rate in core if a large rig loads the network. */
+export function useLive(ids: string[]): Record<string, Live> {
+  const [live, setLive] = useState<Record<string, Live>>({});
+  const key = ids.join("\n");
   useEffect(() => {
     const token = crypto.randomUUID();
+    const want = new Set(key ? key.split("\n") : []);
     let offs: (() => void)[] = [];
     let cancelled = false;
+    const put = (id: string, patch: Partial<Live>) =>
+      want.has(id) && setLive((m) => ({ ...m, [id]: { ...(m[id] ?? { config: null, telemetry: null }), ...patch } }));
     (async () => {
       const l = await Promise.all([
-        listen<{ deviceId: string; config: Snapshot }>("live_channel_config:updated", (e) => {
-          if (e.payload.deviceId === id) setConfig(e.payload.config);
-        }),
-        listen<{ deviceId: string; telemetry: Telemetry }>("live_telemetry:updated", (e) => {
-          if (e.payload.deviceId === id) setTelemetry(e.payload.telemetry);
-        }),
+        listen<{ deviceId: string; config: Snapshot }>("live_channel_config:updated", (e) => put(e.payload.deviceId, { config: e.payload.config })),
+        listen<{ deviceId: string; telemetry: Telemetry }>("live_telemetry:updated", (e) =>
+          put(e.payload.deviceId, { telemetry: e.payload.telemetry }),
+        ),
       ]);
       if (cancelled) return l.forEach((f) => f());
       offs = l;
-      await invoke("poll_subscribe", { token, deviceIds: [id] });
+      await invoke("poll_subscribe", { token, deviceIds: [...want] });
     })();
     return () => {
       cancelled = true;
       offs.forEach((f) => f());
       void invoke("poll_subscribe", { token, deviceIds: [] });
     };
-  }, [id]);
-  return { config, telemetry };
+  }, [key]);
+  return live;
 }
 
-/** Konsta Chip colours for a status (fixed red/orange/green, not the accent). */
-export const chipColors = (c: "success" | "warning" | "danger" | "default") => {
-  const bg = { success: "bg-green-500", warning: "bg-orange-500", danger: "bg-red-500", default: "" }[c];
-  const text = c === "default" ? "" : "text-white";
-  return { fillBgIos: bg, fillBgMaterial: bg, fillTextIos: text, fillTextMaterial: text };
-};
-
-/** A settings-style row: name on the left, (optional extra +) toggle on the right. */
-export function Row(p: { name: string; extra?: ReactNode; checked: boolean; disabled: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <List strongIos insetIos className="!my-0">
-      <ListItem
-        label
-        title={p.name}
-        after={
-          <span className="flex items-center gap-2">
-            {p.extra}
-            <Toggle checked={p.checked} disabled={p.disabled} onChange={(e) => p.onChange(e.target.checked)} />
-          </span>
-        }
-      />
-    </List>
-  );
+export interface ResponsePoint {
+  freqHz: number;
+  db: number;
+}
+export type EqStageRef = { kind: "hp" } | { kind: "lp" } | { kind: "band"; bandIndex: number };
+/** EQ graph curve from core's `filter_response` (the same math desktop
+ * draws). `stage` isolates one HP/band/LP. The last curve stays up while the
+ * next is in flight, and a stale reply never overwrites a newer one. */
+export function useResponseCurve(eq: ChannelEq | null, stage: EqStageRef | null = null, points = 240): ResponsePoint[] | null {
+  const [curve, setCurve] = useState<ResponsePoint[] | null>(null);
+  const seq = useRef(0);
+  const key = eq ? JSON.stringify([eq, stage]) : null;
+  useEffect(() => {
+    const mine = ++seq.current;
+    if (!eq) return setCurve(null);
+    invoke<ResponsePoint[]>("eq_response_curve", { eq, stage, points }).then((c) => mine === seq.current && setCurve(c), () => {});
+    // `key` stands in for eq/stage: both are rebuilt every poll.
+  }, [key, points]);
+  return eq ? curve : null;
 }
