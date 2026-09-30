@@ -730,7 +730,7 @@ fn canonical_band(band: &EqBand) -> EqBandCanonical {
     }
 }
 
-fn canonical_eq(eq: &ChannelEq) -> EqCanonical {
+pub(crate) fn canonical_eq(eq: &ChannelEq) -> EqCanonical {
     EqCanonical {
         hp: canonical_crossover(&eq.hp),
         bands: eq.bands.iter().map(canonical_band).collect(),
@@ -1110,7 +1110,7 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
-fn format_crossover(slot: &CrossoverCanonical) -> String {
+pub(crate) fn format_crossover(slot: &CrossoverCanonical) -> String {
     if slot.active {
         format!("{:?} · {:.1} Hz", slot.filter_type, slot.freq_hz)
     } else {
@@ -1118,7 +1118,7 @@ fn format_crossover(slot: &CrossoverCanonical) -> String {
     }
 }
 
-fn format_band(band: &EqBandCanonical) -> String {
+pub(crate) fn format_band(band: &EqBandCanonical) -> String {
     if !band.active {
         return "bypassed".to_string();
     }

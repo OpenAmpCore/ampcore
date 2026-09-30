@@ -42,6 +42,10 @@ use commands::projects::{
     projects_set_matrix_crosspoint, projects_set_output_bridge, projects_update,
     projects_set_source_trim, projects_set_backup_priority,
 };
+use commands::speakers::{
+    projects_set_channel_speaker, speakers_channel_states, speakers_delete, speakers_import_sl, speakers_list,
+    speakers_save_from_outputs, speakers_update_details, speakers_update_from_output,
+};
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
 
@@ -78,6 +82,14 @@ pub fn run() {
             projects_set_channel_fir_bypass,
             projects_set_output_bridge,
             projects_set_channel_power_mode,
+            projects_set_channel_speaker,
+            speakers_list,
+            speakers_import_sl,
+            speakers_update_details,
+            speakers_delete,
+            speakers_save_from_outputs,
+            speakers_update_from_output,
+            speakers_channel_states,
             amp_capability_resolve,
             eq_response_curve,
             amp_models_list,

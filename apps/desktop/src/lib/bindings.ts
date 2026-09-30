@@ -152,6 +152,32 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
+	 *  Sets (`library_id` given) or removes an output's speaker reference. Its
+	 *  values are left alone — see the module doc.
+	 */
+	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, libraryId: string | null, wayIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, libraryId, wayIndex })),
+	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
+	/**
+	 *  Parses vendor `.sl` files. With `commit`, every file that parses is added
+	 *  to the library; without, nothing is saved (the import preview).
+	 */
+	speakersImportSl: (files: SlUpload[], commit: boolean) => typedError<SlImportResult[], AppError>(__TAURI_INVOKE("speakers_import_sl", { files, commit })),
+	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
+	/**  Outputs set up from the entry keep their values and read as detached. */
+	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
+	/**
+	 *  Creates a library entry from consecutive outputs — one way per output, in
+	 *  order — and sets those outputs up from it.
+	 */
+	speakersSaveFromOutputs: (projectId: string, assignmentId: string, channelIndices: number[], details: SpeakerDetails) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_save_from_outputs", { projectId, assignmentId, channelIndices, details })),
+	/**
+	 *  Replaces one way of an entry with an output's current values. Only that
+	 *  output is marked current; every other output set up from the entry then
+	 *  reads "library updated".
+	 */
+	speakersUpdateFromOutput: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_update_from_output", { projectId, assignmentId, channelIndex })),
+	speakersChannelStates: (projectId: string, assignmentId: string) => typedError<ChannelSpeakerState[], AppError>(__TAURI_INVOKE("speakers_channel_states", { projectId, assignmentId })),
+	/**
 	 *  Resolves what can be configured, and within what ranges, for a given amp
 	 *  model + firmware version — purely offline, no live device involved.
 	 *  Nothing here is persisted independently: it's always recomputed from the
@@ -783,6 +809,12 @@ export type AmpChannel = {
 	 *  second source to fail over to (`AmpModelCatalogEntry.is_dante`).
 	 */
 	backupPriority?: BackupPriority,
+	/**
+	 *  The speaker-library way this output was set up from, if any — a
+	 *  reference only. The values themselves live in the fields above, so the
+	 *  project never needs the library to open or push; see `data/speaker.rs`.
+	 */
+	speaker?: SpeakerRef | null,
 };
 
 /**
@@ -1381,6 +1413,12 @@ export type ChannelSource = {
 	index: number,
 };
 
+export type ChannelSpeakerState = {
+	channelIndex: number,
+	speaker: SpeakerRef,
+	status: SpeakerStatus,
+};
+
 /**  Where a clip comes from or goes to on a channel. */
 export type ClipSection = "inputEq" | "outputEq" | "rmsLimiter" | "peakLimiter";
 
@@ -1838,6 +1876,21 @@ export type RmsLimiterCanonical = {
 	maxVrms: number | null,
 };
 
+export type SlImportResult = {
+	fileName: string,
+	/**  Why the file can't be imported; `None` when it can (or was). */
+	error: string | null,
+	/**  The entry the file makes. Not in the library unless `commit` was set. */
+	entry: SpeakerLibraryEntry | null,
+	/**  Brand, family and model already exist in the library — imported anyway. */
+	duplicate: boolean,
+};
+
+export type SlUpload = {
+	fileName: string,
+	bytes: number[],
+};
+
 /**
  *  How many physical channels of one `SourceKind` a model exposes, and
  *  whether any of them can feed any digital input (`patchable`) or each one
@@ -1905,6 +1958,78 @@ export type SpeakerCanonical = {
 	powerMode: PowerMode | null,
 	loadOhms: number | null,
 	firBypassed: boolean,
+};
+
+/**
+ *  The user-editable metadata of an entry. `way_labels` must have one label
+ *  per way.
+ */
+export type SpeakerDetails = {
+	brand: string,
+	family: string,
+	model: string,
+	application: string,
+	notes: string,
+	wayLabels: string[],
+};
+
+export type SpeakerLibraryEntry = {
+	id: string,
+	brand: string,
+	family: string,
+	model: string,
+	application: string,
+	notes: string,
+	/**
+	 *  Bumped whenever a way's processing changes, never for metadata, so
+	 *  outputs set up from an older revision can say so.
+	 */
+	revision: number,
+	ways: SpeakerWay[],
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+export type SpeakerProcessing = {
+	outputEq: ChannelEq,
+	limiter: Limiter,
+	delayOutMs: number | null,
+	phaseInverted: boolean,
+};
+
+/**  Which library way an output was set up from, and which revision of it. */
+export type SpeakerRef = {
+	libraryId: string,
+	wayIndex: number,
+	revision: number,
+	/**
+	 *  "Brand Model · Way" at assign time, so a reference whose entry was
+	 *  deleted from this machine's library still reads as something.
+	 */
+	label: string,
+};
+
+export type SpeakerStatus = 
+/**  The output holds exactly what its library way says. */
+{ kind: "match" } | 
+/**  The output was changed after it was set up. */
+{ kind: "edited"; fields: string[] } | 
+/**
+ *  The library way changed after the output was set up. `fields` is what
+ *  re-applying would change (empty when only the revision moved).
+ */
+{ kind: "libraryUpdated"; fields: string[] } | 
+/**  The entry or way is gone from this machine's library. */
+{ kind: "detached" };
+
+export type SpeakerWay = {
+	label: string,
+	processing: SpeakerProcessing,
+	/**
+	 *  The way's FC=57 blob as imported, hex — lossless (FIR, volume, DEQ),
+	 *  kept for a later live write. `None` for a way saved from an output.
+	 */
+	fc57Hex?: string | null,
 };
 
 export type Telemetry = {

@@ -6,3 +6,4 @@ pub mod device_links;
 pub mod fingerprint;
 pub mod live_control;
 pub mod projects;
+pub mod speakers;

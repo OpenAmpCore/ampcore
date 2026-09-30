@@ -26,15 +26,15 @@ use super::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
 pub const TRAILER_SIZE_V118: usize = 172;
 pub const BYTES_PER_CHANNEL: usize = 515;
 
-fn f32_le(body: &[u8], abs: usize) -> f32 {
+pub(super) fn f32_le(body: &[u8], abs: usize) -> f32 {
     body.get(abs..abs + 4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0.0)
 }
 
-fn u16_le(body: &[u8], abs: usize) -> u16 {
+pub(super) fn u16_le(body: &[u8], abs: usize) -> u16 {
     body.get(abs..abs + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).unwrap_or(0)
 }
 
-fn u8_at(body: &[u8], abs: usize) -> u8 {
+pub(super) fn u8_at(body: &[u8], abs: usize) -> u8 {
     body.get(abs).copied().unwrap_or(0)
 }
 
@@ -50,7 +50,7 @@ fn ascii_16(body: &[u8], abs: usize) -> Option<String> {
 }
 
 /// `ascii_16` for any fixed field width (device and preset names are 32).
-fn ascii_n(body: &[u8], abs: usize, len: usize) -> Option<String> {
+pub(super) fn ascii_n(body: &[u8], abs: usize, len: usize) -> Option<String> {
     let bytes = body.get(abs..abs + len)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     if end == 0 {
@@ -194,11 +194,11 @@ fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<C
     }
 }
 
-struct EqBlockResult {
-    hp: CrossoverSlot,
-    bands: Vec<EqBand>,
-    lp: CrossoverSlot,
-    wire: EqChainWire,
+pub(super) struct EqBlockResult {
+    pub(super) hp: CrossoverSlot,
+    pub(super) bands: Vec<EqBand>,
+    pub(super) lp: CrossoverSlot,
+    pub(super) wire: EqChainWire,
 }
 
 /// 10 bands x 14-byte stride: type(u8,1) + gain(f32LE,4) + freq(f32LE,4) +
@@ -213,7 +213,7 @@ struct EqBlockResult {
 /// auditable: the layout below has been correct against real hardware since
 /// long before anything wrote it. The fields this app's model has no home for
 /// come back in `EqChainWire` so that write can echo them.
-fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
+pub(super) fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
     const STRIDE: usize = 14;
     let mut hp = None;
     let mut lp = None;

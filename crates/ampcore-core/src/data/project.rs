@@ -308,6 +308,23 @@ pub struct AmpChannel {
     /// second source to fail over to (`AmpModelCatalogEntry.is_dante`).
     #[serde(default)]
     pub backup_priority: BackupPriority,
+    /// The speaker-library way this output was set up from, if any — a
+    /// reference only. The values themselves live in the fields above, so the
+    /// project never needs the library to open or push; see `data/speaker.rs`.
+    #[serde(default)]
+    pub speaker: Option<SpeakerRef>,
+}
+
+/// Which library way an output was set up from, and which revision of it.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerRef {
+    pub library_id: String,
+    pub way_index: u32,
+    pub revision: u32,
+    /// "Brand Model · Way" at assign time, so a reference whose entry was
+    /// deleted from this machine's library still reads as something.
+    pub label: String,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -484,6 +501,7 @@ fn new_channel(channel_index: u32) -> AmpChannel {
         fir_bypassed: false,
         source_trims: SourceTrims::default(),
         backup_priority: BackupPriority::default(),
+        speaker: None,
     }
 }
 

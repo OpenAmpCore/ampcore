@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod preset;
 pub mod protocol;
 pub mod request;
+pub mod speaker_data;
 pub mod telemetry;
 pub mod telemetry_v118;
 pub mod write;

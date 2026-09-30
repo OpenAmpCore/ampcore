@@ -31,6 +31,7 @@ import {
   ListPlus,
   Lock,
   Radio,
+  Speaker,
   Volume2,
   VolumeX,
   Waves,
@@ -66,6 +67,7 @@ import { ACTION_UNAVAILABLE, type ActionResult } from "../lib/actionResult";
 import {
   commands,
   type AmpAssignment,
+  type ChannelSpeakerState,
   type AmpCapability_Serialize as AmpCapability,
   type AmpEditLock,
   type AmpModelCatalogEntry,
@@ -99,6 +101,8 @@ import {
   createLiveConfigureActions,
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
+import { SpeakersTab, StatusChip } from "./SpeakersTab";
+import { useSpeakerLibrary, useSpeakerStates } from "../lib/speakers";
 import { usePreference } from "../lib/preferences";
 import { useElementWidth } from "../hooks/useElementWidth";
 
@@ -175,6 +179,7 @@ const TABS = [
     icon: SquareArrowRightExit,
     skeleton: "list",
   },
+  { value: "speakers", label: "Speakers", icon: Speaker, skeleton: "list" },
   { value: "routing", label: "Routing", icon: Route, skeleton: "grid" },
   {
     value: "presetConfiguration",
@@ -587,6 +592,10 @@ interface ConfigurableTabProps {
    * this to decide whether a *device-only* feature can be queried. Today just
    * FIR, whose coefficients exist nowhere but on the amp. */
   deviceId?: string;
+  /** Speaker-library status per output channel of a project amp (empty for
+   * Direct Edit); shown as a chip on each output row. */
+  speakerStates?: Map<number, ChannelSpeakerState>;
+  onOpenSpeakers?: () => void;
 }
 
 const METER_FLOOR_DB = -60;
@@ -1094,6 +1103,8 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
 
 function OutputChannelRow({
   channel,
+  speaker,
+  onOpenSpeakers,
   telemetry,
   ratedRmsVoltage,
   trimMin,
@@ -1118,6 +1129,9 @@ function OutputChannelRow({
   onRename,
 }: {
   channel: AmpAssignment["channels"][number];
+  /** The library speaker this output was set up from, if any. */
+  speaker?: ChannelSpeakerState;
+  onOpenSpeakers?: () => void;
   telemetry: ChannelTelemetry;
   /** For the limiter threshold lines on this row's meter — see
    * `capability.topology.ratedRmsVoltage` at the call site. */
@@ -1187,11 +1201,26 @@ function OutputChannelRow({
         maxLength={nameMaxLength}
         onRename={onRename}
         trailing={
-          <ChannelStateBadge
-            state={telemetry.outputState}
-            raw={telemetry.outputStateRaw}
-            hideNominal
-          />
+          <>
+            {speaker && (
+              <button
+                type="button"
+                className="flex min-w-0 cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0"
+                title="Open in the Speakers tab"
+                onClick={onOpenSpeakers}
+              >
+                <span className="truncate text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
+                  {speaker.speaker.label}
+                </span>
+                <StatusChip state={speaker} />
+              </button>
+            )}
+            <ChannelStateBadge
+              state={telemetry.outputState}
+              raw={telemetry.outputStateRaw}
+              hideNominal
+            />
+          </>
         }
       />
       <div className="flex items-center gap-2">
@@ -1614,6 +1643,8 @@ function OutputTab({
   actions,
   telemetry,
   deviceId,
+  speakerStates,
+  onOpenSpeakers,
 }: ConfigurableTabProps) {
   const trimRange = capability.paramRanges.outputTrimDb;
   const volumeRange = capability.paramRanges.outputVolumeDb;
@@ -1798,6 +1829,8 @@ function OutputTab({
                     <OutputChannelRow
                       key={channel.channelIndex}
                       channel={channel}
+                      speaker={speakerStates?.get(channel.channelIndex)}
+                      onOpenSpeakers={onOpenSpeakers}
                       telemetry={channelTelemetry(
                         telemetry,
                         channel.channelIndex,
@@ -2922,8 +2955,13 @@ export function AmpConfigureView({
   // fetch) — hidden unless this view is reading one, not rendered disabled.
   const visibleTabs = TABS.filter((t) => {
     if (t.value === "presetConfiguration" && !live) return false;
+    // The speaker library sets up *project* outputs — a Direct Edit amp has
+    // no project to hold the references (live-only writes come later).
+    if (t.value === "speakers" && !projectSource) return false;
     return true;
   });
+  const speakerLibrary = useSpeakerLibrary();
+  const speakerStates = useSpeakerStates(projectSource?.project, projectSource?.assignment.id, speakerLibrary);
   const telemetry = live?.telemetry;
   const deviceId = live?.device.id;
   const firmwareFamily = live?.device.firmwareFamily;
@@ -3163,6 +3201,21 @@ export function AmpConfigureView({
               firmwareFamily={firmwareFamily}
             />
           );
+        } else if (value === "speakers" && projectSource && actions) {
+          // Refs and statuses come from the project amp even while following
+          // the linked amp (the view's `assignment` is then built from the
+          // amp and carries none); values are written through `actions`.
+          content = (
+            <SpeakersTab
+              project={projectSource.project}
+              assignment={projectSource.assignment}
+              library={speakerLibrary}
+              states={speakerStates}
+              actions={actions}
+              locked={locked}
+              onProjectUpdate={projectSource.onProjectUpdate}
+            />
+          );
         } else if (!CONFIGURABLE_TABS.has(value) || !assignment || !actions) {
           content = <TabSkeleton label={label} variant={skeleton} />;
         } else if (!ampModel) {
@@ -3188,6 +3241,8 @@ export function AmpConfigureView({
               telemetry={telemetry}
               actions={actions}
               deviceId={liveAmpDeviceId}
+              speakerStates={speakerStates}
+              onOpenSpeakers={() => handleTabChange("speakers")}
             />
           );
         }
