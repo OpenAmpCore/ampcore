@@ -1,7 +1,6 @@
-//! FC=57 (`SpeakerData`) blobs and the vendor's `.sl` speaker files that
-//! carry them. Ground-truthed against Hagen's clone
-//! (`lib/parse-speaker-data.ts`, `app/api/library/import-sl/route.ts`) and
-//! his `.sl` exports; the vendor's own struct is `Speaker_data.cs`.
+//! FC=57 (`SpeakerData`) blobs, as carried (hex) by the old app's speaker
+//! preset files. Ground-truthed against Hagen's clone
+//! (`lib/parse-speaker-data.ts`); the vendor's own struct is `Speaker_data.cs`.
 //!
 //! Decode only. The vendor never builds an FC=57 blob from values — it is
 //! copy→paste of a whole channel's speaker processing — so neither do we.
@@ -103,44 +102,16 @@ pub fn decode_speaker_data(blob: &[u8]) -> Result<SpeakerData, String> {
     })
 }
 
-/// A vendor `.sl` file: a 254-byte text header, then one FC=57 blob per way.
-#[derive(Debug, Clone)]
-pub struct SlFile {
-    pub brand: String,
-    pub family: String,
-    pub model: String,
-    /// Split from the header's `|`-separated field. Not guaranteed to have
-    /// one label per way — the vendor doesn't enforce it.
-    pub way_labels: Vec<String>,
-    pub notes: String,
-    /// Raw blobs, all the same size. Decode each with `decode_speaker_data`.
-    pub ways: Vec<Vec<u8>>,
-}
-
-const SL_HEADER_LEN: usize = 254;
-const SL_MAX_WAYS: usize = 8;
-
-pub fn parse_sl(bytes: &[u8]) -> Result<SlFile, String> {
-    if bytes.len() <= SL_HEADER_LEN {
-        return Err(format!("too short for a .sl file ({} bytes)", bytes.len()));
+/// Hex text (the old app's `deviceData.hex`) to bytes.
+pub fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    let hex = hex.trim();
+    if hex.len() % 2 != 0 || !hex.is_ascii() {
+        return Err("not valid hex".into());
     }
-    let text = |off, len| ascii_n(bytes, off, len).unwrap_or_default();
-    let way_count = i32::from_le_bytes(bytes[250..254].try_into().unwrap());
-    if !(1..=SL_MAX_WAYS as i32).contains(&way_count) {
-        return Err(format!("way count {way_count} is outside 1..={SL_MAX_WAYS}"));
-    }
-    let data = &bytes[SL_HEADER_LEN..];
-    if data.len() % way_count as usize != 0 {
-        return Err(format!("{} data bytes don't split into {way_count} ways", data.len()));
-    }
-    Ok(SlFile {
-        brand: text(0, 40),
-        family: text(40, 40),
-        model: text(80, 40),
-        way_labels: text(120, 50).split('|').map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
-        notes: text(170, 80),
-        ways: data.chunks(data.len() / way_count as usize).map(<[u8]>::to_vec).collect(),
-    })
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| "not valid hex".to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -156,7 +127,7 @@ mod tests {
         b[off..off + s.len()].copy_from_slice(s.as_bytes());
     }
 
-    /// A Tecnare blob with the values Hagen's `Seeburg_PS1_Hi.sl` decodes to.
+    /// A Tecnare blob with the values Hagen's `Seeburg_PS1_Hi` preset decodes to.
     fn seeburg_like_blob() -> Vec<u8> {
         let mut b = vec![0u8; LEN_TECNARE];
         put_str(&mut b, 0, "42424B06-006118-DSP-2004D");
@@ -231,61 +202,9 @@ mod tests {
         }
     }
 
-    fn sl(way_count: i32, labels: &str, ways: &[Vec<u8>]) -> Vec<u8> {
-        let mut h = vec![0u8; SL_HEADER_LEN];
-        put_str(&mut h, 0, "Seeburg");
-        put_str(&mut h, 40, "PS1");
-        put_str(&mut h, 80, "Hi");
-        put_str(&mut h, 120, labels);
-        put_str(&mut h, 170, "Notes");
-        h[250..254].copy_from_slice(&way_count.to_le_bytes());
-        ways.iter().for_each(|w| h.extend_from_slice(w));
-        h
-    }
-
     #[test]
-    fn parses_sl_header_and_ways() {
-        let blob = seeburg_like_blob();
-        let f = parse_sl(&sl(2, "MF/HF|Sub-Low", &[blob.clone(), blob.clone()])).unwrap();
-        assert_eq!((f.brand.as_str(), f.family.as_str(), f.model.as_str(), f.notes.as_str()), ("Seeburg", "PS1", "Hi", "Notes"));
-        assert_eq!(f.way_labels, ["MF/HF", "Sub-Low"], "labels split on `|` only");
-        assert_eq!(f.ways.len(), 2);
-        assert!(f.ways.iter().all(|w| w == &blob));
-    }
-
-    #[test]
-    fn rejects_bad_sl() {
-        let blob = seeburg_like_blob();
-        assert!(parse_sl(&[0; SL_HEADER_LEN]).is_err(), "header only");
-        assert!(parse_sl(&sl(0, "", &[blob.clone()])).is_err(), "zero ways");
-        assert!(parse_sl(&sl(9, "", &[blob.clone()])).is_err(), "too many ways");
-        let mut odd = sl(2, "", &[blob.clone(), blob]);
-        odd.pop();
-        assert!(parse_sl(&odd).is_err(), "data not divisible by way count");
-    }
-
-    /// Ground truth against Hagen's real exports, which aren't in the repo.
-    /// Run with `cargo test -p ampcore-core -- --ignored hagen`.
-    #[test]
-    #[ignore]
-    fn hagen_sl_files() {
-        let dir = std::path::Path::new(r"C:\Users\Pascal\Downloads\hagen configs");
-        let mut count = 0;
-        for entry in std::fs::read_dir(dir).expect("hagen configs folder") {
-            let path = entry.unwrap().path();
-            let f = parse_sl(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-            for way in &f.ways {
-                decode_speaker_data(way).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-            }
-            count += 1;
-        }
-        assert!(count > 0);
-
-        let f = parse_sl(&std::fs::read(dir.join("Seeburg_PS1_Hi.sl")).unwrap()).unwrap();
-        assert_eq!((f.brand.as_str(), f.family.as_str(), f.model.as_str()), ("Seeburg", "PS1", "Hi"));
-        let d = decode_speaker_data(&f.ways[0]).unwrap();
-        assert_eq!((d.volume_db, d.delay_ms, d.load_ohms), (18.0, 2.5, 16.0));
-        assert_eq!(d.eq.bands.iter().filter(|b| b.active).count(), 5);
-        assert_eq!(d.speaker_name.as_deref(), Some("PS1HI"));
+    fn hex_round_trips_and_rejects_garbage() {
+        assert_eq!(hex_to_bytes("00ff10").unwrap(), [0, 255, 16]);
+        assert!(hex_to_bytes("0f1").is_err() && hex_to_bytes("zz").is_err());
     }
 }

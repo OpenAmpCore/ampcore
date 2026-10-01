@@ -82,6 +82,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const autoUpdateChecks = usePreference("autoUpdateChecks");
   const showFingerprintMenu = usePreference("showFingerprintMenu");
   const showRawTelemetry = usePreference("showRawTelemetry");
+  const showSpeakerComparator = usePreference("showSpeakerComparator");
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
 
@@ -163,10 +164,10 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                 </SettingRow>
               </SettingsSection>
 
-              {/* Two developer-facing surfaces in the amp editor, off by default so
-               * an ordinary operator never meets them. Both read live: toggling one
-               * updates an editor that is already open. */}
-              <SettingsSection title="Amp Edit">
+              {/* Developer-facing surfaces, off by default so an ordinary operator
+               * never meets them. All read live: toggling one updates an editor
+               * that is already open. */}
+              <SettingsSection title="Debug">
                 <SettingRow label="Show Fingerprint Menu">
                   <Switch
                     isSelected={showFingerprintMenu}
@@ -184,6 +185,18 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                   <Switch
                     isSelected={showRawTelemetry}
                     onChange={(isSelected) => setPreference("showRawTelemetry", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
+                </SettingRow>
+                <SettingRow label="Show Speaker preset Comparator">
+                  <Switch
+                    isSelected={showSpeakerComparator}
+                    onChange={(isSelected) => setPreference("showSpeakerComparator", isSelected)}
                   >
                     <Switch.Content>
                       <Switch.Control>

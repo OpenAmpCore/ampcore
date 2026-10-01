@@ -6,14 +6,16 @@ import {
   type AmpAssignment,
   type ChannelSpeakerState,
   type Project,
-  type SlImportResult,
+  type FitRow,
+  type ProfileImportResult,
   type SpeakerDetails,
   type SpeakerLibraryEntry,
 } from "../lib/bindings";
-import type { ConfigureActions } from "../lib/configureActions";
 import { useIsCompact } from "../lib/breakpoints";
-import { applySpeakerProcessing, speakerName } from "../lib/speakers";
+import { usePreference } from "../lib/preferences";
+import { speakerFields, speakerName } from "../lib/speakers";
 import { useConfirm } from "./ConfirmDialog";
+import { Hint } from "./Hint";
 import { SimpleSelect } from "./SimpleSelect";
 import { FIELD_INPUT } from "./fieldClasses";
 
@@ -48,16 +50,15 @@ function outputRows(assignment: AmpAssignment): OutputRow[] {
 type Assignment = { row: OutputRow; wayIndex: number };
 
 /** The Speakers tab: this project amp's outputs on one side, this machine's
- * speaker library on the other. Assigning writes the way's values through
- * `actions` — the same path as any hand edit, so a linked amp in a live
- * session is written directly — and then records the reference in the
- * project. Project amps only; see `data/speaker.rs` for the model. */
+ * speaker library on the other. Assigning is one `speakersApply` — values and
+ * reference together, into the project and, while following, the linked amp
+ * (`liveDeviceId`). Project amps only; see `data/speaker.rs` for the model. */
 export function SpeakersTab({
   project,
   assignment,
   library,
   states,
-  actions,
+  liveDeviceId,
   locked,
   onProjectUpdate,
 }: {
@@ -67,13 +68,15 @@ export function SpeakersTab({
    * which also shows the states on the Output tab. */
   library: SpeakerLibraryEntry[];
   states: Map<number, ChannelSpeakerState>;
-  actions: ConfigureActions;
+  /** The linked amp while this project amp follows it. */
+  liveDeviceId: string | undefined;
   locked: boolean;
   onProjectUpdate: (project: Project) => void;
 }) {
   const compact = useIsCompact();
   const rows = useMemo(() => outputRows(assignment), [assignment]);
   const { confirm, dialog } = useConfirm();
+  const showComparator = usePreference("showSpeakerComparator");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState<SpeakerLibraryEntry | null>(null);
   const [dropRow, setDropRow] = useState<number | null>(null);
@@ -84,26 +87,60 @@ export function SpeakersTab({
   async function assign(entry: SpeakerLibraryEntry, items: Assignment[]) {
     if (locked || busy || items.length === 0) return;
     const outputs = items.map((i) => i.row.label).join(", ");
+    const pairs = items.map(({ row, wayIndex }): [number, number] => [row.leader, wayIndex]);
+    // What this amp can't take as stored is shown first; the user decides.
+    const fit = await commands.speakersFit(project.id, assignment.id, entry.id, pairs);
+    if (fit.status !== "ok") {
+      toast.danger(`${speakerName(entry)} can't be applied`, { description: fit.error.message });
+      return;
+    }
+    const issues = fit.data.flatMap((f) => {
+      const label = items.find((i) => i.row.leader === f.channelIndex)?.row.label;
+      return f.issues.map((issue) => `${label}: ${issue}`);
+    });
     const ok = await confirm({
       title: `Set up ${items.length === 1 ? "output" : "outputs"} ${outputs} as ${speakerName(entry)}?`,
-      description: "Their output EQ, limiters, delay and polarity are replaced with the speaker's.",
-      confirmLabel: "Apply",
+      description: showComparator ? (
+        <div className="flex max-h-[60vh] flex-col gap-3 overflow-auto">
+          {issues.length > 0 && (
+            <ul className="list-disc pl-5">
+              {issues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          )}
+          {fit.data.map((f) => {
+            const item = items.find((i) => i.row.leader === f.channelIndex);
+            const way = item ? entry.ways[item.wayIndex] : undefined;
+            return (
+              <FitDiff
+                key={f.channelIndex}
+                title={`Out ${item?.row.label}${way && entry.ways.length > 1 ? ` · ${way.label}` : ""}`}
+                rows={f.rows}
+              />
+            );
+          })}
+        </div>
+      ) : issues.length ? (
+        <div className="flex flex-col gap-2">
+          <span>This amp can't take the speaker exactly as stored. Applying writes these adjusted values:</span>
+          <ul className="max-h-48 list-disc overflow-auto pl-5">
+            {issues.map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        "Their output EQ, limiters, delay and polarity are replaced with the speaker's."
+      ),
+      confirmLabel: issues.length ? "Apply anyway" : "Apply",
     });
     if (!ok) return;
     setBusy(true);
-    for (const { row, wayIndex } of items) {
-      const applied = await applySpeakerProcessing(actions, row.leader, entry.ways[wayIndex].processing);
-      if (!applied.ok) {
-        toast.danger(`Output ${row.label}: speaker not applied`, { description: applied.message });
-        break;
-      }
-      const r = await commands.projectsSetChannelSpeaker(project.id, assignment.id, row.leader, entry.id, wayIndex);
-      if (r.status !== "ok") {
-        toast.danger(`Output ${row.label}: speaker not recorded`, { description: r.error.message });
-        break;
-      }
-      onProjectUpdate(r.data);
-    }
+    await runProjectCommand(
+      commands.speakersApply(project.id, assignment.id, liveDeviceId ?? null, entry.id, pairs, true),
+      `Speaker not applied to ${outputs}`,
+    );
     setBusy(false);
   }
 
@@ -133,11 +170,26 @@ export function SpeakersTab({
       if (ok) await runProjectCommand(commands.speakersUpdateFromOutput(project.id, assignment.id, row.leader), "Library not updated");
     } else if (action === "remove") {
       await runProjectCommand(
-        commands.projectsSetChannelSpeaker(project.id, assignment.id, row.leader, null, 0),
+        commands.projectsSetChannelSpeaker(project.id, assignment.id, row.leader),
         "Speaker not removed",
       );
     } else if (action === "save") {
       setDetails({ kind: "save", rowIndex });
+    } else if (action === "why" && state) {
+      // Asks the backend now, so a chip that stopped updating gives itself away.
+      const r = await commands.speakersChannelStates(project.id, assignment.id);
+      const fresh = r.status === "ok" ? r.data.find((s) => s.channelIndex === row.leader) : undefined;
+      if (!fresh) {
+        toast.danger(`Output ${row.label}: status not readable`, { description: r.status === "ok" ? "No speaker here any more." : r.error.message });
+        return;
+      }
+      const s = fresh.status;
+      const fields = speakerFields(s);
+      let description = "Every compared value matches.";
+      if (fields.length) description = `Differs from the library: ${fields.join(", ")}.`;
+      else if (s.kind === "detached") description = "Not in this machine's library.";
+      if (s.kind !== state.status.kind) description += ` This view showed "${state.status.kind}" — it was stale.`;
+      toast(`Output ${row.label}: ${s.kind}`, { description, timeout: 0 });
     }
   }
 
@@ -240,6 +292,58 @@ export function SpeakersTab({
   );
 }
 
+const DIFF_CELL = "px-2 py-0.5 font-mono text-xs whitespace-nowrap";
+
+/** Debug comparator: every compared value of one output, GitHub-diff style.
+ * Red − what the output loses, green + what it gets, orange where `fit`
+ * changed the preset's value to suit this amp. */
+function FitDiff({ title, rows }: { title: string; rows: FitRow[] }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <span className="text-sm font-semibold">{title}</span>
+      <div className="overflow-x-auto rounded-md border border-[var(--amp-color-default-border)]">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className={`${MUTED} text-left`}>
+              <th className={DIFF_CELL}>Field</th>
+              <th className={DIFF_CELL}>Amp now</th>
+              <th className={DIFF_CELL}>Preset</th>
+              <th className={DIFF_CELL}>Will write</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const changes = r.current !== r.written;
+              const adjusted = r.preset !== r.written;
+              return (
+                <tr key={r.label} style={{ opacity: changes || adjusted ? 1 : 0.5 }}>
+                  <td className={DIFF_CELL}>{r.label}</td>
+                  <td className={DIFF_CELL} style={changes ? { background: "var(--amp-color-red-light)" } : undefined}>
+                    {changes && "− "}{r.current}
+                  </td>
+                  <td className={DIFF_CELL}>{r.preset}</td>
+                  <td
+                    className={DIFF_CELL}
+                    style={
+                      adjusted
+                        ? { background: "var(--amp-color-orange-light)" }
+                        : changes
+                          ? { background: "var(--amp-color-green-light)" }
+                          : undefined
+                    }
+                  >
+                    {changes && "+ "}{r.written}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function isSameSpeaker(prev: ChannelSpeakerState | undefined, cur: ChannelSpeakerState | undefined): boolean {
   return !!prev && !!cur && prev.speaker.libraryId === cur.speaker.libraryId && cur.speaker.wayIndex === prev.speaker.wayIndex + 1;
 }
@@ -296,7 +400,7 @@ function RowMenu({ label, items, disabled, onAction }: {
 
 export function StatusChip({ state }: { state: ChannelSpeakerState }) {
   const s = state.status;
-  const fields = s.kind === "edited" || s.kind === "libraryUpdated" ? s.fields : [];
+  const fields = speakerFields(s);
   const [text, color] =
     s.kind === "match" ? ["Match", "success"] as const
     : s.kind === "edited" ? ["Edited", "warning"] as const
@@ -307,9 +411,9 @@ export function StatusChip({ state }: { state: ChannelSpeakerState }) {
     : fields.length > 0 ? `Differs: ${fields.join(", ")}`
     : s.kind === "match" ? "Matches the library." : undefined;
   return (
-    <span title={title} className="shrink-0">
+    <Hint text={title} className="shrink-0">
       <Chip size="sm" color={color}>{text}</Chip>
-    </span>
+    </Hint>
   );
 }
 
@@ -337,6 +441,7 @@ function OutputSpeakerRow({
   const items = [
     ...(state && status !== "match" && status !== "detached" ? [{ id: "reapply", label: "Re-apply from library" }] : []),
     ...(status === "edited" ? [{ id: "update", label: "Update library from this output…" }] : []),
+    ...(state ? [{ id: "why", label: "Why this status?" }] : []),
     { id: "save", label: "Save as new speaker…" },
     ...(state ? [{ id: "remove", label: "Remove speaker (keep values)" }] : []),
   ];
@@ -353,16 +458,18 @@ function OutputSpeakerRow({
       }}
     >
       <span className="w-9 shrink-0 text-sm font-bold tabular-nums">{row.label}</span>
-      <span className="min-w-0 flex-1 truncate text-sm" title={state?.speaker.label}>
-        {state ? (
-          <>
-            <span className={continues ? "text-[var(--amp-color-dimmed)]" : undefined}>{name}</span>
-            {way && <span className="text-[var(--amp-color-dimmed)]"> · {way}</span>}
-          </>
-        ) : (
-          <span className={`${MUTED} italic`}>No speaker — drop one here</span>
-        )}
-      </span>
+      <Hint text={state?.speaker.label} className="min-w-0 flex-1">
+        <span className="block truncate text-sm">
+          {state ? (
+            <>
+              <span className={continues ? "text-[var(--amp-color-dimmed)]" : undefined}>{name}</span>
+              {way && <span className="text-[var(--amp-color-dimmed)]"> · {way}</span>}
+            </>
+          ) : (
+            <span className={`${MUTED} italic`}>No speaker — drop one here</span>
+          )}
+        </span>
+      </Hint>
       {state && <StatusChip state={state} />}
       <RowMenu label={`Speaker actions for output ${row.label}`} items={items} disabled={disabled} onAction={onAction} />
     </div>
@@ -406,7 +513,7 @@ function LibraryList({
   const brands = [...new Set(shown.map((e) => e.brand))].sort((a, b) => a.localeCompare(b));
 
   if (library.length === 0) {
-    return <span className={MUTED}>No speakers yet. Import .sl files, or save an output as a speaker from its ⋯ menu.</span>;
+    return <span className={MUTED}>No speakers yet. Import speaker preset files, or save an output as a speaker from its ⋯ menu.</span>;
   }
   return (
     <>
@@ -444,13 +551,14 @@ function LibraryList({
                 }}
                 onDragEnd={onDragEnd}
                 className={`flex min-w-0 items-center gap-2 rounded-md px-1 py-1 hover:bg-[var(--amp-color-gray-light)] ${disabled ? "" : "cursor-grab"}`}
-                title={entry.notes || undefined}
               >
                 <GripVertical size={14} className="shrink-0 text-[var(--amp-color-dimmed)]" />
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {entry.model}
-                  {entry.family && <span className="text-[var(--amp-color-dimmed)]"> · {entry.family}</span>}
-                </span>
+                <Hint text={entry.notes} className="min-w-0 flex-1">
+                  <span className="block truncate text-sm">
+                    {entry.model}
+                    {entry.family && <span className="text-[var(--amp-color-dimmed)]"> · {entry.family}</span>}
+                  </span>
+                </Hint>
                 <span className={`${MUTED} hidden truncate sm:inline`} style={{ maxWidth: 160 }}>
                   {entry.ways.map((w) => w.label).join(" · ")}
                 </span>
@@ -671,13 +779,14 @@ function DetailsModal({
   );
 }
 
-/** Pick any number of `.sl` files, preview every one (with the reason a file
- * can't be read), then import all readable ones at once. */
+/** Pick any number of speaker preset files (the old app's `.json`), preview
+ * every one (with the reason a file can't be read), then import all readable
+ * ones at once. */
 function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const compact = useIsCompact();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [files, setFiles] = useState<{ fileName: string; bytes: number[] }[]>([]);
-  const [preview, setPreview] = useState<SlImportResult[] | null>(null);
+  const [files, setFiles] = useState<{ fileName: string; text: string }[]>([]);
+  const [preview, setPreview] = useState<ProfileImportResult[] | null>(null);
   const [busy, setBusy] = useState(false);
 
   function close() {
@@ -688,10 +797,8 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
 
   async function pick(list: File[]) {
     setBusy(true);
-    const next = await Promise.all(
-      list.map(async (f) => ({ fileName: f.name, bytes: [...new Uint8Array(await f.arrayBuffer())] })),
-    );
-    const r = await commands.speakersImportSl(next, false);
+    const next = await Promise.all(list.map(async (f) => ({ fileName: f.name, text: await f.text() })));
+    const r = await commands.speakersImportProfiles(next, false);
     setBusy(false);
     if (r.status !== "ok") {
       toast.danger("Could not read the files", { description: r.error.message });
@@ -703,7 +810,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
 
   async function commit() {
     setBusy(true);
-    const r = await commands.speakersImportSl(files, true);
+    const r = await commands.speakersImportProfiles(files, true);
     setBusy(false);
     if (r.status !== "ok") {
       toast.danger("Import failed", { description: r.error.message });
@@ -718,7 +825,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
       <Modal.Container placement="center" size={compact ? "full" : "lg"}>
         <Modal.Dialog>
           <Modal.Header>
-            <Modal.Heading>Import .sl files</Modal.Heading>
+            <Modal.Heading>Import speaker preset files</Modal.Heading>
             <Modal.CloseTrigger />
           </Modal.Header>
           <Modal.Body>
@@ -726,7 +833,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
               <input
                 ref={inputRef}
                 type="file"
-                accept=".sl"
+                accept=".json,application/json"
                 multiple
                 style={{ display: "none" }}
                 onChange={(e) => {
@@ -741,20 +848,20 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
                 <Button size="sm" variant="secondary" isDisabled={busy} onPress={() => inputRef.current?.click()}>
                   <FileUp size={14} /> Choose files…
                 </Button>
-                <span className={MUTED}>Vendor speaker files. Details can be edited after importing.</span>
+                <span className={MUTED}>Speaker preset files (.json). Details can be edited after importing.</span>
               </div>
               {preview && (
                 <div className="flex max-h-[50vh] flex-col gap-0.5 overflow-auto">
                   {preview.map((p) => (
                     <div key={p.fileName} className="flex min-w-0 items-center gap-2 text-sm" style={{ opacity: p.entry ? 1 : 0.6 }}>
                       <span className={p.entry ? "text-success" : "text-danger"}>{p.entry ? "✓" : "✗"}</span>
-                      <span className="min-w-0 flex-1 truncate" title={p.fileName}>{p.fileName}</span>
+                      <Hint text={p.fileName} className="min-w-0 flex-1"><span className="block truncate">{p.fileName}</span></Hint>
                       {p.entry ? (
                         <span className={`${MUTED} truncate`}>
                           {speakerName(p.entry)} · {p.entry.ways.length} way{p.duplicate && " · already in library"}
                         </span>
                       ) : (
-                        <span className="truncate text-xs text-danger" title={p.error ?? undefined}>{p.error}</span>
+                        <Hint text={p.error} className="min-w-0"><span className="block truncate text-xs text-danger">{p.error}</span></Hint>
                       )}
                     </div>
                   ))}

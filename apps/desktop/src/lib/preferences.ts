@@ -18,6 +18,8 @@ const DEFAULTS = {
   /** The two Amp Edit surfaces are developer-facing and stay hidden until asked for. */
   showFingerprintMenu: false,
   showRawTelemetry: false,
+  /** Debug: the apply confirm shows a now/preset/written diff of every value. */
+  showSpeakerComparator: false,
   /** Which meter surfaces get peak hold / limiter threshold lines. Chosen to
    * match the behavior every meter had before either setting existed — peak
    * hold was unconditional everywhere, and the limiter threshold lines were

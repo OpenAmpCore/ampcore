@@ -152,16 +152,28 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
-	 *  Sets (`library_id` given) or removes an output's speaker reference. Its
-	 *  values are left alone — see the module doc.
+	 *  Removes an output's speaker reference. Its values are left alone —
+	 *  `speakers_apply` is what sets a speaker up.
 	 */
-	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, libraryId: string | null, wayIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, libraryId, wayIndex })),
+	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
+	/**
+	 *  Sets outputs up from one library entry: `items` are `(channel_index,
+	 *  way_index)` pairs, and each output gets its way's values (fitted to the
+	 *  amp) and reference. A way that doesn't fit as is is refused unless
+	 *  `accept_lossy`. With `live_device_id` (the amp this project amp is
+	 *  following) the amp is written first, each output planned from one
+	 *  snapshot; a failed write leaves the project untouched.
+	 */
+	speakersApply: (projectId: string, assignmentId: string, liveDeviceId: string | null, libraryId: string, items: ([number, number])[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, liveDeviceId, libraryId, items, acceptLossy })),
 	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
 	/**
-	 *  Parses vendor `.sl` files. With `commit`, every file that parses is added
-	 *  to the library; without, nothing is saved (the import preview).
+	 *  Parses the old app's speaker preset files (JSON). With `commit`, every file
+	 *  that parses is added to the library; without, nothing is saved (the import
+	 *  preview).
 	 */
-	speakersImportSl: (files: SlUpload[], commit: boolean) => typedError<SlImportResult[], AppError>(__TAURI_INVOKE("speakers_import_sl", { files, commit })),
+	speakersImportProfiles: (files: ProfileUpload[], commit: boolean) => typedError<ProfileImportResult[], AppError>(__TAURI_INVOKE("speakers_import_profiles", { files, commit })),
+	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
+	speakersFit: (projectId: string, assignmentId: string, libraryId: string, items: ([number, number])[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, libraryId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
@@ -1733,6 +1745,17 @@ export type FingerprintRow = {
 
 export type FingerprintSource = "offline" | "online";
 
+/**  One compared value, three ways: the debug comparator's diff row. */
+export type FitRow = {
+	label: string,
+	/**  What the output holds now. */
+	current: string,
+	/**  What the library way stores. */
+	preset: string,
+	/**  What applying writes, after `fit`. */
+	written: string,
+};
+
 /**
  *  A channel's output protection: independent RMS and Peak limiter stages,
  *  ported from the old app's `limiter-panel.tsx` (both stages can be engaged
@@ -1795,6 +1818,14 @@ export type MatrixCrosspoint = {
 	active: boolean,
 };
 
+export type OutputFit = {
+	channelIndex: number,
+	/**  What applying changes from the way as stored; empty when it fits as is. */
+	issues: string[],
+	/**  Every compared value: now, stored, written (the debug comparator). */
+	rows: FitRow[],
+};
+
 /**  An inclusive min/max bound for a numeric parameter. */
 export type ParamRange = {
 	min: number | null,
@@ -1825,6 +1856,21 @@ export type PowerMode = "lowOhm" | "v70" | "v100";
 export type PresetSlot = {
 	index: number,
 	name: string,
+};
+
+export type ProfileImportResult = {
+	fileName: string,
+	/**  Why the file can't be imported; `None` when it can (or was). */
+	error: string | null,
+	/**  The entry the file makes. Not in the library unless `commit` was set. */
+	entry: SpeakerLibraryEntry | null,
+	/**  Brand, family and model already exist in the library — imported anyway. */
+	duplicate: boolean,
+};
+
+export type ProfileUpload = {
+	fileName: string,
+	text: string,
 };
 
 export type Project = {
@@ -1874,21 +1920,6 @@ export type RmsLimiterCanonical = {
 	releaseMultiplier: number | null,
 	auto: boolean,
 	maxVrms: number | null,
-};
-
-export type SlImportResult = {
-	fileName: string,
-	/**  Why the file can't be imported; `None` when it can (or was). */
-	error: string | null,
-	/**  The entry the file makes. Not in the library unless `commit` was set. */
-	entry: SpeakerLibraryEntry | null,
-	/**  Brand, family and model already exist in the library — imported anyway. */
-	duplicate: boolean,
-};
-
-export type SlUpload = {
-	fileName: string,
-	bytes: number[],
 };
 
 /**
@@ -1995,6 +2026,14 @@ export type SpeakerProcessing = {
 	limiter: Limiter,
 	delayOutMs: number | null,
 	phaseInverted: boolean,
+	outputTrimDb?: number | null,
+	outputVolumeDb?: number | null,
+	outputMuted?: boolean | null,
+	noiseGateEnabled?: boolean | null,
+	noiseGateThresholdDbu?: number | null,
+	powerMode?: PowerMode | null,
+	ohms?: number | null,
+	firBypassed?: boolean | null,
 };
 
 /**  Which library way an output was set up from, and which revision of it. */

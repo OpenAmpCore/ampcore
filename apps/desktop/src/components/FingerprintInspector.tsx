@@ -7,6 +7,7 @@ import {
   type ChannelFingerprint,
 } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
+import { Hint } from "./Hint";
 
 /** Which amp to fingerprint — a planned project assignment or a live device.
  * Both go through the same backend canonicalization (`data/fingerprint.rs`),
@@ -32,31 +33,35 @@ function FirCell({ channel, offline }: { channel: ChannelFingerprint; offline: b
 
   if (!fir) {
     return (
-      <span
-        style={dimmed}
-        title={
+      <Hint
+        text={
           offline
             ? "FIR filters are read from the device — they are not stored in the project file."
             : "Not read — FIR requires firmware 1.1.8 or newer."
         }
+        className="inline-block"
       >
-        —
-      </span>
+        <span style={dimmed}>—</span>
+      </Hint>
     );
   }
 
   if (!fir.loaded) {
     return (
-      <span style={dimmed} title="Channel holds only the unit impulse — no filter loaded.">
-        none
-      </span>
+      <Hint text="Channel holds only the unit impulse — no filter loaded." className="inline-block">
+        <span style={dimmed}>none</span>
+      </Hint>
     );
   }
 
   const detail = [fir.name?.trim() || null, `zero ${(fir.timeZeroMs ?? 0).toFixed(3)} ms`]
     .filter(Boolean)
     .join(" · ");
-  return <span title={detail}>{fir.order} taps</span>;
+  return (
+    <Hint text={detail} className="inline-block">
+      <span>{fir.order} taps</span>
+    </Hint>
+  );
 }
 
 /** Match/drift/none for the `_XXXX` hash carried in an output name. */

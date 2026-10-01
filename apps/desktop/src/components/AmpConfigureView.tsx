@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import {
   Popover,
   Button,
@@ -101,6 +101,7 @@ import {
   createLiveConfigureActions,
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
+import { Hint } from "./Hint";
 import { SpeakersTab, StatusChip } from "./SpeakersTab";
 import { useSpeakerLibrary, useSpeakerStates } from "../lib/speakers";
 import { usePreference } from "../lib/preferences";
@@ -1203,17 +1204,18 @@ function OutputChannelRow({
         trailing={
           <>
             {speaker && (
-              <button
-                type="button"
-                className="flex min-w-0 cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0"
-                title="Open in the Speakers tab"
-                onClick={onOpenSpeakers}
-              >
-                <span className="truncate text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
-                  {speaker.speaker.label}
-                </span>
+              <div className="flex min-w-0 items-center gap-1.5">
+                <Hint text="Open in the Speakers tab" className="min-w-0">
+                  <button
+                    type="button"
+                    className="block min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]"
+                    onClick={onOpenSpeakers}
+                  >
+                    {speaker.speaker.label}
+                  </button>
+                </Hint>
                 <StatusChip state={speaker} />
-              </button>
+              </div>
             )}
             <ChannelStateBadge
               state={telemetry.outputState}
@@ -2392,18 +2394,19 @@ function PresetSlotRow({
       >
         {String(slot.index + 1).padStart(2, "0")}
       </span>
-      <span
-        className="min-w-0 flex-1 truncate"
-        style={{
-          fontSize: "var(--amp-font-size-sm)",
-          color: empty ? "var(--amp-color-dimmed)" : undefined,
-          fontStyle: empty ? "italic" : undefined,
-          fontWeight: isActive ? 600 : 400,
-        }}
-        title={empty ? undefined : slot.name}
-      >
-        {empty ? "Empty" : slot.name}
-      </span>
+      <Hint text={empty ? undefined : slot.name} className="min-w-0 flex-1">
+        <span
+          className="block truncate"
+          style={{
+            fontSize: "var(--amp-font-size-sm)",
+            color: empty ? "var(--amp-color-dimmed)" : undefined,
+            fontStyle: empty ? "italic" : undefined,
+            fontWeight: isActive ? 600 : 400,
+          }}
+        >
+          {empty ? "Empty" : slot.name}
+        </span>
+      </Hint>
       {isActive && (
         <Chip size="sm" color="success" className="shrink-0">
           Active
@@ -2768,6 +2771,31 @@ function PresetConfigurationTab({
         }
       />
     </CenteredScrollPane>
+  );
+}
+
+/** A rail tab's icon with its HeroUI tooltip. `Hint` can't wrap a `Tabs.Tab`
+ * (RAC collection), and its trigger can't sit inside the tab's own button, so
+ * this opens a standalone `Tooltip.Content` from the icon's hover instead. */
+function RailTabIcon({ label, Icon }: { label: string; Icon: ComponentType<{ size?: number }> }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <span
+        ref={ref}
+        className="flex items-center justify-center"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+      >
+        <Icon size={18} />
+      </span>
+      <Tooltip>
+        <Tooltip.Content isOpen={open} triggerRef={ref} placement="right" showArrow>
+          {label}
+        </Tooltip.Content>
+      </Tooltip>
+    </>
   );
 }
 
@@ -3170,9 +3198,7 @@ export function AmpConfigureView({
               default's own `@layer components` rule. */}
           {visibleTabs.map(({ value, label, icon: Icon }) => (
             <Tabs.Tab key={value} id={value} aria-label={label} className="w-full min-w-0! px-0!">
-              <span title={label} className="flex items-center justify-center">
-                <Icon size={18} />
-              </span>
+              <RailTabIcon label={label} Icon={Icon} />
             </Tabs.Tab>
           ))}
         </Tabs.List>
@@ -3201,17 +3227,17 @@ export function AmpConfigureView({
               firmwareFamily={firmwareFamily}
             />
           );
-        } else if (value === "speakers" && projectSource && actions) {
+        } else if (value === "speakers" && projectSource) {
           // Refs and statuses come from the project amp even while following
           // the linked amp (the view's `assignment` is then built from the
-          // amp and carries none); values are written through `actions`.
+          // amp and carries none); `speakersApply` writes values to both.
           content = (
             <SpeakersTab
               project={projectSource.project}
               assignment={projectSource.assignment}
               library={speakerLibrary}
               states={speakerStates}
-              actions={actions}
+              liveDeviceId={live?.device.id}
               locked={locked}
               onProjectUpdate={projectSource.onProjectUpdate}
             />
