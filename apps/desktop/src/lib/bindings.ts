@@ -160,11 +160,13 @@ export const commands = {
 	 *  Sets outputs up from one library entry: `items` are `(channel_index,
 	 *  way_index)` pairs, and each output gets its way's values (fitted to the
 	 *  amp) and reference. A way that doesn't fit as is is refused unless
-	 *  `accept_lossy`. With `live_device_id` (the amp this project amp is
-	 *  following) the amp is written first, each output planned from one
-	 *  snapshot; a failed write leaves the project untouched.
+	 *  `accept_lossy`.
+	 * 
+	 *  The change is made on a copy of the project amp. With the linked amp
+	 *  online (and not disengaged) that copy is pushed, and only becomes the
+	 *  project's once the amp holds it; otherwise it is saved as the plan.
 	 */
-	speakersApply: (projectId: string, assignmentId: string, liveDeviceId: string | null, libraryId: string, items: ([number, number])[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, liveDeviceId, libraryId, items, acceptLossy })),
+	speakersApply: (projectId: string, assignmentId: string, libraryId: string, items: ([number, number])[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, libraryId, items, acceptLossy })),
 	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
 	/**
 	 *  Parses the old app's speaker preset files (JSON). With `commit`, every file
@@ -2027,12 +2029,9 @@ export type SpeakerProcessing = {
 	delayOutMs: number | null,
 	phaseInverted: boolean,
 	outputTrimDb?: number | null,
-	outputVolumeDb?: number | null,
-	outputMuted?: boolean | null,
 	noiseGateEnabled?: boolean | null,
 	noiseGateThresholdDbu?: number | null,
 	powerMode?: PowerMode | null,
-	ohms?: number | null,
 	firBypassed?: boolean | null,
 };
 

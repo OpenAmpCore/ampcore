@@ -51,14 +51,13 @@ type Assignment = { row: OutputRow; wayIndex: number };
 
 /** The Speakers tab: this project amp's outputs on one side, this machine's
  * speaker library on the other. Assigning is one `speakersApply` — values and
- * reference together, into the project and, while following, the linked amp
- * (`liveDeviceId`). Project amps only; see `data/speaker.rs` for the model. */
+ * reference together; the backend pushes them to the linked amp through the
+ * sync endpoint when it is online. Project amps only; see `data/speaker.rs`. */
 export function SpeakersTab({
   project,
   assignment,
   library,
   states,
-  liveDeviceId,
   locked,
   onProjectUpdate,
 }: {
@@ -68,8 +67,6 @@ export function SpeakersTab({
    * which also shows the states on the Output tab. */
   library: SpeakerLibraryEntry[];
   states: Map<number, ChannelSpeakerState>;
-  /** The linked amp while this project amp follows it. */
-  liveDeviceId: string | undefined;
   locked: boolean;
   onProjectUpdate: (project: Project) => void;
 }) {
@@ -138,7 +135,7 @@ export function SpeakersTab({
     if (!ok) return;
     setBusy(true);
     await runProjectCommand(
-      commands.speakersApply(project.id, assignment.id, liveDeviceId ?? null, entry.id, pairs, true),
+      commands.speakersApply(project.id, assignment.id, entry.id, pairs, true),
       `Speaker not applied to ${outputs}`,
     );
     setBusy(false);

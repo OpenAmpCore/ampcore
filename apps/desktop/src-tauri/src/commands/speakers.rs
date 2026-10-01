@@ -2,18 +2,16 @@
 //! it. The logic lives in `ampcore_core::data::speaker`; these are the thin
 //! Tauri wrappers.
 //!
-//! `speakers_apply` is the one way values get in: it writes the linked amp
-//! (when following) and the project in one step, values and reference
-//! together, so status never compares a reference against values that haven't
-//! arrived yet. The next pull then confirms what the amp holds.
+//! `speakers_apply` is the one way values get in, and it has no write path of
+//! its own: it changes a copy of the project amp and hands that to the push
+//! (`amp_push::push_assignment`), the same endpoint the online/offline sync
+//! uses. Offline, the copy is simply saved.
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Emitter, State};
 
-use ampcore_core::data::amp_push::action_packets;
 use ampcore_core::live::state::LiveDeviceState;
-use ampcore_core::live::write_helpers::{current_channel, send_writes};
 
 use ampcore_core::data::project::{AmpAssignment, Project, SpeakerRef};
 use ampcore_core::data::capability;
@@ -22,6 +20,8 @@ use ampcore_core::data::speaker::{
 };
 use ampcore_core::error::AppError;
 
+use super::amp_links::read_linked_amp;
+use super::amp_push::push_assignment;
 use crate::data::store::{save_project_file, save_speakers, ProjectDataInner, ProjectDataState};
 
 fn saved_library(app: &AppHandle, inner: &ProjectDataInner) -> Result<(), AppError> {
@@ -327,9 +327,11 @@ pub fn speakers_fit(
 /// Sets outputs up from one library entry: `items` are `(channel_index,
 /// way_index)` pairs, and each output gets its way's values (fitted to the
 /// amp) and reference. A way that doesn't fit as is is refused unless
-/// `accept_lossy`. With `live_device_id` (the amp this project amp is
-/// following) the amp is written first, each output planned from one
-/// snapshot; a failed write leaves the project untouched.
+/// `accept_lossy`.
+///
+/// The change is made on a copy of the project amp. With the linked amp
+/// online (and not disengaged) that copy is pushed, and only becomes the
+/// project's once the amp holds it; otherwise it is saved as the plan.
 #[tauri::command]
 #[specta::specta]
 pub async fn speakers_apply(
@@ -338,7 +340,6 @@ pub async fn speakers_apply(
     live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
-    live_device_id: Option<String>,
     library_id: String,
     items: Vec<(u32, u32)>,
     accept_lossy: bool,
@@ -348,25 +349,44 @@ pub async fn speakers_apply(
         return Err(AppError::from("The speaker doesn't fit this amp as is"));
     }
 
-    if let Some(device_id) = &live_device_id {
-        for f in &fitted {
-            let config = current_channel(&live, device_id, f.channel_index as u8)?;
-            let actions = f.processing.live_actions(&config).map_err(AppError::from)?;
-            send_writes(&live, device_id, |firmware| {
-                Some(actions.iter().map(|a| action_packets(a, firmware)).collect::<Option<Vec<_>>>()?.concat())
-            })
-            .await?;
-        }
-    }
-
-    edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
+    let candidate = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let mut candidate = inner
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
+            .ok_or_else(|| AppError::from("amp not found"))?
+            .clone();
         for f in fitted {
-            let channel = channel_mut(assignment, f.channel_index)?;
+            let channel = channel_mut(&mut candidate, f.channel_index)?;
             f.processing.apply_to(channel);
             channel.speaker = Some(f.reference);
         }
-        Ok(false)
-    })
+        candidate
+    };
+
+    let online = match candidate.mac.as_deref().filter(|_| !candidate.live_disengaged) {
+        Some(mac) => read_linked_amp(&live, mac)?.is_some_and(|r| r.device.online),
+        None => false,
+    };
+    if !online {
+        return edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
+            *assignment = candidate;
+            Ok(false)
+        });
+    }
+
+    let result = push_assignment(&app, &state, &live, project_id, assignment_id, Some(candidate)).await?;
+    if result.pushed {
+        return result.project.ok_or_else(|| AppError::from("the push returned no project"));
+    }
+    let differing: Vec<String> =
+        result.remaining.iter().filter(|r| r.differs).map(|r| format!("{} · {}", r.group, r.label)).collect();
+    Err(AppError::from(match (result.failed_stage_label, result.error) {
+        (Some(stage), Some(error)) => format!("The amp didn't take {stage}: {error}"),
+        _ => format!("The amp doesn't hold the speaker after writing it. Still differing: {}", differing.join(", ")),
+    }))
 }
 
 /// Removes an output's speaker reference. Its values are left alone —

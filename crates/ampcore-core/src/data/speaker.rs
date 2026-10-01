@@ -8,8 +8,8 @@
 //! nothing is hashed or stamped into the amp.
 //!
 //! What a way carries is `SpeakerProcessing`: the whole output side of a
-//! channel — output EQ, both limiter stages, delay, polarity, trim, volume,
-//! mute, noise gate, power mode, load and FIR bypass. Fields after polarity
+//! channel — output EQ, both limiter stages, delay, polarity, trim, noise
+//! gate, power mode and FIR bypass. Fields after polarity
 //! are `Option`: a preset that lacks one (an imported blob, an older way)
 //! leaves the amp's own value. `fit` adapts a way to the target amp's
 //! capability and reports what it had to drop or clamp. Left out:
@@ -17,19 +17,21 @@
 //!   (`SpeakerWay.fc57_hex`) for a later live pass that can write it whole;
 //! - limiter `auto`/`max_*`: the maxima describe the amp, not the speaker
 //!   (the same rule as `channel_clipboard.rs`);
+//! - load (`ohms`): a fact the push adopts *from* the amp (`amp_push.rs`),
+//!   so a preset's would never survive an apply;
+//! - output volume and mute: how loud the system runs tonight, never part of
+//!   a speaker on any make or model — not stored, applied or compared;
 //! - output name and bridging: wiring, not speaker.
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::amp_push::PushAction;
 use super::capability::{AmpCapability, ParamRange, PowerMode};
 use super::common::{new_id, now_millis};
 use super::fingerprint::{
-    canonical_eq, format_band, format_crossover, round_to_step, DELAY_STEPS, GAIN_STEPS, OHM_STEPS, VOLT_STEPS, WHOLE_STEPS,
+    canonical_eq, format_band, format_crossover, round_to_step, DELAY_STEPS, GAIN_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
-use super::project::{AmpAssignment, AmpChannel, ChannelEq, EqDirection, Limiter, SpeakerRef};
-use crate::live::cvr::channel_config::ChannelConfig;
+use super::project::{AmpAssignment, AmpChannel, ChannelEq, Limiter, SpeakerRef};
 use crate::live::cvr::speaker_data::{decode_speaker_data, hex_to_bytes, SpeakerData};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -44,17 +46,11 @@ pub struct SpeakerProcessing {
     #[serde(default)]
     pub output_trim_db: Option<f64>,
     #[serde(default)]
-    pub output_volume_db: Option<f64>,
-    #[serde(default)]
-    pub output_muted: Option<bool>,
-    #[serde(default)]
     pub noise_gate_enabled: Option<bool>,
     #[serde(default)]
     pub noise_gate_threshold_dbu: Option<f64>,
     #[serde(default)]
     pub power_mode: Option<PowerMode>,
-    #[serde(default)]
-    pub ohms: Option<f64>,
     #[serde(default)]
     pub fir_bypassed: Option<bool>,
 }
@@ -76,12 +72,9 @@ impl SpeakerProcessing {
             delay_out_ms: channel.delay_out_ms,
             phase_inverted: channel.output_phase_inverted,
             output_trim_db: Some(channel.output_trim_db),
-            output_volume_db: Some(channel.output_volume_db),
-            output_muted: Some(channel.output_muted),
             noise_gate_enabled: Some(channel.noise_gate_enabled),
             noise_gate_threshold_dbu: Some(channel.noise_gate_threshold_dbu),
             power_mode: Some(channel.power_mode),
-            ohms: Some(channel.ohms),
             fir_bypassed: Some(channel.fir_bypassed),
         }
     }
@@ -97,13 +90,10 @@ impl SpeakerProcessing {
             limiter,
             delay_out_ms: data.delay_ms as f64,
             phase_inverted: data.phase_inverted,
-            output_muted: Some(data.muted),
-            ohms: Some(data.load_ohms as f64).filter(|v| *v > 0.0),
             fir_bypassed: Some(data.fir_bypassed),
-            // ponytail: the blob's volume is left out until hardware confirms
-            // whether it is the output volume or the trim.
+            // The blob's volume and mute are never taken (see the module doc),
+            // and it carries no trim, gate or power mode.
             output_trim_db: None,
-            output_volume_db: None,
             noise_gate_enabled: None,
             noise_gate_threshold_dbu: None,
             power_mode: None,
@@ -192,17 +182,13 @@ impl SpeakerProcessing {
             out.power_mode = None;
         }
         out.output_trim_db = out.output_trim_db.map(|v| clamp(&mut issues, "Output trim", " dB", v, r.output_trim_db));
-        out.output_volume_db = out.output_volume_db.map(|v| clamp(&mut issues, "Output volume", " dB", v, r.output_volume_db));
         out.noise_gate_threshold_dbu =
             out.noise_gate_threshold_dbu.map(|v| clamp(&mut issues, "Noise gate threshold", " dBu", v, r.noise_gate_threshold_dbu));
         let own = SpeakerProcessing::from_channel(current);
         out.output_trim_db = out.output_trim_db.or(own.output_trim_db);
-        out.output_volume_db = out.output_volume_db.or(own.output_volume_db);
-        out.output_muted = out.output_muted.or(own.output_muted);
         out.noise_gate_enabled = out.noise_gate_enabled.or(own.noise_gate_enabled);
         out.noise_gate_threshold_dbu = out.noise_gate_threshold_dbu.or(own.noise_gate_threshold_dbu);
         out.power_mode = out.power_mode.or(own.power_mode);
-        out.ohms = out.ohms.or(own.ohms);
         out.fir_bypassed = out.fir_bypassed.or(own.fir_bypassed);
         Ok((out, issues))
     }
@@ -217,64 +203,10 @@ impl SpeakerProcessing {
         channel.delay_out_ms = self.delay_out_ms;
         channel.output_phase_inverted = self.phase_inverted;
         if let Some(v) = self.output_trim_db { channel.output_trim_db = v; }
-        if let Some(v) = self.output_volume_db { channel.output_volume_db = v; }
-        if let Some(v) = self.output_muted { channel.output_muted = v; }
         if let Some(v) = self.noise_gate_enabled { channel.noise_gate_enabled = v; }
         if let Some(v) = self.noise_gate_threshold_dbu { channel.noise_gate_threshold_dbu = v; }
         if let Some(v) = self.power_mode { channel.power_mode = v; }
-        if let Some(v) = self.ohms { channel.ohms = v; }
         if let Some(v) = self.fir_bypassed { channel.fir_bypassed = v; }
-    }
-
-    /// The writes that make a live channel hold this way, planned from one
-    /// snapshot so no stage depends on a reading the others just changed.
-    pub fn live_actions(&self, config: &ChannelConfig) -> Result<Vec<PushAction>, String> {
-        if self.output_eq.bands.len() != config.output_eq.bands.len() {
-            return Err(format!(
-                "The speaker has {} EQ bands, this channel has {}",
-                self.output_eq.bands.len(),
-                config.output_eq.bands.len()
-            ));
-        }
-        let channel = config.channel_index as u8;
-        let (rms, peak) = (&self.limiter.rms, &self.limiter.peak);
-        Ok(vec![
-            PushAction::EqChain {
-                channel,
-                direction: EqDirection::Output,
-                eq: self.output_eq.clone(),
-                wire: config.output_eq_wire.clone(),
-            },
-            PushAction::RmsLimiter {
-                channel,
-                enabled: rms.enabled,
-                threshold_vrms: rms.threshold_vrms,
-                attack_ms: rms.attack_ms,
-                release_multiplier: rms.release_multiplier,
-            },
-            PushAction::PeakLimiter {
-                channel,
-                enabled: peak.enabled,
-                threshold_vp: peak.threshold_vp,
-                hold_ms: peak.hold_ms,
-                release_ms: peak.release_ms,
-            },
-            PushAction::DelayOut { channel, delay_ms: self.delay_out_ms },
-            PushAction::PhaseInvert { channel, inverted: self.phase_inverted },
-        ]
-        .into_iter()
-        .chain(self.output_trim_db.map(|trim_db| PushAction::OutputTrim { channel, trim_db }))
-        .chain(self.output_volume_db.map(|volume_db| PushAction::OutputVolume { channel, volume_db }))
-        .chain(self.output_muted.map(|muted| PushAction::OutputMute { channel, muted }))
-        .chain(self.noise_gate_enabled.map(|enabled| PushAction::NoiseGate {
-            channel,
-            enabled,
-            threshold_dbu: self.noise_gate_threshold_dbu.or(config.noise_gate_threshold_dbu.map(f64::from)).unwrap_or(0.0).round()
-                as i8,
-        }))
-        .chain(self.power_mode.map(|mode| PushAction::PowerMode { channel, mode }))
-        .chain(self.fir_bypassed.map(|bypassed| PushAction::FirBypass { channel, bypassed }))
-        .collect())
     }
 
     /// Labelled, display-ready values, compared entry by entry. Uses the
@@ -321,12 +253,9 @@ impl SpeakerProcessing {
         let show = |v: Option<String>| v.unwrap_or_else(|| "—".to_string());
         let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
         out.push(("Output trim".into(), show(self.output_trim_db.map(|v| format!("{:.2} dB", round_to_step(v, GAIN_STEPS))))));
-        out.push(("Output volume".into(), show(self.output_volume_db.map(|v| format!("{:.2} dB", round_to_step(v, GAIN_STEPS))))));
-        out.push(("Output mute".into(), show(self.output_muted.map(on_off))));
         out.push(("Noise gate".into(), show(self.noise_gate_enabled.map(on_off))));
         out.push(("Noise gate threshold".into(), show(self.noise_gate_threshold_dbu.map(|v| format!("{v:.0} dBu")))));
         out.push(("Power mode".into(), show(self.power_mode.map(|m| format!("{m:?}")))));
-        out.push(("Load".into(), show(self.ohms.map(|v| format!("{:.1} Ω", round_to_step(v, OHM_STEPS))))));
         out.push(("FIR".into(), show(self.fir_bypassed.map(|b| if b { "bypassed" } else { "active" }.to_string()))));
         out
     }
@@ -738,9 +667,9 @@ mod tests {
 
         // A field the preset lacks is never a difference.
         let mut partial = way.clone();
-        partial.output_volume_db = None;
-        target.output_volume_db = -6.0;
-        assert!(!partial.differences(&SpeakerProcessing::from_channel(&target)).contains(&"Output volume".to_string()));
+        partial.output_trim_db = None;
+        target.output_trim_db = -6.0;
+        assert!(!partial.differences(&SpeakerProcessing::from_channel(&target)).contains(&"Output trim".to_string()));
     }
 
     #[test]

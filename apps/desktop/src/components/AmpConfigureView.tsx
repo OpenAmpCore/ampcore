@@ -3230,14 +3230,13 @@ export function AmpConfigureView({
         } else if (value === "speakers" && projectSource) {
           // Refs and statuses come from the project amp even while following
           // the linked amp (the view's `assignment` is then built from the
-          // amp and carries none); `speakersApply` writes values to both.
+          // amp and carries none); `speakersApply` pushes values through sync.
           content = (
             <SpeakersTab
               project={projectSource.project}
               assignment={projectSource.assignment}
               library={speakerLibrary}
               states={speakerStates}
-              liveDeviceId={live?.device.id}
               locked={locked}
               onProjectUpdate={projectSource.onProjectUpdate}
             />

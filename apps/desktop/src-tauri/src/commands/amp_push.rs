@@ -20,7 +20,7 @@ use ampcore_core::data::amp_link::normalize_mac;
 use ampcore_core::data::amp_push::{action_packets, adopt_device_facts, plan_push, AmpPushPlan, PushPlan};
 use ampcore_core::data::edit_lock::LiveAmpReading;
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
-use ampcore_core::data::project::Project;
+use ampcore_core::data::project::{AmpAssignment, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config::ChannelConfigSnapshot;
@@ -201,14 +201,17 @@ fn push_context(
     Ok(PushContext { device_id: reading.device.id.clone(), mac, reading, matrix_input_count })
 }
 
+/// `candidate` plans that assignment instead of the stored one — see
+/// `push_assignment`.
 fn build_plan(
     context: &PushContext,
     project_data: &State<'_, ProjectDataState>,
     project_id: &str,
     assignment_id: &str,
+    candidate: Option<&AmpAssignment>,
 ) -> Result<PushPlan, AppError> {
     let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let assignment = inner
+    let stored = inner
         .projects
         .iter()
         .find(|p| p.id == project_id)
@@ -217,6 +220,7 @@ fn build_plan(
         .iter()
         .find(|a| a.id == assignment_id)
         .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let assignment = candidate.unwrap_or(stored);
     let snapshot = context.reading.snapshot.as_ref().expect("guarded in push_context");
     let bridged = context.reading.bridge.as_ref().map(|b| b.bridged.clone()).unwrap_or_default();
 
@@ -235,7 +239,7 @@ pub fn projects_plan_amp_push(
     assignment_id: String,
 ) -> Result<AmpPushPlan, AppError> {
     let context = push_context(&project_data, &live, &project_id, &assignment_id)?;
-    let plan = build_plan(&context, &project_data, &project_id, &assignment_id)?;
+    let plan = build_plan(&context, &project_data, &project_id, &assignment_id, None)?;
     Ok(plan.describe())
 }
 
@@ -289,11 +293,31 @@ pub async fn projects_push_amp_to_live(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpPushResult, AppError> {
-    let context = push_context(&project_data, &live, &project_id, &assignment_id)?;
-    let plan = build_plan(&context, &project_data, &project_id, &assignment_id)?;
+    push_assignment(&app, &project_data, &live, project_id, assignment_id, None).await
+}
+
+/// The push itself — the one way settings reach a linked amp from this side.
+///
+/// With `candidate`, that assignment is pushed instead of the stored one, and
+/// it replaces the stored one **only if the two fingerprints match
+/// afterwards**: the push's twin of the pull's candidate → verify → save
+/// (`projects_merge_amp_from_live`). That is how a change (a speaker apply)
+/// reaches the amp and the project as one step, without the project ever
+/// claiming something the amp doesn't hold. A candidate that didn't land is
+/// dropped; the project is left as it was.
+pub(crate) async fn push_assignment(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+    candidate: Option<AmpAssignment>,
+) -> Result<AmpPushResult, AppError> {
+    let context = push_context(project_data, live, &project_id, &assignment_id)?;
+    let plan = build_plan(&context, project_data, &project_id, &assignment_id, candidate.as_ref())?;
     let stages_total = plan.stages.len() as u32;
 
-    let (firmware_family, ip, write_tx) = resolve_write_target(&live, &context.device_id)?;
+    let (firmware_family, ip, write_tx) = resolve_write_target(live, &context.device_id)?;
     let firmware = firmware_family.as_deref();
 
     // Encode everything before sending anything: an action this firmware has
@@ -368,7 +392,7 @@ pub async fn projects_push_amp_to_live(
     // `WRITE_SETTLE_DELAY`.
     tokio::time::sleep(WRITE_SETTLE_DELAY).await;
     let settled_at = ampcore_core::data::common::now_millis();
-    let fresh = wait_for_fresh_snapshot(&live, &context.device_id, settled_at).await;
+    let fresh = wait_for_fresh_snapshot(live, &context.device_id, settled_at).await;
     let bridge = {
         let inner = live.0.lock().map_err(|e| e.to_string())?;
         inner.bridge.get(&context.device_id).cloned()
@@ -385,34 +409,43 @@ pub async fn projects_push_amp_to_live(
     let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
     let models = inner.amp_models.clone();
     let links = inner.device_model_links.clone();
+    let data_dir = inner.data_dir.clone();
     let project = inner
         .projects
         .iter_mut()
         .find(|p| p.id == project_id)
         .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
+    let slot = project
         .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
+        .iter()
+        .position(|a| a.id == assignment_id)
         .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
     // The link can have changed while the writes were in flight; the amp was
     // still written, so this is reported, not rolled back.
-    if assignment.mac.as_deref().map(normalize_mac) != Some(normalize_mac(&context.mac)) {
+    if project.amp_assignments[slot].mac.as_deref().map(normalize_mac) != Some(normalize_mac(&context.mac)) {
         return Err(AppError::from("The amp's link changed while the push was running".to_string()));
     }
-    adopt_device_facts(assignment, &snapshot);
-    let assignment = assignment.clone();
-    project.touch();
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    drop(inner);
-    app.emit("project:updated", &project).ok();
+    let is_candidate = candidate.is_some();
+    let mut assignment = candidate.unwrap_or_else(|| project.amp_assignments[slot].clone());
+    adopt_device_facts(&mut assignment, &snapshot);
 
-    let project_fp = fingerprint_project_amp(&project, &assignment, &models);
+    let project_fp = fingerprint_project_amp(project, &assignment, &models);
     let live_fp = fingerprint_live_device(&context.reading.device, &snapshot, bridge.as_ref(), &models, &links);
     let matched = project_fp.amp_hash.is_some() && project_fp.amp_hash == live_fp.amp_hash;
     let pushed = failure.is_none() && matched;
     let remaining = if matched { Vec::new() } else { compare_fingerprints(&project_fp, &live_fp) };
+
+    // A stored assignment is saved either way (see above). A candidate only
+    // once the amp is known to hold it.
+    if !is_candidate || pushed {
+        project.amp_assignments[slot] = assignment;
+        project.touch();
+        save_project_file(&data_dir, project).map_err(AppError::from)?;
+    }
+    let project = project.clone();
+    drop(inner);
+    app.emit("project:updated", &project).ok();
+
     let (failed_stage_id, failed_stage_label, error) = match failure {
         Some((id, label, error)) => (Some(id), Some(label), Some(error)),
         None => (None, None, None),
