@@ -357,6 +357,22 @@ pub fn parse_basic_info_reply(raw: &[u8]) -> Option<BasicInfoReply> {
     })
 }
 
+/// This machine's IPv4 address on every active network interface — loopback
+/// and self-assigned (169.254.x.x) ones left out.
+pub fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter_map(|iface| match iface.addr {
+                    if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !v4.ip.is_link_local() => Some(v4.ip),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Directed broadcast address for every active, non-loopback IPv4 interface,
 /// falling back to 255.255.255.255 if none are found.
 pub fn directed_broadcast_addresses() -> Vec<Ipv4Addr> {

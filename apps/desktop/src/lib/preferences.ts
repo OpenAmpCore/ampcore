@@ -26,6 +26,9 @@ const DEFAULTS = {
    * on for the Output tab and unconditional on the Limiter tab. */
   peakHoldSurfaces: ["input", "output", "limiter"] as string[],
   limiterThresholdSurfaces: ["output", "limiter"] as string[],
+  /** The built-in web server (`web_server.rs`): off until asked for. */
+  webServerEnabled: false,
+  webServerPort: 8642,
 };
 
 type Preferences = typeof DEFAULTS;

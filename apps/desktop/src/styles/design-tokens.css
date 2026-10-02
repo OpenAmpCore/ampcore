@@ -86,6 +86,14 @@
      HeroUI's own dark `--background`; mirrored in index.html's pre-paint
      script. */
   --background: #0a0b0c;
+  /* HeroUI's own dark controls sit within a few percent of the dialog/popover
+     surface above (`--overlay`), with no field border at all, so on it a
+     select, input or switch has no edge. Inputs are recessed and outlined,
+     and the `--default` fill (switch track, secondary buttons) is lifted. */
+  --field-background: #161616;
+  --field-border-width: 1px;
+  --field-border: var(--amp-color-dark-4);
+  --default: var(--amp-color-dark-5);
   --amp-color-default: var(--amp-color-dark-6);
   --amp-color-default-hover: var(--amp-color-dark-5);
   --amp-color-default-border: var(--amp-color-dark-4);

@@ -49,23 +49,27 @@ export interface CabinetPort {
 }
 
 /** One speaker on the bench. Not stored anywhere: derived from the outputs'
- * `SpeakerRef`s. */
+ * `SpeakerRef`s, or a pending join that has no speaker yet. */
 export interface Cabinet {
   key: string;
-  /** Missing for a detached speaker. */
+  /** Missing for a detached speaker and for a pending join. */
   entry?: SpeakerLibraryEntry;
   title: string;
   subtitle: string;
+  /** A join waiting for its speaker: `joinLeaders` are its outputs. */
+  pending: boolean;
+  joinLeaders?: number[];
   ports: CabinetPort[];
 }
 
 /** Outputs in order: one joins the open cabinet of its library entry unless
  * that cabinet already holds its way — then it is a second speaker of the
- * same model. */
+ * same model. `joins` are groups of output leaders joined without a speaker. */
 export function buildCabinets(
   rows: OutputRow[],
   states: Map<number, ChannelSpeakerState>,
   library: SpeakerLibraryEntry[],
+  joins: number[][],
 ): Cabinet[] {
   const cabinets: Cabinet[] = [];
   const open = new Map<string, Cabinet>();
@@ -81,6 +85,7 @@ export function buildCabinets(
         entry,
         title: entry ? speakerName(entry) : splitLabel(label)[0],
         subtitle: entry ? [entry.family, entry.application].filter(Boolean).join(" · ") : "Not in this library",
+        pending: false,
         ports: entry?.ways.map((w, i) => ({ label: w.label, wayIndex: i, rowIndex: null })) ?? [],
       };
       open.set(libraryId, cabinet);
@@ -94,6 +99,20 @@ export function buildCabinets(
     port.rowIndex = rowIndex;
     port.state = state;
   });
+  for (const join of joins) {
+    cabinets.push({
+      key: `join:${join.join("-")}`,
+      title: "New speaker",
+      subtitle: `Drop a ${join.length}-way speaker here`,
+      pending: true,
+      joinLeaders: join,
+      ports: join.map((leader, i) => ({
+        label: `Way ${i + 1}`,
+        wayIndex: i,
+        rowIndex: rows.findIndex((r) => r.leader === leader),
+      })),
+    });
+  }
   const first = (c: Cabinet) => Math.min(...c.ports.map((p) => p.rowIndex ?? Infinity));
   return cabinets.sort((a, b) => first(a) - first(b));
 }
@@ -173,8 +192,9 @@ const SOCKET = 26;
 const PORT = 18;
 
 /** Fixed status colours, never the accent for a warning (see CLAUDE.md). */
-function cableColor(port: CabinetPort): { stroke: string; dashed: boolean } {
+function cableColor(port: CabinetPort, pending: boolean): { stroke: string; dashed: boolean } {
   const kind = port.state?.status.kind;
+  if (pending) return { stroke: "var(--amp-color-dimmed)", dashed: true };
   if (kind === "match") return { stroke: "var(--amp-color-green-filled)", dashed: false };
   if (kind === "edited") return { stroke: "var(--amp-color-orange-6)", dashed: false };
   if (kind === "libraryUpdated") return { stroke: "var(--accent)", dashed: false };
@@ -338,7 +358,7 @@ export function SpeakerBench({
           cabinet.ports.map((port, portIndex) => {
             if (port.rowIndex === null || port.rowIndex < 0) return null;
             if (drag && drag.cabinet.key === cabinet.key && drag.wayIndex === port.wayIndex) return null;
-            const { stroke, dashed } = cableColor(port);
+            const { stroke, dashed } = cableColor(port, cabinet.pending);
             const [y1, y2] = [rowY(port.rowIndex), portY(cabinetTop, portIndex)];
             const d = cablePath(-CONNECTOR_INSET, y1, GUTTER_W, y2);
             return (
@@ -375,7 +395,9 @@ export function SpeakerBench({
         {placed.map(({ cabinet, top: cabinetTop, height: cabinetHeight }) => (
           <div
             key={cabinet.key}
-            className="absolute left-0 flex w-full max-w-[440px] items-center gap-3 rounded-xl border border-[var(--amp-color-default-border)] bg-[var(--amp-color-body)] pr-2"
+            className={`absolute left-0 flex w-full max-w-[440px] items-center gap-3 rounded-xl border border-[var(--amp-color-default-border)] bg-[var(--amp-color-body)] pr-2 ${
+              cabinet.pending ? "border-dashed" : ""
+            }`}
             style={{ top: cabinetTop, height: cabinetHeight }}
           >
             {/* Ports keep the outputs' pitch, so the column overhangs the card by half the gap. */}

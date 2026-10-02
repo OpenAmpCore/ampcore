@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Modal, Spinner, toast } from "@heroui/react";
 import { listen } from "@tauri-apps/api/event";
-import { FileUp, GripVertical, Info, ListFilter, RotateCcw, Save, SplitSquareVertical, Trash2, Upload } from "lucide-react";
+import { FileUp, GripVertical, Info, Link2, ListFilter, RotateCcw, Save, SplitSquareVertical, Trash2, Upload } from "lucide-react";
 import {
   commands,
   type AmpAssignment,
@@ -38,7 +38,12 @@ const DRAG_TYPE = "application/x-ampcore-speaker-id";
 type Assignment = { row: OutputRow; wayIndex: number };
 /** One output to set up; entries may differ between the items of one apply. */
 type ApplyItem = Assignment & { entry: SpeakerLibraryEntry };
-type ProjectResult = { status: "ok"; data: Project } | { status: "error"; error: { message: string } };
+/** Joined output groups (leaders) waiting for their speaker, per project amp.
+ * Outside the component so a join outlives the tab unmounting.
+ * ponytail: session only; move onto AmpAssignment (schema bump) if joins must
+ * survive an app restart. */
+const JOINS = new Map<string, number[][]>();
+type ProjectResult ={ status: "ok"; data: Project } | { status: "error"; error: { message: string } };
 
 /** A way's limiter thresholds, delay, polarity and FIR filter on one line. */
 function waySummary(p: SpeakerProcessing): string {
@@ -115,8 +120,22 @@ export function SpeakersTab({
     : progress.state === "done" && progress.stageIndex + 1 === progress.stagesTotal ? "Checking the amp…"
     : `Writing ${progress.stageIndex + 1}/${progress.stagesTotal}`;
 
+  const [, rerender] = useState(0);
+  const joins = JOINS.get(assignment.id) ?? [];
+  function setJoins(next: number[][]) {
+    JOINS.set(assignment.id, next);
+    rerender((n) => n + 1);
+  }
+  // A join ends by itself once its outputs hold a speaker (or are bridged away).
+  const liveJoins = joins.filter((j) => j.every((leader) => rows.some((r) => r.leader === leader) && !states.has(leader)));
+  useEffect(() => {
+    // Forgotten for good, so it doesn't come back when the speaker is removed.
+    if (liveJoins.length !== joins.length) JOINS.set(assignment.id, liveJoins);
+  });
+  const inJoin = (leader: number) => liveJoins.find((j) => j.includes(leader));
+
   const off = locked || busy;
-  const cabinets = buildCabinets(rows, states, library);
+  const cabinets = buildCabinets(rows, states, library, liveJoins);
   const selectedRows = rows.flatMap((row, i) => (selected.has(row.leader) ? [i] : []));
   const adjacent = selectedRows.every((r, i) => i === 0 || r === selectedRows[i - 1] + 1);
 
@@ -212,10 +231,18 @@ export function SpeakersTab({
     );
   }
 
-  /** A drop on `rowIndex` fills one output per way, starting there. */
+  /** A drop on `rowIndex` fills one output per way, starting there. On an
+   * output of a join it fills exactly that join, and only a speaker with as
+   * many ways fits; a span elsewhere may not cut into a join. */
   function dropSpan(entry: SpeakerLibraryEntry, rowIndex: number): Assignment[] | null {
+    const join = inJoin(rows[rowIndex].leader);
+    if (join) {
+      if (join.length !== entry.ways.length) return null;
+      return join.map((leader, wayIndex) => ({ row: rows.find((r) => r.leader === leader)!, wayIndex }));
+    }
     if (rowIndex + entry.ways.length > rows.length) return null;
-    return entry.ways.map((_, wayIndex) => ({ row: rows[rowIndex + wayIndex], wayIndex }));
+    const span = entry.ways.map((_, wayIndex) => ({ row: rows[rowIndex + wayIndex], wayIndex }));
+    return span.some((s) => inJoin(s.row.leader)) ? null : span;
   }
 
   function select(rowIndex: number | null, { toggle, range }: { toggle: boolean; range: boolean }) {
@@ -257,9 +284,10 @@ export function SpeakersTab({
     selectedRows.length === 1 && first.bridged ? { leader: first.leader, bridged: false }
     : selectedRows.length === 2 && first.leader % 2 === 0 && second.leader === first.leader + 1 ? { leader: first.leader, bridged: true }
     : null;
-  // Two outputs that hold a speaker are not merged into one behind the user's
-  // back: their speakers are removed first.
-  const bridgeBlocked = !!bridgeTarget?.bridged && (states.has(first.leader) || states.has(second.leader));
+  // Two outputs that hold a speaker, or sit in a join, are not merged into one
+  // behind the user's back: they are split first.
+  const taken = (leader: number) => states.has(leader) || !!inJoin(leader);
+  const bridgeBlocked = !!bridgeTarget?.bridged && (taken(first.leader) || taken(second.leader));
 
   async function toggleBridge() {
     if (!bridgeTarget || bridgeBlocked || !actions?.setOutputBridge) return;
@@ -288,15 +316,24 @@ export function SpeakersTab({
     setSelected(new Set());
   }
 
+  function join() {
+    setJoins([...liveJoins, selectedRows.map((i) => rows[i].leader)]);
+    setSelected(new Set());
+  }
+
   const heldRows = selectedRows.map((i) => rows[i]).filter((row) => states.has(row.leader));
 
-  async function removeSpeakers() {
-    const ok = await confirm({
-      title: `Remove the speaker from ${heldRows.length === 1 ? "output" : "outputs"} ${heldRows.map((r) => r.label).join(", ")}?`,
-      description: "The outputs keep their values; only the link to the library is removed.",
-      confirmLabel: "Remove",
-    });
-    if (!ok) return;
+  /** Dissolves the selected outputs' joins and removes their speakers. */
+  async function splitReset() {
+    if (heldRows.length) {
+      const ok = await confirm({
+        title: `Remove the speaker from ${heldRows.length === 1 ? "output" : "outputs"} ${heldRows.map((r) => r.label).join(", ")}?`,
+        description: "The outputs keep their values; only the link to the library is removed.",
+        confirmLabel: "Remove",
+      });
+      if (!ok) return;
+    }
+    setJoins(liveJoins.filter((j) => !j.some((leader) => selected.has(leader))));
     setBusy(true);
     await release(heldRows.map((r) => r.leader));
     setBusy(false);
@@ -350,6 +387,7 @@ export function SpeakersTab({
       tone: "danger",
     });
     if (!ok) return;
+    setJoins([]);
     setSelected(new Set());
     setBusy(true);
     await release([...states.keys()]);
@@ -363,6 +401,12 @@ export function SpeakersTab({
   }
 
   function cabinetMenu(cabinet: Cabinet) {
+    if (cabinet.pending) {
+      return [
+        { id: "save", label: "Save as new speaker…" },
+        { id: "split", label: "Split" },
+      ];
+    }
     const kinds = cabinet.ports.map((p) => p.state?.status.kind);
     return [
       ...(cabinet.entry && kinds.some((k) => k === "edited" || k === "libraryUpdated") ? [{ id: "reapply", label: "Re-apply from library" }] : []),
@@ -374,7 +418,11 @@ export function SpeakersTab({
 
   async function handleCabinetAction(cabinet: Cabinet, action: string) {
     const linked = cabinet.ports.flatMap((p) => (p.rowIndex !== null && p.rowIndex >= 0 ? [{ ...p, row: rows[p.rowIndex] }] : []));
-    if (action === "reapply" && cabinet.entry) {
+    if (action === "save" && linked.length) {
+      setDetails({ kind: "save", rowIndex: linked[0].rowIndex!, ways: linked.length });
+    } else if (action === "split") {
+      setJoins(liveJoins.filter((j) => j !== cabinet.joinLeaders));
+    } else if (action === "reapply" && cabinet.entry) {
       await assign(cabinet.entry, linked.map(({ row, wayIndex }) => ({ row, wayIndex })));
     } else if (action === "update") {
       const edited = linked.filter((p) => p.state?.status.kind === "edited");
@@ -414,7 +462,9 @@ export function SpeakersTab({
   }
 
   const span = dragging && dropRow !== null ? dropSpan(dragging, dropRow) : null;
-  const spanRows = new Set(span?.map((s) => s.row.leader) ?? (dragging && dropRow !== null ? [rows[dropRow].leader] : []));
+  // A drop that doesn't fit lights the hovered output red — its whole join, if it is in one.
+  const hovered = dragging && dropRow !== null ? rows[dropRow].leader : null;
+  const spanRows = new Set(span?.map((s) => s.row.leader) ?? (hovered !== null ? (inJoin(hovered) ?? [hovered]) : []));
   const highlightFor = (rowIndex: number): RowHighlight =>
     spanRows.has(rows[rowIndex].leader)
       ? span ? "fits" : "overflow"
@@ -445,22 +495,29 @@ export function SpeakersTab({
      <div className={`flex min-w-0 flex-[3] flex-col gap-3 ${compact ? "" : "min-h-0"}`}>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
         {tool(
+          "Join",
+          <Link2 size={14} />,
+          "Join two or more adjacent free outputs: a multi-way speaker dropped on any of them fills exactly that group.",
+          selectedRows.length >= 2 && adjacent && selectedRows.every((i) => !taken(rows[i].leader)),
+          join,
+        )}
+        {tool(
           bridgeTarget && !bridgeTarget.bridged ? "Unbridge" : "Bridge",
           <SplitSquareVertical size={14} />,
-          bridgeBlocked ? "Remove the speakers from these outputs first."
+          bridgeBlocked ? "Split / Reset these outputs first."
             : actions?.setOutputBridge || locked
               ? "Select both outputs of a pair (A and B) to bridge them, or a bridged output to unbridge it."
               : "Bridging isn't available for this amp.",
           !!bridgeTarget && !bridgeBlocked && !!actions?.setOutputBridge,
           () => void toggleBridge(),
         )}
-        {tool("Remove speaker", <RotateCcw size={14} />, "Remove the speaker from the selected outputs. Their values stay.", heldRows.length > 0, () => void removeSpeakers())}
+        {tool("Split / Reset", <RotateCcw size={14} />, "Undo a join and remove the speaker from the selected outputs. Their values stay.", selectedRows.some((i) => taken(rows[i].leader)), () => void splitReset())}
         {tool("Save as speaker…", <Save size={14} />, "Save the selected adjacent outputs to the library, one way per output.", selectedRows.length > 0 && adjacent, () =>
           setDetails({ kind: "save", rowIndex: selectedRows[0], ways: selectedRows.length }),
         )}
         <span className="mx-1 h-5 w-px shrink-0 bg-[var(--amp-color-default-border)]" />
         {tool("Apply all", <Upload size={14} />, "Re-apply every output that no longer matches its library speaker.", stale.length > 0, () => void applyAll())}
-        {tool("Clear all", <Trash2 size={14} />, "Remove every speaker and every bridge from this amp. The outputs keep their values.", states.size > 0 || bridgedRows.length > 0, () => void clearAll())}
+        {tool("Clear all", <Trash2 size={14} />, "Remove every speaker and every bridge from this amp. The outputs keep their values.", states.size > 0 || liveJoins.length > 0 || bridgedRows.length > 0, () => void clearAll())}
         <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           {busy && <Spinner size="sm" />}
           <span className={`${MUTED} truncate`}>{busy ? progressText : summary}</span>
@@ -499,7 +556,7 @@ export function SpeakersTab({
         />
       </div>
       <span className={`${MUTED} shrink-0`}>
-        Click outputs to select (Ctrl / Shift for several) · drag a library speaker onto an output · drag a speaker's port to move that way to another output
+        Click outputs to select (Ctrl / Shift for several) · drag a library speaker onto an output or a join · drag a speaker's port to move that way to another output
       </span>
      </div>
 

@@ -8,6 +8,6 @@
  * HeroUI fields. They previously hardcoded `--amp-*` borders and an amber
  * focus colour, which is what made them read as a different design system. */
 export const FIELD_INPUT =
-  "w-full rounded-field border border-field-border bg-field px-2 py-1 text-sm text-field-foreground " +
+  "w-full rounded-md border border-field-border bg-field px-2 py-1 text-sm text-field-foreground " +
   "outline-none placeholder:text-field-placeholder hover:border-field-border-hover " +
   "focus:border-field-border-focus disabled:opacity-(--disabled-opacity)";

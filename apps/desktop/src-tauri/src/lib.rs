@@ -1,6 +1,7 @@
 mod commands;
 mod data;
 mod live;
+mod web_server;
 
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
@@ -48,6 +49,7 @@ use commands::speakers::{
 };
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
+use web_server::{web_server_set, WebServerState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -153,6 +155,7 @@ pub fn run() {
             live_control_set_rotary_lock,
             live_control_set_standby,
             live_control_set_device_name,
+            web_server_set,
         ]);
 
     #[cfg(debug_assertions)]
@@ -170,6 +173,7 @@ pub fn run() {
                 .expect("failed to load project data store");
             app.manage(project_data);
             app.manage(LiveDeviceState::new());
+            app.manage(WebServerState::default());
             Ok(())
         })
         .plugin(tauri_plugin_process::init())

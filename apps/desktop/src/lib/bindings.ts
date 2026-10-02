@@ -628,6 +628,12 @@ export const commands = {
 	 *  name comes back through the next FC=0 `BASIC_INFO` read.
 	 */
 	liveControlSetDeviceName: (deviceId: string, name: string) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_device_name", { deviceId, name })),
+	/**
+	 *  Starts the server on `port`, moves it there, or stops it. Returns the
+	 *  addresses it is reachable at (empty when stopped). Asking for what is
+	 *  already running changes nothing, so the frontend can call this freely.
+	 */
+	webServerSet: (enabled: boolean, port: number) => typedError<string[], AppError>(__TAURI_INVOKE("web_server_set", { enabled, port })),
 };
 
 /* Types */

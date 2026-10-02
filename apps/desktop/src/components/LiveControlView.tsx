@@ -70,7 +70,7 @@ export function LiveControlView() {
   const showRawTelemetry = usePreference("showRawTelemetry");
   /** Owned here rather than inside `AmpConfigureView` so the editor's tab
    * survives anything that re-renders this view. */
-  const [configureTab, setConfigureTab] = useState<string | null>("input");
+  const [configureTab, setConfigureTab] = useState<string | null>("main");
 
   const selectedDevice = devices.find((d) => d.id === selectedId) ?? null;
   // Derived, not stored: turning the setting off while the telemetry panel
