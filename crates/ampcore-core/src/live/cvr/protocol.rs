@@ -5,14 +5,13 @@
 //! per-parameter write commands (see `write.rs`, built on
 //! `build_control_packet` below) are all covered.
 //!
-//! Firmware 1.1.9 is known to differ from 1.1.8 in byte offsets *and*
-//! function codes for at least some commands, but no 1.1.9 reference/spec
-//! exists yet — `detect_firmware_family` below labels a device's family, and
-//! 1.1.9 currently reuses the 1.1.8 parsers/encoders verbatim; only families
-//! passing `is_known_family` get parsed/written at all. BASIC_INFO parsing already handles multiple
-//! body-length variants generically and has been verified against real
-//! 1.1.8 hardware; whether it also holds unmodified for 1.1.9 remains
-//! unconfirmed.
+//! `detect_firmware_family` below labels a device's family; only families
+//! passing `is_known_family` get parsed/written at all. 1.1.9 reuses the
+//! 1.1.8 parsers/encoders. Measured on 1.1.9 hardware (DSP-3004D `…106119`):
+//! FC=27 is the 1.1.8 payload plus gate thresholds (see
+//! `channel_config_v119`), and mute/EQ/delay/trim writes
+//! with 1.1.8 offsets read back correctly. Everything else on 1.1.9
+//! (heartbeat, BASIC_INFO variants, the rest of the trailer) is unconfirmed.
 
 use std::net::Ipv4Addr;
 
@@ -88,9 +87,9 @@ impl CvrFirmwareFamily {
 }
 
 /// True for a `firmware_family` label this app has wire adapters for. 1.1.9
-/// currently reuses the 1.1.8 parsers/encoders verbatim — no 1.1.9 hardware
-/// exists to ground-truth against — so a real 1.1.9 divergence gets its own
-/// `match` arm at the affected call site. Unknown families get no fallback:
+/// reuses the 1.1.8 parsers/encoders; a real 1.1.9 divergence gets its own
+/// `match` arm at the affected call site (e.g. `channel_config_v119`,
+/// `write::build_set_noise_gate`). Unknown families get no fallback:
 /// guessing wrong would produce plausible garbage instead of an honest gap.
 pub fn is_known_family(firmware_family: Option<&str>) -> bool {
     matches!(firmware_family, Some("1.1.8" | "1.1.9"))
@@ -105,10 +104,6 @@ pub fn detect_firmware_family(version_string: &str) -> CvrFirmwareFamily {
     }
 }
 
-/// Only `data_flag`/`data_state` are read this pass; the rest document the
-/// full wire format for the fragmentation/reassembly work deferred to a
-/// future phase (see module doc).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct NetworkDataHeader {
     pub data_flag: u16,
@@ -360,6 +355,22 @@ pub fn parse_basic_info_reply(raw: &[u8]) -> Option<BasicInfoReply> {
         output_channels: byte_at(3),
         machine_state: byte_at(4),
     })
+}
+
+/// This machine's IPv4 address on every active network interface — loopback
+/// and self-assigned (169.254.x.x) ones left out.
+pub fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter_map(|iface| match iface.addr {
+                    if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !v4.ip.is_link_local() => Some(v4.ip),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Directed broadcast address for every active, non-loopback IPv4 interface,

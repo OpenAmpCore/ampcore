@@ -6,7 +6,7 @@
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use ampcore_core::data::capability::cvr::{cvr_param_ranges, AmpParamRanges};
+use ampcore_core::data::capability::cvr::{cvr_param_ranges, AmpParamRanges, CvrFirmwareCapability};
 use ampcore_core::data::capability::{eq_filter_capabilities, EqFilterCapabilityEntry};
 use ampcore_core::data::filter_response::{response_curve, EqStageRef, ResponsePoint, DEFAULT_CURVE_POINTS};
 use ampcore_core::data::project::{
@@ -30,6 +30,7 @@ impl EventEmitter for MobileEmitter {
             LiveEvent::Telemetry(p) => self.0.emit("live_telemetry:updated", &p),
             LiveEvent::Presets(p) => self.0.emit("live_presets:updated", &p),
             LiveEvent::Bridge(_) => Ok(()),
+            LiveEvent::Fir(_) => Ok(()),
         }
         .ok();
     }
@@ -328,9 +329,12 @@ async fn set_matrix_crosspoint(
 }
 
 /// Slider bounds come from core, not the UI (`AmpParamRanges`, camelCase).
+/// Per device, because some bounds depend on firmware (1.1.9 input delay).
 #[tauri::command]
-fn amp_ranges() -> AmpParamRanges {
-    cvr_param_ranges()
+fn amp_ranges(state: State<LiveDeviceState>, device_id: String) -> Result<AmpParamRanges, String> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let version = inner.devices.get(&device_id).map(|d| d.firmware_version.as_str());
+    Ok(cvr_param_ranges(&CvrFirmwareCapability::from_version(version)))
 }
 
 /// Which filter types expose gain/Q — read from core so the EQ sheet greys
@@ -347,7 +351,7 @@ fn eq_response_curve(eq: ChannelEq, stage: Option<EqStageRef>, points: Option<u3
     response_curve(&eq, stage, points.unwrap_or(DEFAULT_CURVE_POINTS))
 }
 
-// Presets (FC=59, firmware 1.1.8 only — the gate is core's `presets_supported`).
+// Presets (FC=59, firmware-gated — the gate is core's `presets_supported`).
 
 #[tauri::command]
 fn amp_presets_supported(state: State<LiveDeviceState>, device_id: String) -> Result<bool, String> {

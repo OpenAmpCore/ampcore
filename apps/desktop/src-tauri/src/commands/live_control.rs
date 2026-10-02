@@ -1,6 +1,8 @@
 use tauri::{AppHandle, State};
 
+use ampcore_core::data::amp_push::action_packets;
 use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::channel_clipboard::{copy_from_live, live_paste_actions, ChannelClip, ClipSection};
 use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
@@ -12,8 +14,8 @@ use ampcore_core::live::state::{
     LiveWriteAck,
 };
 use ampcore_core::live::write_helpers::{
-    current_channel, current_crossover_slot, current_eq_band, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
-    resolve_write_target, send_fragmented_write, send_request_with_retry, unknown_firmware_error, validate_name, WriteTally,
+    current_channel, current_crossover_slot, current_eq_band, fetch_channel_fir, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
+    resolve_write_target, send_writes, send_request_with_retry, unknown_firmware_error, validate_name, WriteTally,
 };
 
 #[tauri::command]
@@ -226,11 +228,9 @@ pub fn live_control_get_presets(state: State<LiveDeviceState>) -> Result<Vec<Dev
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
+    let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
-    tally.record(write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |_| Some(vec![ampcore_core::live::cvr::preset::build_recall_packet(slot_index)])).await
 }
 
 /// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
@@ -246,31 +246,17 @@ pub async fn live_control_set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let channel = current_channel(&state, &device_id, channel_index)?;
     let existing = channel
         .matrix_crosspoints
         .iter()
         .find(|c| c.source_index == u32::from(source_index))
         .ok_or_else(|| AppError::from(format!("channel {} has no matrix source {}", channel_index, source_index)))?;
-
-    let packet = write::build_set_matrix_crosspoint(
-        firmware_family.as_deref(),
-        channel_index,
-        source_index,
-        gain_db.unwrap_or(existing.gain_db) as f32,
-        active.unwrap_or(existing.active),
-    )
-    .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-
-    let mut tally = WriteTally::default();
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_matrix_crosspoint(firmware, channel_index, source_index, gain_db.unwrap_or(existing.gain_db) as f32, active.unwrap_or(existing.active))?])).await
 }
 
-/// FC=69 NOISE_GATE. `threshold_dbu` is only carried on 1.1.9+ — on 1.1.8 the
-/// wire body is the enable flag alone, matching
-/// `CvrFirmwareCapability.noise_gate_threshold`.
+/// FC=69 NOISE_GATE, plus FC=87 for the threshold on 1.1.9+ — on 1.1.8 only
+/// the enable flag is sent, matching `CvrFirmwareCapability.noise_gate_threshold`.
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_noise_gate(
@@ -280,12 +266,10 @@ pub async fn live_control_set_channel_noise_gate(
     enabled: bool,
     threshold_dbu: f64,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let packet = write::build_set_noise_gate(firmware_family.as_deref(), channel_index, enabled, threshold_dbu as i8)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    let mut tally = WriteTally::default();
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| {
+        write::build_set_noise_gate(firmware, channel_index, enabled, threshold_dbu.round() as i8)
+    })
+    .await
 }
 
 /// FC=55 RMS_LIMITER / FC=54 PEAK_LIMITER. Takes the same `LimiterPatch` the
@@ -303,28 +287,52 @@ pub async fn live_control_set_channel_limiter(
     channel_index: u8,
     patch: LimiterPatch,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let channel = current_channel(&state, &device_id, channel_index)?;
+    send_writes(&state, &device_id, |firmware| {
+        let mut packets = Vec::new();
+        if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = merge_rms(&patch, &channel.limiter.rms) {
+            packets.push(write::build_set_rms_limiter(firmware, channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)?);
+        }
+        if let Some((enabled, threshold_vp, hold_ms, release_ms)) = merge_peak(&patch, &channel.limiter.peak) {
+            packets.push(write::build_set_peak_limiter(firmware, channel_index, enabled, threshold_vp, hold_ms, release_ms)?);
+        }
+        Some(packets)
+    })
+    .await
+}
 
-    let mut packets: Vec<Vec<u8>> = Vec::new();
-    if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = merge_rms(&patch, &channel.limiter.rms) {
-        packets.push(
-            write::build_set_rms_limiter(firmware_family.as_deref(), channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)
-                .ok_or_else(|| unknown_firmware_error(&device_id))?,
-        );
-    }
-    if let Some((enabled, threshold_vp, hold_ms, release_ms)) = merge_peak(&patch, &channel.limiter.peak) {
-        packets.push(
-            write::build_set_peak_limiter(firmware_family.as_deref(), channel_index, enabled, threshold_vp, hold_ms, release_ms)
-                .ok_or_else(|| unknown_firmware_error(&device_id))?,
-        );
-    }
+/// Copies one channel section out of the last FC=27 snapshot — see
+/// `data/channel_clipboard.rs`. Reads the cache, sends nothing.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_copy_channel_section(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    section: ClipSection,
+) -> Result<ChannelClip, AppError> {
+    let channel = current_channel(&state, &device_id, channel_index)?;
+    Ok(copy_from_live(&channel, section))
+}
 
-    let mut tally = WriteTally::default();
-    for packet in &packets {
-        tally.record(write::send_control(&write_tx, ip, packet).await.map_err(|e| e.to_string())?);
-    }
-    Ok(tally.finish())
+/// Pastes a `ChannelClip` onto a live channel: an EQ is one FC=52 whole-chain
+/// write, a limiter stage its FC=54/55 record (plus the other stage when the
+/// peak floor is raised). Planned in core, encoded by `action_packets`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_paste_channel_section(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    section: ClipSection,
+    clip: ChannelClip,
+) -> Result<LiveWriteAck, AppError> {
+    let channel = current_channel(&state, &device_id, channel_index)?;
+    let actions = live_paste_actions(&channel, section, &clip).map_err(AppError::from)?;
+    send_writes(&state, &device_id, |firmware| {
+        Some(actions.iter().map(|action| action_packets(action, firmware)).collect::<Option<Vec<_>>>()?.concat())
+    })
+    .await
 }
 
 /// FC=77 SPEAKER_NAME. `direction` picks which side of the channel is
@@ -343,15 +351,10 @@ pub async fn live_control_set_channel_name(
     direction: EqDirection,
     name: Option<String>,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
 
     let name = name.unwrap_or_default();
     let trimmed = validate_name("channel name", &name, CHANNEL_NAME_FIELD_LEN)?;
-    let packet = write::build_set_channel_name(firmware_family.as_deref(), channel_index, write::in_out_flag(direction), trimmed)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    let mut tally = WriteTally::default();
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_channel_name(firmware, channel_index, write::in_out_flag(direction), trimmed)?])).await
 }
 
 /// FC=11 SOURCE_SELECT, plus FC=79 ANALOG_MATRIX_INPUT for an Analog pick.
@@ -377,7 +380,6 @@ pub async fn live_control_set_channel_source(
     kind: SourceKind,
     index: Option<u32>,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let source_code: u8 = match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
@@ -393,18 +395,14 @@ pub async fn live_control_set_channel_source(
         ),
         _ => None,
     };
-    let unknown_firmware =
-        || AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id));
-    let packet = write::build_set_source_select(firmware_family.as_deref(), channel_index, source_code)
-        .ok_or_else(unknown_firmware)?;
-    let mut tally = WriteTally::default();
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    if let Some(analog_input) = analog_input {
-        let packet = write::build_set_analog_input(firmware_family.as_deref(), channel_index, analog_input)
-            .ok_or_else(unknown_firmware)?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| {
+        let mut packets = vec![write::build_set_source_select(firmware, channel_index, source_code)?];
+        if let Some(analog_input) = analog_input {
+            packets.push(write::build_set_analog_input(firmware, channel_index, analog_input)?);
+        }
+        Some(packets)
+    })
+    .await
 }
 
 /// FC=50 BRIDGE. `channel_index` is the bridged pair's **leader channel**,
@@ -441,8 +439,8 @@ pub async fn live_control_set_output_bridge(
         return Err(AppError::from(format!("channel {} is outside the bridgeable pairs", channel_index)));
     }
 
-    let packet = write::build_set_output_bridge(firmware_family.as_deref(), pair_index, bridged)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let packet =
+        write::build_set_output_bridge(firmware_family.as_deref(), pair_index, bridged).ok_or_else(|| unknown_firmware_error(&device_id))?;
     let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
 
@@ -502,21 +500,14 @@ pub async fn live_control_store_preset(
     slot_index: u8,
     name: String,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
 
     let trimmed = validate_name("preset name", &name, PRESET_NAME_MAX_LEN)?;
     if trimmed.is_empty() {
         return Err(AppError::from("preset name cannot be empty".to_string()));
     }
-
-    let mut tally = WriteTally::default();
-    tally.record(
-        write::send_control(&write_tx, ip, &ampcore_core::live::cvr::preset::build_store_packet(slot_index, trimmed))
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |_| Some(vec![ampcore_core::live::cvr::preset::build_store_packet(slot_index, trimmed)])).await
 }
 
 /// Returns once the device has ACKed the write at the transport level (see
@@ -533,12 +524,7 @@ pub async fn live_control_set_output_mute(
     channel_index: u8,
     muted: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_output_mute(firmware_family.as_deref(), channel_index, muted)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_output_mute(firmware, channel_index, muted)?])).await
 }
 
 /// FC=44 FIR bypass. Unlike the FC=43 coefficient read this is a one-byte body
@@ -555,17 +541,13 @@ pub async fn live_control_set_fir_bypass(
     channel_index: u8,
     bypassed: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_fir_firmware(&device_id, firmware_family.as_deref())?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_fir_bypass(firmware_family.as_deref(), channel_index, bypassed)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_fir_bypass(firmware, channel_index, bypassed)?])).await
 }
 
 /// FC=43 write (the vendor's Import): a 2093-byte frame that needs outbound
-/// fragmentation (see `send_fragmented_write`/`fir::build_set_fir_data`).
+/// fragmentation (see `send_writes`/`fir::build_set_fir_data`).
 /// `coefficients` longer than the device's fixed 512-tap array is rejected —
 /// silently truncating an import would drop the tail of the caller's filter.
 #[tauri::command]
@@ -586,10 +568,13 @@ pub async fn live_control_set_channel_fir_data(
             fir::FIR_MAX_TAPS
         )));
     }
-    send_fragmented_write(&state, &device_id, |firmware| {
+    let ack = send_writes(&state, &device_id, |firmware| {
         write::build_set_fir_data(firmware, channel_index, &name, &coefficients)
     })
-    .await
+    .await?;
+    // The cached filter is the old one now; the driver reads this output next.
+    state.forget_fir(&device_id, u32::from(channel_index))?;
+    Ok(ack)
 }
 
 /// FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram.
@@ -600,13 +585,12 @@ pub async fn live_control_clear_channel_fir_data(
     device_id: String,
     channel_index: u8,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_fir_firmware(&device_id, firmware_family.as_deref())?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_clear_fir_data(firmware_family.as_deref(), channel_index)
-        .ok_or_else(|| unknown_firmware_error(&device_id))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    let ack =
+        send_writes(&state, &device_id, |firmware| Some(vec![write::build_clear_fir_data(firmware, channel_index)?])).await?;
+    state.forget_fir(&device_id, u32::from(channel_index))?;
+    Ok(ack)
 }
 
 /// Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
@@ -631,12 +615,7 @@ pub async fn live_control_set_channel_input_mute(
     channel_index: u8,
     muted: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_input_mute(firmware_family.as_deref(), channel_index, muted)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_input_mute(firmware, channel_index, muted)?])).await
 }
 
 #[tauri::command]
@@ -647,12 +626,7 @@ pub async fn live_control_set_channel_delay_in(
     channel_index: u8,
     delay_in_ms: f64,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_delay_in(firmware_family.as_deref(), channel_index, delay_in_ms as f32)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_delay_in(firmware, channel_index, delay_in_ms as f32)?])).await
 }
 
 /// FC=62 SOURCE_DATA. Takes **both** halves rather than a patch: the wire
@@ -679,13 +653,7 @@ pub async fn live_control_set_source_trim(
             ))
         }
     };
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet =
-        write::build_set_source_trim(firmware_family.as_deref(), channel_index, segment, trim_db as f32, delay_ms as f32)
-            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_source_trim(firmware, channel_index, segment, trim_db as f32, delay_ms as f32)?])).await
 }
 
 /// FC=80 PRIORITY_INPUTS. `first`/`second` are the amp's own source codes
@@ -705,13 +673,7 @@ pub async fn live_control_set_backup_priority(
 ) -> Result<LiveWriteAck, AppError> {
     let threshold = i8::try_from(threshold_db)
         .map_err(|_| AppError::from(format!("backup threshold {} dB is out of range", threshold_db)))?;
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet =
-        write::build_set_backup_priority(firmware_family.as_deref(), channel_index, first, second, enabled, threshold)
-            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_backup_priority(firmware, channel_index, first, second, enabled, threshold)?])).await
 }
 
 #[tauri::command]
@@ -722,12 +684,7 @@ pub async fn live_control_set_channel_phase_invert(
     channel_index: u8,
     inverted: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_phase_invert(firmware_family.as_deref(), channel_index, inverted)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_phase_invert(firmware, channel_index, inverted)?])).await
 }
 
 /// FC=60 CUSTOMER_NAME_MODIFY — renames the amp itself, not a channel. Same
@@ -741,15 +698,9 @@ pub async fn live_control_set_device_name(
     device_id: String,
     name: String,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
 
     let trimmed = validate_name("device name", &name, DEVICE_NAME_FIELD_LEN)?;
-
-    let packet = write::build_set_device_name(firmware_family.as_deref(), trimmed)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    let mut tally = WriteTally::default();
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_device_name(firmware, trimmed)?])).await
 }
 
 /// FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
@@ -762,12 +713,7 @@ pub async fn live_control_set_rotary_lock(
     device_id: String,
     locked: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_rotary_lock(firmware_family.as_deref(), locked)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_rotary_lock(firmware, locked)?])).await
 }
 
 /// FC=15 STANDBY — puts the amp into standby or brings it back out. Amp-wide,
@@ -784,12 +730,7 @@ pub async fn live_control_set_standby(
     device_id: String,
     standby: bool,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_standby(firmware_family.as_deref(), standby)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_standby(firmware, standby)?])).await
 }
 
 #[tauri::command]
@@ -800,12 +741,7 @@ pub async fn live_control_set_channel_power_mode(
     channel_index: u8,
     power_mode: PowerMode,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let packet = write::build_set_power_mode(firmware_family.as_deref(), channel_index, power_mode)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_power_mode(firmware, channel_index, power_mode)?])).await
 }
 
 /// Partial update of a channel's output trim/volume/delay — mirrors
@@ -825,28 +761,20 @@ pub async fn live_control_set_channel_output(
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let firmware_family = firmware_family.as_deref();
-
-    let mut packets = Vec::with_capacity(3);
-    if let Some(trim_db) = trim_db {
-        packets.push(write::build_set_output_trim(firmware_family, channel_index, trim_db as f32));
-    }
-    if let Some(volume_db) = volume_db {
-        packets.push(write::build_set_output_volume(firmware_family, channel_index, volume_db as f32));
-    }
-    if let Some(delay_out_ms) = delay_out_ms {
-        packets.push(write::build_set_delay_out(firmware_family, channel_index, delay_out_ms as f32));
-    }
-
-    for packet in packets {
-        let packet = packet.ok_or_else(|| {
-            AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
-        })?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| {
+        let mut packets = Vec::with_capacity(3);
+        if let Some(trim_db) = trim_db {
+            packets.push(write::build_set_output_trim(firmware, channel_index, trim_db as f32)?);
+        }
+        if let Some(volume_db) = volume_db {
+            packets.push(write::build_set_output_volume(firmware, channel_index, volume_db as f32)?);
+        }
+        if let Some(delay_out_ms) = delay_out_ms {
+            packets.push(write::build_set_delay_out(firmware, channel_index, delay_out_ms as f32)?);
+        }
+        Some(packets)
+    })
+    .await
 }
 
 /// Partial update of one parametric EQ band (1-8) — mirrors
@@ -867,38 +795,36 @@ pub async fn live_control_set_eq_band(
     band_index: u8,
     patch: EqBandPatch,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let firmware_family = firmware_family.as_deref();
     let in_out_flag = write::in_out_flag(direction);
     let segment = write::eq_band_segment(band_index);
+    // Read before sending: the merge must use the state as it was.
+    let current = if patch.filter_type.is_some() || patch.active.is_some() {
+        Some(current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)?.ok_or_else(|| {
+            AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index))
+        })?)
+    } else {
+        None
+    };
 
-    if patch.filter_type.is_some() || patch.active.is_some() {
-        let current = current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)?
-            .ok_or_else(|| AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index)))?;
-        let filter_type = patch.filter_type.unwrap_or(current.filter_type);
-        let active = patch.active.unwrap_or(current.active);
-        let type_code = eq_filter_type_code(filter_type);
-        let packet = write::build_set_eq_filter_type(firmware_family, channel_index, in_out_flag, segment, type_code, active)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    if let Some(freq_hz) = patch.freq_hz {
-        let packet = write::build_set_eq_freq(firmware_family, channel_index, in_out_flag, segment, freq_hz as f32)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    if let Some(gain_db) = patch.gain_db {
-        let packet = write::build_set_eq_gain(firmware_family, channel_index, in_out_flag, segment, gain_db as f32)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    if let Some(q) = patch.q {
-        let packet = write::build_set_eq_q(firmware_family, channel_index, in_out_flag, segment, q as f32)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-    }
-    Ok(tally.finish())
+    send_writes(&state, &device_id, |firmware| {
+        let mut packets = Vec::new();
+        if let Some(current) = current {
+            let type_code = eq_filter_type_code(patch.filter_type.unwrap_or(current.filter_type));
+            let active = patch.active.unwrap_or(current.active);
+            packets.push(write::build_set_eq_filter_type(firmware, channel_index, in_out_flag, segment, type_code, active)?);
+        }
+        if let Some(freq_hz) = patch.freq_hz {
+            packets.push(write::build_set_eq_freq(firmware, channel_index, in_out_flag, segment, freq_hz as f32)?);
+        }
+        if let Some(gain_db) = patch.gain_db {
+            packets.push(write::build_set_eq_gain(firmware, channel_index, in_out_flag, segment, gain_db as f32)?);
+        }
+        if let Some(q) = patch.q {
+            packets.push(write::build_set_eq_q(firmware, channel_index, in_out_flag, segment, q as f32)?);
+        }
+        Some(packets)
+    })
+    .await
 }
 
 /// Partial update of the HP or LP crossover slot — same `filter_type`/
@@ -919,35 +845,32 @@ pub async fn live_control_set_crossover_slot(
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
 ) -> Result<LiveWriteAck, AppError> {
-    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
-    let mut tally = WriteTally::default();
-    let firmware_family = firmware_family.as_deref();
     let in_out_flag = write::in_out_flag(direction);
     let segment = write::crossover_segment(slot);
-    let mut wrote_anything = false;
-
-    if patch.filter_type.is_some() || patch.active.is_some() {
-        let current = current_crossover_slot(&state, &device_id, channel_index, direction, slot)?.ok_or_else(|| {
+    let current = if patch.filter_type.is_some() || patch.active.is_some() {
+        Some(current_crossover_slot(&state, &device_id, channel_index, direction, slot)?.ok_or_else(|| {
             AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index))
-        })?;
-        let filter_type = patch.filter_type.unwrap_or(current.filter_type);
-        let active = patch.active.unwrap_or(current.active);
-        let type_code = crossover_filter_type_code(filter_type);
-        let packet = write::build_set_eq_filter_type(firmware_family, channel_index, in_out_flag, segment, type_code, active)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-        wrote_anything = true;
-    }
-    if let Some(freq_hz) = patch.freq_hz {
-        let packet = write::build_set_eq_freq(firmware_family, channel_index, in_out_flag, segment, freq_hz as f32)
-            .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
-        wrote_anything = true;
-    }
-    if wrote_anything {
-        tally.record(write::send_control(&write_tx, ip, &write::CROSSOVER_COMMIT_PACKET).await.map_err(|e| e.to_string())?);
-    }
-    Ok(tally.finish())
+        })?)
+    } else {
+        None
+    };
+
+    send_writes(&state, &device_id, |firmware| {
+        let mut packets = Vec::new();
+        if let Some(current) = current {
+            let type_code = crossover_filter_type_code(patch.filter_type.unwrap_or(current.filter_type));
+            let active = patch.active.unwrap_or(current.active);
+            packets.push(write::build_set_eq_filter_type(firmware, channel_index, in_out_flag, segment, type_code, active)?);
+        }
+        if let Some(freq_hz) = patch.freq_hz {
+            packets.push(write::build_set_eq_freq(firmware, channel_index, in_out_flag, segment, freq_hz as f32)?);
+        }
+        if !packets.is_empty() {
+            packets.push(write::CROSSOVER_COMMIT_PACKET.to_vec());
+        }
+        Some(packets)
+    })
+    .await
 }
 
 /// Reads one output channel's FIR filter (FC=43) — name plus the raw 512-tap
@@ -976,32 +899,6 @@ pub async fn live_control_fetch_channel_fir(
     device_id: String,
     channel_index: u8,
 ) -> Result<DeviceChannelFir, AppError> {
-    let (ip, firmware_family, request_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
-        (device.ip, device.firmware_family, request_tx)
-    };
-    require_fir_firmware(&device_id, firmware_family.as_deref())?;
-
-    let frame = send_request_with_retry(
-        &request_tx,
-        &ip,
-        fir::FC_FIR_DATA,
-        channel_index,
-        fir::build_fir_request_body(),
-        true,
-        fir::FIR_IN_OUT_FLAG,
-    )
-    .await?;
-
-    let snapshot = fir::parse_fir_data(&frame, channel_index).ok_or_else(|| {
-        AppError::from(format!(
-            "device {} FC=43 response for channel {} had an unexpected shape ({} bytes)",
-            device_id,
-            channel_index,
-            frame.len()
-        ))
-    })?;
+    let snapshot = fetch_channel_fir(&state, &device_id, channel_index).await?;
     Ok(DeviceChannelFir { device_id, fir: snapshot })
 }

@@ -2,15 +2,66 @@ use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::channel_clipboard::{copy_from_project, paste_into_project, ChannelClip, ClipSection};
 use ampcore_core::data::project::{
-    AmpAssignment, BackupPriorityPatch, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection,
-    LimiterPatch, Project, SourceTrimPatch,
+    AmpAssignment, AmpChannel, BackupPriorityPatch, ChannelFir, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch,
+    EqDirection, LimiterPatch, Project, SourceTrimPatch,
 };
+use ampcore_core::live::cvr::fir::FIR_MAX_TAPS;
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 
 fn find_amp_model<'a>(models: &'a [AmpModelCatalogEntry], id: &str) -> Option<&'a AmpModelCatalogEntry> {
     models.iter().find(|m| m.id == id)
+}
+
+/// The mutation pipeline every amp-level command shares: lock → find project →
+/// find assignment → `edit` → touch → save → emit `project:updated`. An error
+/// from `edit` aborts before anything is saved.
+fn edit_assignment(
+    app: &AppHandle,
+    state: &State<ProjectDataState>,
+    project_id: &str,
+    assignment_id: &str,
+    edit: impl FnOnce(&mut AmpAssignment) -> Result<(), AppError>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    edit(assignment)?;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// `edit_assignment` narrowed to one channel.
+fn edit_channel(
+    app: &AppHandle,
+    state: &State<ProjectDataState>,
+    project_id: &str,
+    assignment_id: &str,
+    channel_index: u32,
+    edit: impl FnOnce(&mut AmpChannel) -> Result<(), AppError>,
+) -> Result<Project, AppError> {
+    edit_assignment(app, state, project_id, assignment_id, |assignment| {
+        let channel = assignment
+            .channels
+            .iter_mut()
+            .find(|c| c.channel_index == channel_index)
+            .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+        edit(channel)
+    })
 }
 
 #[tauri::command]
@@ -209,32 +260,10 @@ pub fn projects_set_channel_ohms(
     channel_index: u32,
     ohms: f64,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.ohms = ohms;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.ohms = ohms;
+        Ok(())
+    })
 }
 
 /// Sets which physical source feeds a channel's input — Routing tab. There is
@@ -251,32 +280,10 @@ pub fn projects_set_channel_source(
     kind: SourceKind,
     index: Option<u32>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
+        Ok(())
+    })
 }
 
 /// Partial update of one source's trim/delay pair — Routing tab. Each source
@@ -296,46 +303,24 @@ pub fn projects_set_source_trim(
     kind: SourceKind,
     patch: SourceTrimPatch,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    let trim = match kind {
-        SourceKind::Analog => &mut channel.source_trims.analog,
-        SourceKind::Dante => &mut channel.source_trims.dante,
-        SourceKind::Backup => {
-            return Err(AppError::from(
-                "backup is a failover state, not an input with its own trim".to_string(),
-            ))
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        let trim = match kind {
+            SourceKind::Analog => &mut channel.source_trims.analog,
+            SourceKind::Dante => &mut channel.source_trims.dante,
+            SourceKind::Backup => {
+                return Err(AppError::from(
+                    "backup is a failover state, not an input with its own trim".to_string(),
+                ))
+            }
+        };
+        if let Some(trim_db) = patch.trim_db {
+            trim.trim_db = trim_db;
         }
-    };
-    if let Some(trim_db) = patch.trim_db {
-        trim.trim_db = trim_db;
-    }
-    if let Some(delay_ms) = patch.delay_ms {
-        trim.delay_ms = delay_ms;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+        if let Some(delay_ms) = patch.delay_ms {
+            trim.delay_ms = delay_ms;
+        }
+        Ok(())
+    })
 }
 
 /// Partial update of a channel's backup/auto-source switching — Routing tab.
@@ -354,44 +339,22 @@ pub fn projects_set_backup_priority(
     channel_index: u32,
     patch: BackupPriorityPatch,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    let priority = &mut channel.backup_priority;
-    if let Some(enabled) = patch.enabled {
-        priority.enabled = enabled;
-    }
-    if let Some(first) = patch.first {
-        priority.first = first;
-    }
-    if let Some(second) = patch.second {
-        priority.second = second;
-    }
-    if let Some(threshold_db) = patch.threshold_db {
-        priority.threshold_db = threshold_db;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        let priority = &mut channel.backup_priority;
+        if let Some(enabled) = patch.enabled {
+            priority.enabled = enabled;
+        }
+        if let Some(first) = patch.first {
+            priority.first = first;
+        }
+        if let Some(second) = patch.second {
+            priority.second = second;
+        }
+        if let Some(threshold_db) = patch.threshold_db {
+            priority.threshold_db = threshold_db;
+        }
+        Ok(())
+    })
 }
 
 /// Partial update of one Matrix-tab crosspoint — only touches the fields the
@@ -412,43 +375,21 @@ pub fn projects_set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        let crosspoint = channel
+            .matrix_crosspoints
+            .iter_mut()
+            .find(|c| c.source_index == source_index)
+            .ok_or_else(|| AppError::from(format!("matrix source {} not found", source_index)))?;
 
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    let crosspoint = channel
-        .matrix_crosspoints
-        .iter_mut()
-        .find(|c| c.source_index == source_index)
-        .ok_or_else(|| AppError::from(format!("matrix source {} not found", source_index)))?;
-
-    if let Some(gain_db) = gain_db {
-        crosspoint.gain_db = gain_db;
-    }
-    if let Some(active) = active {
-        crosspoint.active = active;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+        if let Some(gain_db) = gain_db {
+            crosspoint.gain_db = gain_db;
+        }
+        if let Some(active) = active {
+            crosspoint.active = active;
+        }
+        Ok(())
+    })
 }
 
 /// Sets a channel's input delay — Input tab.
@@ -462,32 +403,10 @@ pub fn projects_set_channel_delay_in(
     channel_index: u32,
     delay_in_ms: f64,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.delay_in_ms = delay_in_ms;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.delay_in_ms = delay_in_ms;
+        Ok(())
+    })
 }
 
 /// Sets whether a channel's input is muted — Input tab.
@@ -501,32 +420,10 @@ pub fn projects_set_channel_input_mute(
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.input_muted = muted;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.input_muted = muted;
+        Ok(())
+    })
 }
 
 /// Partial update of a channel's output trim/volume/delay — Output tab. Only
@@ -544,40 +441,18 @@ pub fn projects_set_channel_output(
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    if let Some(trim_db) = trim_db {
-        channel.output_trim_db = trim_db;
-    }
-    if let Some(volume_db) = volume_db {
-        channel.output_volume_db = volume_db;
-    }
-    if let Some(delay_out_ms) = delay_out_ms {
-        channel.delay_out_ms = delay_out_ms;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        if let Some(trim_db) = trim_db {
+            channel.output_trim_db = trim_db;
+        }
+        if let Some(volume_db) = volume_db {
+            channel.output_volume_db = volume_db;
+        }
+        if let Some(delay_out_ms) = delay_out_ms {
+            channel.delay_out_ms = delay_out_ms;
+        }
+        Ok(())
+    })
 }
 
 /// Partial update of a channel's HP or LP crossover slot (band 0 / band 9 of
@@ -596,49 +471,27 @@ pub fn projects_set_crossover_slot(
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        let eq = match direction {
+            EqDirection::Input => &mut channel.input_eq,
+            EqDirection::Output => &mut channel.output_eq,
+        };
+        let crossover = match slot {
+            CrossoverSlotKind::Hp => &mut eq.hp,
+            CrossoverSlotKind::Lp => &mut eq.lp,
+        };
 
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    let eq = match direction {
-        EqDirection::Input => &mut channel.input_eq,
-        EqDirection::Output => &mut channel.output_eq,
-    };
-    let crossover = match slot {
-        CrossoverSlotKind::Hp => &mut eq.hp,
-        CrossoverSlotKind::Lp => &mut eq.lp,
-    };
-
-    if let Some(filter_type) = patch.filter_type {
-        crossover.filter_type = filter_type;
-    }
-    if let Some(freq_hz) = patch.freq_hz {
-        crossover.freq_hz = freq_hz;
-    }
-    if let Some(active) = patch.active {
-        crossover.active = active;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+        if let Some(filter_type) = patch.filter_type {
+            crossover.filter_type = filter_type;
+        }
+        if let Some(freq_hz) = patch.freq_hz {
+            crossover.freq_hz = freq_hz;
+        }
+        if let Some(active) = patch.active {
+            crossover.active = active;
+        }
+        Ok(())
+    })
 }
 
 /// Partial update of one parametric EQ band (bands 1-8 of the `input_eq`/
@@ -658,55 +511,33 @@ pub fn projects_set_eq_band(
     band_index: u32,
     patch: EqBandPatch,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        let eq = match direction {
+            EqDirection::Input => &mut channel.input_eq,
+            EqDirection::Output => &mut channel.output_eq,
+        };
+        let band = eq
+            .bands
+            .get_mut(band_index as usize)
+            .ok_or_else(|| AppError::from(format!("eq band {} not found", band_index)))?;
 
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    let eq = match direction {
-        EqDirection::Input => &mut channel.input_eq,
-        EqDirection::Output => &mut channel.output_eq,
-    };
-    let band = eq
-        .bands
-        .get_mut(band_index as usize)
-        .ok_or_else(|| AppError::from(format!("eq band {} not found", band_index)))?;
-
-    if let Some(filter_type) = patch.filter_type {
-        band.filter_type = filter_type;
-    }
-    if let Some(freq_hz) = patch.freq_hz {
-        band.freq_hz = freq_hz;
-    }
-    if let Some(gain_db) = patch.gain_db {
-        band.gain_db = gain_db;
-    }
-    if let Some(q) = patch.q {
-        band.q = q;
-    }
-    if let Some(active) = patch.active {
-        band.active = active;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+        if let Some(filter_type) = patch.filter_type {
+            band.filter_type = filter_type;
+        }
+        if let Some(freq_hz) = patch.freq_hz {
+            band.freq_hz = freq_hz;
+        }
+        if let Some(gain_db) = patch.gain_db {
+            band.gain_db = gain_db;
+        }
+        if let Some(q) = patch.q {
+            band.q = q;
+        }
+        if let Some(active) = patch.active {
+            band.active = active;
+        }
+        Ok(())
+    })
 }
 
 /// Partial update of a channel's output protection (RMS + Peak limiter
@@ -721,55 +552,79 @@ pub fn projects_set_channel_limiter(
     channel_index: u32,
     patch: LimiterPatch,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        if let Some(enabled) = patch.rms_enabled {
+            channel.limiter.rms.enabled = enabled;
+        }
+        if let Some(threshold_vrms) = patch.rms_threshold_vrms {
+            channel.limiter.rms.threshold_vrms = threshold_vrms;
+        }
+        if let Some(attack_ms) = patch.rms_attack_ms {
+            channel.limiter.rms.attack_ms = attack_ms;
+        }
+        if let Some(release_multiplier) = patch.rms_release_multiplier {
+            channel.limiter.rms.release_multiplier = release_multiplier;
+        }
+        if let Some(enabled) = patch.peak_enabled {
+            channel.limiter.peak.enabled = enabled;
+        }
+        if let Some(threshold_vp) = patch.peak_threshold_vp {
+            channel.limiter.peak.threshold_vp = threshold_vp;
+        }
+        if let Some(hold_ms) = patch.peak_hold_ms {
+            channel.limiter.peak.hold_ms = hold_ms;
+        }
+        if let Some(release_ms) = patch.peak_release_ms {
+            channel.limiter.peak.release_ms = release_ms;
+        }
+        Ok(())
+    })
+}
+
+/// Copies one channel section (an EQ chain or a limiter stage) for pasting —
+/// see `data/channel_clipboard.rs`. Read-only.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_copy_channel_section(
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    section: ClipSection,
+) -> Result<ChannelClip, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let channel = inner
         .projects
-        .iter_mut()
+        .iter()
         .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?
         .amp_assignments
-        .iter_mut()
+        .iter()
         .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?
         .channels
-        .iter_mut()
+        .iter()
         .find(|c| c.channel_index == channel_index)
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+    Ok(copy_from_project(channel, section))
+}
 
-    if let Some(enabled) = patch.rms_enabled {
-        channel.limiter.rms.enabled = enabled;
-    }
-    if let Some(threshold_vrms) = patch.rms_threshold_vrms {
-        channel.limiter.rms.threshold_vrms = threshold_vrms;
-    }
-    if let Some(attack_ms) = patch.rms_attack_ms {
-        channel.limiter.rms.attack_ms = attack_ms;
-    }
-    if let Some(release_multiplier) = patch.rms_release_multiplier {
-        channel.limiter.rms.release_multiplier = release_multiplier;
-    }
-    if let Some(enabled) = patch.peak_enabled {
-        channel.limiter.peak.enabled = enabled;
-    }
-    if let Some(threshold_vp) = patch.peak_threshold_vp {
-        channel.limiter.peak.threshold_vp = threshold_vp;
-    }
-    if let Some(hold_ms) = patch.peak_hold_ms {
-        channel.limiter.peak.hold_ms = hold_ms;
-    }
-    if let Some(release_ms) = patch.peak_release_ms {
-        channel.limiter.peak.release_ms = release_ms;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+/// Pastes a `ChannelClip` into one channel section. The clip may come from a
+/// project or a live amp alike.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_paste_channel_section(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    section: ClipSection,
+    clip: ChannelClip,
+) -> Result<Project, AppError> {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        paste_into_project(channel, section, &clip).map_err(AppError::from)
+    })
 }
 
 /// Partial update of a channel's noise gate — Output tab. The threshold is
@@ -786,37 +641,15 @@ pub fn projects_set_channel_noise_gate(
     enabled: Option<bool>,
     threshold_dbu: Option<f64>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    if let Some(enabled) = enabled {
-        channel.noise_gate_enabled = enabled;
-    }
-    if let Some(threshold_dbu) = threshold_dbu {
-        channel.noise_gate_threshold_dbu = threshold_dbu;
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        if let Some(enabled) = enabled {
+            channel.noise_gate_enabled = enabled;
+        }
+        if let Some(threshold_dbu) = threshold_dbu {
+            channel.noise_gate_threshold_dbu = threshold_dbu;
+        }
+        Ok(())
+    })
 }
 
 /// Toggles a channel's output polarity/phase invert — Output tab.
@@ -830,32 +663,10 @@ pub fn projects_set_channel_phase_invert(
     channel_index: u32,
     inverted: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.output_phase_inverted = inverted;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.output_phase_inverted = inverted;
+        Ok(())
+    })
 }
 
 /// Sets a channel's output power/impedance mode — Output tab.
@@ -869,32 +680,10 @@ pub fn projects_set_channel_power_mode(
     channel_index: u32,
     power_mode: PowerMode,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.power_mode = power_mode;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.power_mode = power_mode;
+        Ok(())
+    })
 }
 
 /// Renames a channel's input or output label, overriding the default
@@ -911,35 +700,13 @@ pub fn projects_set_channel_name(
     direction: EqDirection,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    match direction {
-        EqDirection::Input => channel.input_name = name,
-        EqDirection::Output => channel.output_name = name,
-    }
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        match direction {
+            EqDirection::Input => channel.input_name = name,
+            EqDirection::Output => channel.output_name = name,
+        }
+        Ok(())
+    })
 }
 
 /// Renames an amp's device name — the same name FC=60 writes to the amp
@@ -954,26 +721,10 @@ pub fn projects_set_amp_device_name(
     assignment_id: String,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    assignment.device_name = name;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment| {
+        assignment.device_name = name;
+        Ok(())
+    })
 }
 
 /// Toggles a channel's output mute — Output tab. Mirrors
@@ -988,39 +739,16 @@ pub fn projects_set_channel_output_mute(
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.output_muted = muted;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.output_muted = muted;
+        Ok(())
+    })
 }
 
 /// Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
 /// already merged in from a live amp (`amp_merge`) and already pushed back to
 /// one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
-/// Only the bypass flag lives here — the coefficients themselves are read from
-/// the device with FC=43 and never enter the project file.
+/// The filter itself is `projects_set_channel_fir`.
 #[tauri::command]
 #[specta::specta]
 pub fn projects_set_channel_fir_bypass(
@@ -1031,32 +759,37 @@ pub fn projects_set_channel_fir_bypass(
     channel_index: u32,
     bypassed: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.fir_bypassed = bypassed;
+        Ok(())
+    })
+}
 
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-
-    channel.fir_bypassed = bypassed;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+/// Sets an output's FIR filter — the FIR tab's Import, and its Clear (a unit
+/// impulse). Reaches the amp with the next push (`amp_push::plan_fir`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_fir(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    fir: ChannelFir,
+) -> Result<Project, AppError> {
+    if fir.coefficients.len() > FIR_MAX_TAPS {
+        return Err(AppError::from(format!(
+            "FIR import has {} taps, more than the device's {FIR_MAX_TAPS}-tap array",
+            fir.coefficients.len()
+        )));
+    }
+    if fir.coefficients.iter().any(|c| !c.is_finite()) {
+        return Err(AppError::from("FIR coefficients must be finite numbers"));
+    }
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.fir = fir;
+        Ok(())
+    })
 }
 
 /// Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
@@ -1073,48 +806,32 @@ pub fn projects_set_output_bridge(
     pair_leader_channel_index: u32,
     bridged: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment| {
+        if pair_leader_channel_index % 2 != 0 {
+            return Err(AppError::from(format!(
+                "channel {} is not a pair leader (must be even-indexed)",
+                pair_leader_channel_index
+            )));
+        }
+        let has_partner = assignment
+            .channels
+            .iter()
+            .any(|c| c.channel_index == pair_leader_channel_index + 1);
+        if !has_partner {
+            return Err(AppError::from(format!(
+                "channel {} has no partner channel {} to bridge with",
+                pair_leader_channel_index,
+                pair_leader_channel_index + 1
+            )));
+        }
 
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+        let channel = assignment
+            .channels
+            .iter_mut()
+            .find(|c| c.channel_index == pair_leader_channel_index)
+            .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
 
-    if pair_leader_channel_index % 2 != 0 {
-        return Err(AppError::from(format!(
-            "channel {} is not a pair leader (must be even-indexed)",
-            pair_leader_channel_index
-        )));
-    }
-    let has_partner = assignment
-        .channels
-        .iter()
-        .any(|c| c.channel_index == pair_leader_channel_index + 1);
-    if !has_partner {
-        return Err(AppError::from(format!(
-            "channel {} has no partner channel {} to bridge with",
-            pair_leader_channel_index,
-            pair_leader_channel_index + 1
-        )));
-    }
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == pair_leader_channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
-
-    channel.output_bridged = bridged;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+        channel.output_bridged = bridged;
+        Ok(())
+    })
 }

@@ -27,6 +27,9 @@ impl EventEmitter for TauriEmitter {
             LiveEvent::Bridge(payload) => {
                 self.0.emit("live_bridge:updated", &payload).ok();
             }
+            LiveEvent::Fir(payload) => {
+                self.0.emit("live_fir:updated", &payload).ok();
+            }
             LiveEvent::Devices(snapshot) => {
                 self.0.emit("live_device:updated", &snapshot).ok();
             }

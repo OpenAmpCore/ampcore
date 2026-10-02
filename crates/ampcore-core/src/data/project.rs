@@ -3,6 +3,7 @@ use specta::Type;
 
 use super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use super::common::{new_id, now_millis};
+use crate::live::cvr::fir::{taps_summary, trimmed_taps};
 
 /// Which physical input feeds a channel — a `SourceKind` alone isn't enough
 /// to identify one, since a model typically exposes several physical inputs
@@ -308,6 +309,60 @@ pub struct AmpChannel {
     /// second source to fail over to (`AmpModelCatalogEntry.is_dante`).
     #[serde(default)]
     pub backup_priority: BackupPriority,
+    /// The speaker-library way this output was set up from, if any — a
+    /// reference only. The values themselves live in the fields above, so the
+    /// project never needs the library to open or push; see `data/speaker.rs`.
+    #[serde(default)]
+    pub speaker: Option<SpeakerRef>,
+    /// The FIR filter this output holds; a unit impulse when none is loaded,
+    /// as on the amp. Hashed (taps only) and pushed like every other setting;
+    /// the amp's own comes from the driver's FC=43 reads, not from FC=27.
+    #[serde(default = "ChannelFir::identity")]
+    pub fir: ChannelFir,
+}
+
+/// An output's FIR filter: the amp's 32-byte name and its taps (at most
+/// `fir::FIR_MAX_TAPS`; shorter is zero-padded on the wire).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFir {
+    pub name: String,
+    pub coefficients: Vec<f32>,
+}
+
+impl ChannelFir {
+    /// What an amp holds with no filter loaded: a unit impulse.
+    pub fn identity() -> Self {
+        Self { name: String::new(), coefficients: vec![1.0] }
+    }
+
+    /// Whether these are this filter's taps, bit for bit and without the
+    /// zeros the wire pads to 512 with (they are stored and sent as the same
+    /// f32s). The name is a label, not compared — an amp answering with the
+    /// nameless reply form can't report one, and the fingerprint doesn't hash
+    /// it either.
+    pub fn same_taps(&self, coefficients: &[f32]) -> bool {
+        let bits = |taps: &[f32]| trimmed_taps(taps).iter().map(|t| t.to_bits()).collect::<Vec<_>>();
+        bits(&self.coefficients) == bits(coefficients)
+    }
+
+    /// "N taps · checksum" — what status, the comparator and the fingerprint
+    /// rows compare. Taps only, like `same_taps`.
+    pub fn summary(&self) -> String {
+        taps_summary(&self.coefficients)
+    }
+}
+
+/// Which library way an output was set up from, and which revision of it.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerRef {
+    pub library_id: String,
+    pub way_index: u32,
+    pub revision: u32,
+    /// "Brand Model · Way" at assign time, so a reference whose entry was
+    /// deleted from this machine's library still reads as something.
+    pub label: String,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -365,7 +420,10 @@ pub struct Project {
 /// `#[serde(default = ...)]` (see this file's module doc) purely so a
 /// project file saved earlier this session keeps loading after a field is
 /// added mid-development, not for any long-term compatibility guarantee.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 1;
+///
+/// 3: `AmpChannel.fir` — absent in older files, which backfills to a unit
+/// impulse (no filter loaded).
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 3;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -484,6 +542,8 @@ fn new_channel(channel_index: u32) -> AmpChannel {
         fir_bypassed: false,
         source_trims: SourceTrims::default(),
         backup_priority: BackupPriority::default(),
+        speaker: None,
+        fir: ChannelFir::identity(),
     }
 }
 

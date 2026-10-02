@@ -68,15 +68,19 @@ export function useLinkedSync({
     pullingRef.current = true;
     setPulling(true);
     commands.projectsMergeAmpFromLive(projectId, assignmentId).then((response) => {
+      // Before any `cancelled` check: `setPulling(true)` above re-runs this
+      // effect, so the run that started a pull is always cancelled by the time
+      // it lands. A saved merge is the newest project either way — dropping
+      // it left the frontend's copy frozen while following.
       pullingRef.current = false;
-      if (cancelled) return;
       setPulling(false);
 
       if (response.status === "ok" && response.data.merged && response.data.project) {
-        pulledHash.current = liveHash;
+        pulledHash.current = response.data.ampHash ?? liveHash;
         updateRef.current(response.data.project);
         return;
       }
+      if (cancelled) return;
 
       const reason =
         response.status === "error"

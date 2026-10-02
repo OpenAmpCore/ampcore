@@ -1,6 +1,6 @@
 [package]
 name = "ampcore-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "AmpCore"
 authors = ["scalli007YT"]
 edition = "2021"
@@ -28,6 +28,7 @@ specta = { version = "2.0.0-rc.22", features = ["derive"] }
 tauri-specta = { version = "2.0.0-rc.25", features = ["derive", "typescript"] }
 specta-typescript = "0.0.12"
 tokio = { version = "1", features = ["net", "time", "rt-multi-thread", "macros", "sync"] }
+axum = "0.8"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

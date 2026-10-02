@@ -14,6 +14,7 @@ use super::channel_config;
 use super::channel_state;
 use super::protocol::*;
 use super::bridge::{BRIDGE_PAIR_COUNT, FC_BRIDGE};
+use super::fir::{build_fir_request_body, parse_fir_data, FC_FIR_DATA, FIR_IN_OUT_FLAG};
 use super::request::{
     Assembled, FragmentReassembler, RequestError, RequestRegistry, RequestSpec, ResultSink, WriteRegistry, WriteSpec,
 };
@@ -86,6 +87,31 @@ const DEADLINE_TICK_INTERVAL: Duration = Duration::from_millis(10);
 /// subscribed one starts from pair 0.
 struct BridgeCursor {
     next_pair: u8,
+    last_sent: Instant,
+}
+
+/// An output's FIR filter is hashed into the amp's fingerprint but isn't in
+/// FC=27, so the config-poll arm reads it with FC=43, one output per device
+/// at a time, in place of that cycle's FC=27. An output with no reading goes
+/// first, at most every `FIR_PRIME_INTERVAL` — so FC=27 keeps at least every
+/// other cycle even against an amp that never answers FC=43. Once every
+/// output is known they are re-read in rotation, one per
+/// `FIR_STEADY_INTERVAL`: a filter changed by another tool shows up within
+/// `output_channels × 2 s`, for the price of one settings poll in ten.
+const FIR_PRIME_INTERVAL: Duration = Duration::from_millis(400);
+const FIR_STEADY_INTERVAL: Duration = Duration::from_millis(2000);
+
+/// Whether background polling has to stay off the wire right now: a write is
+/// awaiting its ACK (the vendor `isRefresh` interlock — see
+/// `WriteRegistry::has_pending`), or a multi-packet operation is holding
+/// polls across its whole length (`LiveDeviceState::hold_polls`).
+fn polls_blocked(writes: &WriteRegistry, sink: &LiveEventSink) -> bool {
+    writes.has_pending() || sink.state.lock().unwrap().polls_held > 0
+}
+
+/// Per-device FC=43 poll state, keyed by IP — `BridgeCursor`'s twin.
+struct FirCursor {
+    next_channel: u32,
     last_sent: Instant,
 }
 
@@ -183,6 +209,7 @@ async fn run(
     // `(ip, function_code)`, so both pairs of a device cannot be in flight at
     // once — hence one pair per tick per device, tracked here.
     let mut bridge_cursors: HashMap<String, BridgeCursor> = HashMap::new();
+    let mut fir_cursors: HashMap<String, FirCursor> = HashMap::new();
     let mut deadline_tick = tokio::time::interval(DEADLINE_TICK_INTERVAL);
     // When the discovery arm last actually ran. A write burst gates it off
     // entirely, and the liveness sweep must not count silence from a stretch
@@ -278,9 +305,10 @@ async fn run(
                         // stay cheap and unlogged. `on_ack` is a no-op unless
                         // this device has a write awaiting confirmation.
                         //
-                        // Verified on 1.1.8 hardware: these arrive as a bare
-                        // 10-byte header with `packets_lastlen = 0`, NOT an
-                        // echo of what we sent — which is why `on_ack`
+                        // Verified on hardware: these arrive as a bare 10-byte
+                        // header, NOT an echo of what we sent, and its
+                        // `packets_count/lastlen` differ by firmware (1.1.8
+                        // `1/0`, 1.1.9 `0/450`) — which is why `on_ack`
                         // correlates by IP rather than by any header field.
                         for t in writes.on_ack(&ip, Instant::now()) {
                             let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
@@ -332,8 +360,13 @@ async fn run(
                 // Skipped outright rather than deferred: the next tick is only
                 // 200ms away, and queueing work here would just pile requests
                 // up behind the write we are trying to get out cleanly.
-                if writes.has_pending() { continue; }
-                let targets: Vec<(String, String)> = {
+                if polls_blocked(&writes, &sink) { continue; }
+                let now = Instant::now();
+                // Each device with the FIR output due this cycle, if any: one
+                // nobody has read yet (or that was dropped after a write)
+                // first, otherwise the next in rotation once its interval has
+                // elapsed. See `FIR_STEADY_INTERVAL`.
+                let targets: Vec<(String, Option<u8>)> = {
                     let inner = sink.state.lock().unwrap();
                     // Only devices some live consumer has subscribed to (`is_polled`, see
                     // `live_control_set_poll_subscription`), and only while online. Every
@@ -341,18 +374,55 @@ async fn run(
                     // matters for a subscribed amp: `mark_stale_offline` never removes
                     // entries, so an unplugged amp would otherwise keep being polled.
                     // Recovery goes through discovery either way.
-                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
+                    inner
+                        .devices
+                        .values()
+                        .filter(|d| d.online && inner.is_polled(&d.id))
+                        .map(|d| {
+                            let since = fir_cursors.get(&d.ip).map(|c| now.saturating_duration_since(c.last_sent));
+                            let known = inner.fir.get(&d.id);
+                            let unread = (0..d.output_channels).find(|ch| !known.is_some_and(|k| k.contains_key(ch)));
+                            let due = match unread {
+                                Some(channel) => since.map_or(true, |s| s >= FIR_PRIME_INTERVAL).then_some(channel),
+                                None => since.map_or(true, |s| s >= FIR_STEADY_INTERVAL).then(|| {
+                                    fir_cursors.get(&d.ip).map_or(0, |c| c.next_channel) % d.output_channels.max(1)
+                                }),
+                            };
+                            let due = due.filter(|_| is_known_family(d.firmware_family.as_deref()));
+                            (d.ip.clone(), due.and_then(|channel| u8::try_from(channel).ok()))
+                        })
+                        .collect()
                 };
-                for (_id, ip) in targets {
-                    // FC=27 is fragmented, so it defers to anything already in
-                    // flight for this ip (e.g. an on-demand FC=59 fetch): the
-                    // shared per-IP FragmentReassembler can't safely interleave
-                    // two concurrent multi-fragment exchanges. Just skipped this
-                    // cycle — tried again next tick.
+                for (ip, fir_due) in targets {
+                    // Both reads are fragmented, so they defer to anything
+                    // already in flight for this ip (e.g. an on-demand FC=59
+                    // fetch): the shared per-IP FragmentReassembler can't
+                    // safely interleave two concurrent multi-fragment
+                    // exchanges. Just skipped this cycle — tried again next
+                    // tick.
                     if registry.conflicts_with(&ip, FC_SYNC_DATA, true) {
                         continue;
                     }
-                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), expects_fragments: true, in_out_flag: 0, sink: ResultSink::Internal };
+                    let spec = match fir_due {
+                        // The FIR read takes this cycle's turn *instead of*
+                        // FC=27 rather than racing it on a tick of its own:
+                        // FC=27 is in flight most of the time, and a second
+                        // fragmented read would simply never find the line
+                        // clear — the starvation FC=50 once had.
+                        Some(channel) => {
+                            fir_cursors.insert(ip.clone(), FirCursor { next_channel: u32::from(channel) + 1, last_sent: now });
+                            RequestSpec {
+                                ip: ip.clone(),
+                                function_code: FC_FIR_DATA,
+                                chx: channel,
+                                body: build_fir_request_body(),
+                                expects_fragments: true,
+                                in_out_flag: FIR_IN_OUT_FLAG,
+                                sink: ResultSink::Internal,
+                            }
+                        }
+                        None => RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), expects_fragments: true, in_out_flag: 0, sink: ResultSink::Internal },
+                    };
                     let (packet, superseded) = registry.register(spec, Instant::now());
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
@@ -371,7 +441,7 @@ async fn run(
                 //
                 // Routine poll chatter sits behind `wire_log_enabled()`; only
                 // genuine failures still print unconditionally.
-                if writes.has_pending() {
+                if polls_blocked(&writes, &sink) {
                     if wire_log_enabled() {
                         println!("[cvr driver] FC=50 poll skipped: a write is still pending");
                     }
@@ -459,7 +529,7 @@ async fn run(
 
             _ = heartbeat_tick.tick() => {
                 // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
-                if writes.has_pending() { continue; }
+                if polls_blocked(&writes, &sink) { continue; }
                 let targets: Vec<(String, String)> = {
                     let inner = sink.state.lock().unwrap();
                     // Subscribed + online only — see the config poll above. Matters most
@@ -479,7 +549,7 @@ async fn run(
                 // cannot judge liveness while we are choosing not to poll, and
                 // ageing devices out on evidence we suppressed would mark every
                 // amp offline after OFFLINE_TIMEOUT_MS during a long write burst.
-                if writes.has_pending() { continue; }
+                if polls_blocked(&writes, &sink) { continue; }
                 let now = Instant::now();
                 let since_last = now.saturating_duration_since(last_discovery_at);
                 last_discovery_at = now;
@@ -636,7 +706,7 @@ pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -
     let Some(device) = device else {
         return Err(format!("no known device for ip {}", ip));
     };
-    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body) {
+    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body, device.output_channels) {
         Some(cfg) => {
             sink.set_channel_config(device.id, cfg.clone());
             Ok(cfg)
@@ -711,12 +781,38 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
                             println!("[cvr driver] FC=50 request to {} timed out — no bridge reply", resolved.ip);
                         }
                     }
-                    Err(RequestError::ShapeMismatch(len)) => {
-                        eprintln!("[cvr driver] FC=50 reply from {} had an implausible shape ({len} bytes)", resolved.ip)
-                    }
                     Err(RequestError::Busy) => {
                         if wire_log_enabled() {
                             println!("[cvr driver] FC=50 request to {} was rejected as busy", resolved.ip);
+                        }
+                    }
+                }
+                return;
+            }
+            if resolved.function_code == FC_FIR_DATA {
+                match resolved.result {
+                    Ok(frame) => match parse_fir_data(&frame, resolved.chx) {
+                        Some(fir) => {
+                            let device_id = {
+                                let inner = sink.state.lock().unwrap();
+                                inner.devices.values().find(|d| d.ip == resolved.ip).map(|d| d.id.clone())
+                            };
+                            if let Some(device_id) = device_id {
+                                sink.set_fir(device_id, fir);
+                            }
+                        }
+                        None => eprintln!(
+                            "[cvr driver] FC=43 reply from {} for channel {} rejected by parser ({} bytes)",
+                            resolved.ip,
+                            resolved.chx,
+                            frame.len()
+                        ),
+                    },
+                    // Retried on the FIR cadence; an amp that keeps failing
+                    // shows as "FIR filter not read yet" in its fingerprint.
+                    Err(_) => {
+                        if wire_log_enabled() {
+                            println!("[cvr driver] FC=43 request to {} channel {} got no reply", resolved.ip, resolved.chx);
                         }
                     }
                 }
@@ -736,9 +832,6 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
                 },
                 Err(RequestError::Timeout) => {
                     eprintln!("[cvr driver] FC=27 request to {} timed out", resolved.ip);
-                }
-                Err(RequestError::ShapeMismatch(len)) => {
-                    eprintln!("[cvr driver] FC=27 response from {} had an implausible shape ({len} bytes)", resolved.ip);
                 }
                 // Never actually produced for a *registered* Internal request —
                 // `Busy` is only ever sent from the `request_rx` arm's rejection

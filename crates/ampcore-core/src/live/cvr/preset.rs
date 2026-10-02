@@ -4,14 +4,10 @@
 //! actual DSP parameter data — EQ/gain/delay/crossover stay on-device and are
 //! applied internally when a slot is recalled.
 //!
-//! No confirmed firmware (1.1.8 vs 1.1.9) difference exists for FC=59 in
-//! either reference source, unlike `channel_config.rs`/`write.rs` which
-//! dispatch to firmware-specific adapters for confirmed differences —
-//! deliberately not split into `preset_v118.rs`/`preset_v119.rs` here, since
-//! that would misrepresent a guess as a verified fact. Firmware gating
-//! instead happens at the Tauri command boundary (see
-//! `commands/live_control.rs`'s `require_v118_firmware`), restricting the
-//! exposed feature to 1.1.8 until a real 1.1.9 spec is confirmed.
+//! No firmware (1.1.8 vs 1.1.9) difference is known for FC=59. Hagen's
+//! hardware notes (test amps include a 1.1.9 DSP-3004D) show this same
+//! layout, so one encoder serves both. Gating happens at the command
+//! boundary (`write_helpers::presets_supported`), which rejects unknown firmware.
 //!
 //! Request/response body is always 34 bytes: `mode(1) + ch_x(1) +
 //! buffers(32)`. Only the modes this app exposes a command for are covered —

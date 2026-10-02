@@ -43,6 +43,8 @@ pub const FC_RMS_LIMITER_AUTO: u8 = 48;
 pub const FC_CUSTOMER_NAME: u8 = 60;
 pub const FC_SOURCE_DATA: u8 = 62;
 pub const FC_PRIORITY_INPUTS: u8 = 80;
+/// Vendor `Noise_Gate` — the 1.1.9 gate threshold, one signed byte (dBu).
+pub const FC_NOISE_GATE_THRESHOLD: u8 = 87;
 
 /// The device's per-channel name field is a fixed 16-byte null-padded ASCII
 /// buffer — half the width of the 32-byte *preset* name field, so the two
@@ -345,15 +347,9 @@ pub fn build_set_matrix_crosspoint(
     )
 }
 
-/// FC=69 NOISE_GATE, `in_out_flag=1` (output). Wire body on 1.1.8 is a
-/// single byte and, like MUTE, is *inverted*: `0x00`=enabled, `0x01`=
-/// disabled.
-///
-/// 1.1.8 carries no threshold on the wire — the 2-byte
-/// `[enable][threshold]` form is a 1.1.9+ extension (see
-/// `write::build_set_noise_gate`). That matches
-/// `CvrFirmwareCapability.noise_gate_threshold`, which this app already uses
-/// to hide the threshold input on 1.1.8.
+/// FC=69 NOISE_GATE, `in_out_flag=1` (output). One byte on every firmware
+/// and, like MUTE, *inverted*: `0x00`=enabled, `0x01`=disabled. The 1.1.9
+/// threshold travels separately on FC=87 (see `write::build_set_noise_gate`).
 pub fn build_set_noise_gate(channel_index: u8, enabled: bool) -> Vec<u8> {
     let body = [if enabled { 0x00 } else { 0x01 }];
     build_control_packet(

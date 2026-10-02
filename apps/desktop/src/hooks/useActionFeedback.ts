@@ -6,7 +6,7 @@ import { isActionResult } from "../lib/actionResult";
  * (after the hold) `idle`. */
 export type ActionFeedbackStatus = "idle" | "pending" | "success" | "error";
 
-export type ActionFeedbackOutcome = "success" | "error";
+type ActionFeedbackOutcome = "success" | "error";
 
 export const ACTION_FEEDBACK_TIMING = {
   /** The spinner only appears if the request is still running after this

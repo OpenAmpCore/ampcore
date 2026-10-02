@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Dropdown, Tooltip, dropdownVariants } from "@heroui/react";
+import { ClipboardButtons } from "./ClipboardButtons";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { SimpleSelect } from "./SimpleSelect";
 import { useResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
@@ -770,6 +771,16 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
           see its isolated response; freq, gain, and Q are display-only.
         </span>
       )}
+      <div className="flex justify-end">
+        <ClipboardButtons
+          actions={actions}
+          channelIndex={channelIndex}
+          section={direction === "input" ? "inputEq" : "outputEq"}
+          label={`${assignment.deviceName ?? "Amp"} · ${
+            direction === "input" ? `In ${channelIndex + 1}` : `Out ${String.fromCharCode(65 + channelIndex)}`
+          } EQ`}
+        />
+      </div>
       <ResponseGraph
         points={points}
         eq={displayEq}

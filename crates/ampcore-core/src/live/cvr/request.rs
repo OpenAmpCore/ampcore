@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::data::common::now_millis;
 
-use super::protocol::{FC_SYNC_DATA, NETWORK_HEADER_LEN};
+use super::protocol::NETWORK_HEADER_LEN;
 
 pub const REQUEST_TIMEOUT_MS: u64 = 2000;
 pub const REQUEST_RETRY_TIMEOUT_MS: u64 = 2200;
@@ -40,10 +40,6 @@ pub const FRAGMENT_MAX_AGE_MS: f64 = 3_000.0;
 #[derive(Debug)]
 pub enum RequestError {
     Timeout,
-    /// The concatenated response didn't match any plausible shape for its
-    /// function code (see `RequestRegistry::resolve`'s FC=27 check) — a real
-    /// surfaced error, never silently handed to a byte parser as if valid.
-    ShapeMismatch(usize),
     /// Another request was already pending for this IP (any function code)
     /// when this one was submitted — rejected before ever registering it.
     /// Necessary because `FragmentReassembler`'s `by_ip` map (see below) has
@@ -123,6 +119,8 @@ struct PendingRequest {
 pub struct ResolvedRequest {
     pub ip: String,
     pub function_code: u8,
+    /// The request's own `chx` — what a per-channel reply (FC=43) answers.
+    pub chx: u8,
     pub result: Result<Vec<u8>, RequestError>,
     pub sink: ResultSink,
 }
@@ -182,6 +180,7 @@ impl RequestRegistry {
         let superseded = self.pending.remove(&key).map(|old| ResolvedRequest {
             ip: key.0.clone(),
             function_code: key.1,
+            chx: old.chx,
             result: Err(RequestError::Timeout),
             sink: old.sink,
         });
@@ -262,9 +261,15 @@ impl RequestRegistry {
             // Reached "done" either via the settle timer firing after at
             // least one frame arrived (resolve it), or via the hard deadline
             // with retries exhausted and nothing ever arrived (timeout).
-            let result =
-                if pending.frames.is_empty() { Err(RequestError::Timeout) } else { resolve_frames(function_code, pending.frames) };
-            resolved.push(ResolvedRequest { ip, function_code, result, sink: pending.sink });
+            // Frames are concatenated unchecked: shape checks belong to the
+            // firmware-aware parsers (FC=27's geometry differs per family —
+            // see `channel_config::parse_channel_config`), not this transport.
+            let result = if pending.frames.is_empty() {
+                Err(RequestError::Timeout)
+            } else {
+                Ok(pending.frames.into_iter().flatten().collect())
+            };
+            resolved.push(ResolvedRequest { ip, function_code, chx: pending.chx, result, sink: pending.sink });
         }
 
         (resolved, retransmits)
@@ -279,34 +284,6 @@ fn build_request_packet(function_code: u8, chx: u8, in_out_flag: u8, body: &[u8]
     super::protocol::build_control_packet_with_status(function_code, 2, chx, 0, 0, in_out_flag, body)
 }
 
-/// Concatenates accumulated frames and, for FC=27 specifically, sanity-checks
-/// the result's shape before accepting it — a mismatch becomes a real
-/// surfaced error rather than silently corrupt data handed to the channel
-/// parser. Other function codes have no known fixed shape to check against
-/// (they degenerate to "whatever came back"), so they pass through as-is.
-fn resolve_frames(function_code: u8, frames: Vec<Vec<u8>>) -> Result<Vec<u8>, RequestError> {
-    let body: Vec<u8> = frames.into_iter().flatten().collect();
-    if function_code == FC_SYNC_DATA {
-        use super::channel_config_v118::{BYTES_PER_CHANNEL, TRAILER_SIZE_V118};
-        // The frame here still includes StructHeader+checksum; the pure
-        // per-channel body starts after StructHeader (10) and ends before
-        // the checksum (3) — see channel_config.rs's slicing convention.
-        //
-        // This check is 1.1.8-shaped (imports its constants directly) even
-        // though `resolve_frames` itself is firmware-agnostic — there's no
-        // other known-good shape to validate against yet (1.1.9 has none;
-        // it reuses the 1.1.8 parser). Revisit if/when a second firmware's
-        // real geometry is confirmed.
-        let inner_len = body.len().saturating_sub(super::protocol::STRUCT_HEADER_LEN + super::protocol::CHECKSUM_LEN);
-        let plausible = inner_len >= TRAILER_SIZE_V118
-            && (inner_len - TRAILER_SIZE_V118) % BYTES_PER_CHANNEL == 0
-            && (1..=4).contains(&((inner_len - TRAILER_SIZE_V118) / BYTES_PER_CHANNEL));
-        if !plausible {
-            return Err(RequestError::ShapeMismatch(body.len()));
-        }
-    }
-    Ok(body)
-}
 
 struct FragmentState {
     packets_count: u8,
@@ -379,21 +356,28 @@ impl FragmentReassembler {
 // Write ACK confirmation
 // ---------------------------------------------------------------------------
 
-/// How long to wait for a write's ACK echo before refiring. Deliberately
-/// tighter than the vendor reference's `UDP_tool.outTime(1.0, ip)` 1s budget:
-/// on the LAN this app targets, an ACK round trip is single-digit
-/// milliseconds, so 1s spends almost all of its time waiting on a packet that
-/// is already lost. Trading that for more, faster refires recovers a dropped
-/// write sooner and keeps the worst case well under the old single timeout.
-pub const WRITE_ACK_TIMEOUT_MS: u64 = 200;
+/// How long to wait for a write's ACK echo before refiring — the vendor
+/// reference's `UDP_tool.outTime(1.0, ip)` budget, and the prior web app's.
+///
+/// **Do not tighten this.** It was 200ms once, on the reasoning that a LAN
+/// round trip is single-digit milliseconds. The amp's own processing isn't:
+/// measured on a DSP-2004, the packet after an FC=52 EQ-chain write is ACKed
+/// after ~192ms, and one sent right after an FC=43 FIR frame is dropped
+/// outright (the refire got through at ~270ms). At 200ms the first case
+/// refired every so often, the amp then ACKed both copies, and — since an ACK
+/// carries nothing but the device's IP (see `on_ack`) — the spare ACK
+/// confirmed the *next* write before the amp had taken it, with every later
+/// write off by one. A refire has to be a genuinely lost packet for IP-only
+/// matching to hold, which is what this budget buys.
+pub const WRITE_ACK_TIMEOUT_MS: u64 = 1000;
 /// Retransmissions after the initial send before a write is failed — so
-/// 6 transmissions total, and a worst case of
-/// `(1 + WRITE_MAX_REFIRES) * WRITE_ACK_TIMEOUT_MS` = 1.2s before the caller
-/// sees an error (versus 3s for the reference's 3-attempt/1s loop).
-pub const WRITE_MAX_REFIRES: u8 = 5;
+/// 3 transmissions total, and a worst case of
+/// `(1 + WRITE_MAX_REFIRES) * WRITE_ACK_TIMEOUT_MS` = 3s before the caller
+/// sees an error, the reference's own 3-attempt/1s loop.
+pub const WRITE_MAX_REFIRES: u8 = 2;
 /// Upper bound on writes queued behind the in-flight one for a single device.
 /// Only reachable when a device stops ACKing (each write then costs the full
-/// 1.2s above) while the UI keeps producing them — a fader drag against an
+/// 3s above) while the UI keeps producing them — a fader drag against an
 /// amp that just went offline. The *oldest* queued write is dropped rather
 /// than the newest, so the final position of a drag is the one that survives.
 pub const WRITE_QUEUE_MAX: usize = 64;
@@ -545,7 +529,8 @@ impl WriteRegistry {
     /// reference's `UDP_tool.jugeOutTime(string IP)` does. This is not
     /// laziness: real 1.1.8 hardware, verified on the wire, replies with a
     /// bare 10-byte header whose `packets_lastlen` is **0** — it does *not*
-    /// echo the value we sent. An ACK carries no function code, no request id
+    /// echo the value we sent (and 1.1.9 fills `packets_count/lastlen` with
+    /// `0/450` instead, per Hagen's hardware notes). An ACK carries no function code, no request id
     /// and no usable length, so IP is the only thing to key on. Correlating on
     /// anything richer simply never matches, and every write times out despite
     /// being acknowledged every time (observed: writes failing 6/6 while the
@@ -718,6 +703,18 @@ mod tests {
         // `pending` holds one entry per (ip, fc), so a second would supersede
         // the first rather than run beside it.
         assert!(registry.conflicts_with(IP, FC_BRIDGE, false));
+    }
+
+    /// A per-channel reply (FC=43 FIR) doesn't say which channel it answers,
+    /// so the resolved request has to.
+    #[test]
+    fn a_resolved_request_reports_its_chx() {
+        let mut registry = RequestRegistry::default();
+        let now = Instant::now();
+        let _ = registry.register(RequestSpec { chx: 2, ..spec(IP, 43, true) }, now);
+        registry.on_frame(IP, 43, vec![0; 16], now);
+        let (resolved, _) = registry.poll_deadlines(now + Duration::from_millis(SETTLE_MS + 1));
+        assert_eq!(resolved.iter().map(|r| r.chx).collect::<Vec<_>>(), [2]);
     }
 
     #[test]

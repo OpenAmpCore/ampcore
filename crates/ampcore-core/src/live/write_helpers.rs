@@ -14,6 +14,7 @@ use crate::data::project::{CrossoverSlot, CrossoverSlotKind, EqBand, EqDirection
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::data::common::now_millis;
+use crate::live::cvr::fir;
 use crate::live::cvr::preset::{self, DevicePresetsSnapshot};
 use crate::live::cvr::request::{RequestError, RequestSpec, ResultSink, WriteOutcome, WriteSpec};
 use crate::live::cvr::write;
@@ -84,18 +85,17 @@ pub fn unknown_firmware_error(device_id: &str) -> AppError {
     AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
 }
 
-/// FC=59 preset fetch/recall has no confirmed 1.1.9 spec in either reference
-/// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
-/// only rather than guessing it also works there, matching this app's
-/// "no generic fallback encoding" write philosophy.
+/// FC=59 presets run on every known family: the 34-byte layout in
+/// `live/cvr/preset.rs` matches Hagen's hardware notes, whose test amps
+/// include a 1.1.9 DSP-3004D. Unknown firmware stays gated.
 pub fn presets_supported(firmware_family: Option<&str>) -> bool {
-    firmware_family == Some("1.1.8")
+    super::cvr::protocol::is_known_family(firmware_family)
 }
 
 pub fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
     if !presets_supported(firmware_family) {
         return Err(AppError::from(format!(
-            "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
+            "device {} preset fetch/recall requires firmware 1.1.8 or 1.1.9 (detected: {:?})",
             device_id, firmware_family
         )));
     }
@@ -119,22 +119,23 @@ pub async fn send_write(
     Ok(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?)
 }
 
-/// Same shape as `send_write`, for a command whose packet doesn't fit one
-/// datagram (today: FIR coefficient import — see `fir::split_into_fragments`).
-/// Sends each fragment through `send_control` **sequentially**, awaiting one
-/// fragment's ACK before building the next, matching the vendor's own
-/// stop-and-wait fragment loop — this is what keeps at most one fragment ever
-/// queued in `WriteRegistry` at a time, so ordering and coalescing stay sound
-/// with no changes to that registry beyond `coalesce_key`'s continuation-
-/// fragment guard. Aborts on the first fragment that fails rather than
-/// sending the rest of a frame the device already missed part of.
-pub async fn send_fragmented_write(
+/// `send_write` for a command that sends several packets — several fields, or
+/// one frame split into fragments (FIR import, see `fir::split_into_fragments`).
+/// All packets are built first, so an unknown firmware fails before anything
+/// is sent. They then go out through `send_control` **sequentially**, each
+/// awaiting its ACK before the next, matching the vendor's own stop-and-wait
+/// loop — this keeps at most one packet queued in `WriteRegistry` at a time,
+/// so ordering and coalescing stay sound (see `coalesce_key`'s continuation-
+/// fragment guard). Aborts on the first packet that fails.
+pub async fn send_writes(
     state: &LiveDeviceState,
     device_id: &str,
     build: impl FnOnce(Option<&str>) -> Option<Vec<Vec<u8>>>,
 ) -> Result<LiveWriteAck, AppError> {
     let (firmware, ip, write_tx) = resolve_write_target(state, device_id)?;
     let packets = build(firmware.as_deref()).ok_or_else(|| unknown_firmware_error(device_id))?;
+    // Nothing may slip between the fragments of one frame (a FIR import).
+    let _hold = state.hold_polls()?;
     let mut tally = WriteTally::default();
     for packet in packets {
         tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
@@ -253,6 +254,41 @@ pub fn require_fir_firmware(device_id: &str, firmware_family: Option<&str>) -> R
         )));
     }
     Ok(())
+}
+
+/// Reads one output's FIR filter (FC=43). Nothing caches it: the reply is
+/// five datagrams and waits for a clear line, so it is asked for only where
+/// it is needed — the FIR tab, a push, saving an output as a speaker.
+pub async fn fetch_channel_fir(
+    state: &LiveDeviceState,
+    device_id: &str,
+    channel_index: u8,
+) -> Result<fir::ChannelFirSnapshot, AppError> {
+    let (ip, firmware_family, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, device.firmware_family, request_tx)
+    };
+    require_fir_firmware(device_id, firmware_family.as_deref())?;
+    let frame = send_request_with_retry(
+        &request_tx,
+        &ip,
+        fir::FC_FIR_DATA,
+        channel_index,
+        fir::build_fir_request_body(),
+        true,
+        fir::FIR_IN_OUT_FLAG,
+    )
+    .await?;
+    fir::parse_fir_data(&frame, channel_index).ok_or_else(|| {
+        AppError::from(format!(
+            "device {} FC=43 response for channel {} had an unexpected shape ({} bytes)",
+            device_id,
+            channel_index,
+            frame.len()
+        ))
+    })
 }
 
 /// FC=30 FILTER_TYPE's wire body encodes `filter_type` and `active`
@@ -447,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_gated_to_1_1_8_only() {
+    fn presets_are_gated_to_known_firmware() {
         assert!(presets_supported(Some("1.1.8")));
-        assert!(!presets_supported(Some("1.1.9")));
+        assert!(presets_supported(Some("1.1.9")));
         assert!(!presets_supported(None));
     }
 }

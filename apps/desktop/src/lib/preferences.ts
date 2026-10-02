@@ -18,16 +18,21 @@ const DEFAULTS = {
   /** The two Amp Edit surfaces are developer-facing and stay hidden until asked for. */
   showFingerprintMenu: false,
   showRawTelemetry: false,
+  /** Debug: the apply confirm shows a now/preset/written diff of every value. */
+  showSpeakerComparator: false,
   /** Which meter surfaces get peak hold / limiter threshold lines. Chosen to
    * match the behavior every meter had before either setting existed — peak
    * hold was unconditional everywhere, and the limiter threshold lines were
    * on for the Output tab and unconditional on the Limiter tab. */
   peakHoldSurfaces: ["input", "output", "limiter"] as string[],
   limiterThresholdSurfaces: ["output", "limiter"] as string[],
+  /** The built-in web server (`web_server.rs`): off until asked for. */
+  webServerEnabled: false,
+  webServerPort: 8642,
 };
 
 type Preferences = typeof DEFAULTS;
-export type PreferenceKey = keyof Preferences;
+type PreferenceKey = keyof Preferences;
 
 /** Kept verbatim from before the store rewrite, so a user who had already
  * turned update checks off stays opted out. Every other key is `ampcore.<key>`. */

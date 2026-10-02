@@ -65,7 +65,7 @@ function wash(color: string, percent: number): string {
 /** A tile's click handler. Returning a promise (typically an `ActionResult`
  * from `ConfigureActions`) is what lets `visualValidation: true` follow the
  * request; a handler that returns nothing just runs. */
-export type TileClickHandler = () => void | PromiseLike<unknown>;
+type TileClickHandler = () => void | PromiseLike<unknown>;
 
 /** Opt-in request feedback for an actionable tile.
  *

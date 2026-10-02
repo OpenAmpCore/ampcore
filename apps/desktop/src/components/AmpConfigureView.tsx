@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import {
   Popover,
   Button,
@@ -20,17 +20,17 @@ import {
   Eye,
   FlipVertical2,
   GitCompare,
+  LayoutDashboard,
   MoreHorizontal,
   Plug,
   RefreshCw,
   Route,
-  SquareArrowRightEnter,
   Unplug,
-  SquareArrowRightExit,
   ShieldAlert,
   ListPlus,
   Lock,
   Radio,
+  Speaker,
   Volume2,
   VolumeX,
   Waves,
@@ -66,6 +66,7 @@ import { ACTION_UNAVAILABLE, type ActionResult } from "../lib/actionResult";
 import {
   commands,
   type AmpAssignment,
+  type ChannelSpeakerState,
   type AmpCapability_Serialize as AmpCapability,
   type AmpEditLock,
   type AmpModelCatalogEntry,
@@ -92,25 +93,26 @@ import {
 import {
   createProjectConfigureActions,
   lockConfigureActions,
-  LOCKED_CONFIGURE_CAPABILITIES,
-  PROJECT_CONFIGURE_CAPABILITIES,
   type ConfigureActions,
-  type ConfigureCapabilities,
 } from "../lib/configureActions";
 import {
   buildLiveAssignmentViewModel,
   createLiveConfigureActions,
-  LIVE_CONFIGURE_CAPABILITIES,
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
+import { Hint } from "./Hint";
+import { SpeakersTab } from "./SpeakersTab";
+import { StatusChip } from "./SpeakerBench";
+import { useSpeakerLibrary, useSpeakerStates } from "../lib/speakers";
 import { usePreference } from "../lib/preferences";
 import { useElementWidth } from "../hooks/useElementWidth";
+import { useIsCompact } from "../lib/breakpoints";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
  * Configure screen instance targets — the single seam that lets the same
  * capability-driven tab UI serve both modes (see `configureActions.ts`/
  * `liveConfigureAdapter.ts`). */
-export type ConfigureSource =
+type ConfigureSource =
   | {
       kind: "project";
       project: Project;
@@ -167,19 +169,9 @@ const DEVICE_NAME_MAX_LENGTH = 32;
 const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
 const TABS = [
-  {
-    value: "input",
-    label: "Input",
-    icon: SquareArrowRightEnter,
-    skeleton: "list",
-  },
-  {
-    value: "output",
-    label: "Output",
-    icon: SquareArrowRightExit,
-    skeleton: "list",
-  },
-  { value: "routing", label: "Routing", icon: Route, skeleton: "grid" },
+  { value: "main", label: "Input / Output", icon: LayoutDashboard, skeleton: "list" },
+  { value: "routing", label: "Matrix", icon: Route, skeleton: "grid" },
+  { value: "speakers", label: "Speakers", icon: Speaker, skeleton: "list" },
   {
     value: "presetConfiguration",
     label: "Preset Configuration",
@@ -199,7 +191,7 @@ const TABS = [
  * at all (FC=59 is a live wire-protocol feature, not model-catalog-driven),
  * so it's special-cased in the render loop below instead of going through
  * the capability-gated dispatch every other tab here shares. */
-const CONFIGURABLE_TABS = new Set(["input", "output", "routing"]);
+const CONFIGURABLE_TABS = new Set(["main", "routing"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
@@ -584,7 +576,6 @@ interface ConfigurableTabProps {
    * yet) are simply absent; a handler guards with `if (!actions.setX)
    * return;` rather than assuming every field is always writable. */
   actions: ConfigureActions;
-  capabilities: ConfigureCapabilities;
   /** The live amp this editor can reach right now, if any — Direct Edit's own
    * device or the online amp a project amp is following, and `undefined` once
    * that amp is offline or deliberately disengaged (see `liveAmpDeviceId`).
@@ -592,6 +583,13 @@ interface ConfigurableTabProps {
    * this to decide whether a *device-only* feature can be queried. Today just
    * FIR, whose coefficients exist nowhere but on the amp. */
   deviceId?: string;
+  /** Speaker-library status per output channel of a project amp (empty for
+   * Direct Edit); shown as a chip on each output row. */
+  speakerStates?: Map<number, ChannelSpeakerState>;
+  onOpenSpeakers?: () => void;
+  /** The view is locked; for what a tab renders outside its panel's own
+   * disabled fieldset (a dialog). */
+  locked?: boolean;
 }
 
 const METER_FLOOR_DB = -60;
@@ -939,158 +937,6 @@ function InputChannelRow({
   );
 }
 
-/** Per-channel vertical rail — the "third level" tab selector nested inside
- * the Input/Output tabs, alongside the top-level app tabs (now in the title
- * bar) and `AmpConfigureView`'s own tab list. Only shown in a sub-tab whose
- * content is scoped to one channel at a time (e.g. EQ, FIR); the plain
- * Input/Output sub-tab already shows every channel at once, so a channel
- * selector there would be redundant. `labelFor` lets callers keep each
- * axis's own convention — inputs are numbered, outputs are lettered. */
-function ChannelRail({
-  channels,
-  activeChannelIndex,
-  onSelectChannel,
-  labelFor,
-}: {
-  channels: AmpAssignment["channels"];
-  activeChannelIndex: number;
-  onSelectChannel: (channelIndex: number) => void;
-  labelFor: (channel: AmpAssignment["channels"][number]) => string;
-}) {
-  return (
-    <div
-      className="flex w-11 shrink-0 flex-col justify-center gap-1 overflow-y-auto border-r border-[var(--amp-color-default-border)] p-1"
-    >
-      {channels.map((channel) => {
-        const isActive = channel.channelIndex === activeChannelIndex;
-        return (
-          <button
-            type="button"
-            key={channel.channelIndex}
-            onClick={() => onSelectChannel(channel.channelIndex)}
-            className={`appearance-none bg-transparent p-1 font-inherit rounded-md border ${
-              isActive
-                ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                : "border-transparent"
-            }`}
-          >
-            <span style={{ fontSize: 11, fontWeight: 600, textAlign: "center", display: "block" }}>
-              {labelFor(channel)}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function InputTab({
-  assignment,
-  capability,
-  actions,
-  telemetry,
-}: ConfigurableTabProps) {
-  const { min, max } = capability.paramRanges.delayInMs;
-  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
-  const [eqChannelIndex, setEqChannelIndex] = useState(0);
-  const [view, setView] = useState<string | null>("input");
-  const eqChannel =
-    assignment.channels.find((c) => c.channelIndex === eqChannelIndex) ??
-    assignment.channels[0];
-
-  async function handleDelayChange(channelIndex: number, delayInMs: number) {
-    return actions.setChannelDelayIn(channelIndex, delayInMs);
-  }
-
-  async function handleMuteToggle(channelIndex: number, muted: boolean) {
-    return actions.setChannelInputMute(channelIndex, muted);
-  }
-
-  async function handleRename(channelIndex: number, name: string | null) {
-    if (!actions.setChannelName) return;
-    await actions.setChannelName(channelIndex, "input", name);
-  }
-
-  function openEq(channelIndex: number) {
-    setEqChannelIndex(channelIndex);
-    setView("eq");
-  }
-
-  return (
-    <div className="flex h-full min-w-0">
-      {view === "eq" && (
-        <ChannelRail
-          channels={assignment.channels}
-          activeChannelIndex={eqChannel.channelIndex}
-          onSelectChannel={setEqChannelIndex}
-          labelFor={(c) => String(c.channelIndex + 1)}
-        />
-      )}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex justify-center py-1.5">
-          <ButtonGroup size="sm">
-            <Button variant={view === "input" ? "primary" : "ghost"} onPress={() => setView("input")}>
-              Input
-            </Button>
-            <Button variant={view === "eq" ? "primary" : "ghost"} onPress={() => setView("eq")}>
-              EQ
-            </Button>
-          </ButtonGroup>
-        </div>
-        <div className="min-h-0 flex-1">
-          {view === "eq" ? (
-            <div className="h-full overflow-y-auto">
-              <EqEditor
-                key={eqChannel.channelIndex}
-                assignment={assignment}
-                channelIndex={eqChannel.channelIndex}
-                direction="input"
-                capability={capability}
-                actions={actions}
-              />
-            </div>
-          ) : (
-            <CenteredScrollPane>
-              {/* Rows stretch to the pane so their tiles can wrap, but stop
-               * at the width the meter's own cap plus four tiles actually
-               * need — past that they'd sit in a sea of empty gutter. */}
-              <div className="mx-auto flex w-full min-w-0 flex-col gap-4" style={{ maxWidth: INPUT_ROW_MAX_WIDTH }}>
-                {assignment.channels.map((channel) => (
-                  <InputChannelRow
-                    key={channel.channelIndex}
-                    channel={channel}
-                    telemetry={channelTelemetry(
-                      telemetry,
-                      channel.channelIndex,
-                      ratedRmsVoltage,
-                    )}
-                    delayMin={min}
-                    delayMax={max}
-                    nameMaxLength={capability.paramRanges.channelNameMaxLength}
-                    onDelayChange={(value) =>
-                      handleDelayChange(channel.channelIndex, value)
-                    }
-                    onMuteToggle={() =>
-                      handleMuteToggle(
-                        channel.channelIndex,
-                        !(channel.inputMuted ?? false),
-                      )
-                    }
-                    onOpenEq={() => openEq(channel.channelIndex)}
-                    onRename={(name) =>
-                      handleRename(channel.channelIndex, name)
-                    }
-                  />
-                ))}
-              </div>
-            </CenteredScrollPane>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 const POWER_MODE_LABELS: Record<PowerMode, string> = {
   lowOhm: "Low-Ω",
   v70: "70V",
@@ -1099,6 +945,8 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
 
 function OutputChannelRow({
   channel,
+  speaker,
+  onOpenSpeakers,
   telemetry,
   ratedRmsVoltage,
   trimMin,
@@ -1123,6 +971,9 @@ function OutputChannelRow({
   onRename,
 }: {
   channel: AmpAssignment["channels"][number];
+  /** The library speaker this output was set up from, if any. */
+  speaker?: ChannelSpeakerState;
+  onOpenSpeakers?: () => void;
   telemetry: ChannelTelemetry;
   /** For the limiter threshold lines on this row's meter — see
    * `capability.topology.ratedRmsVoltage` at the call site. */
@@ -1192,11 +1043,27 @@ function OutputChannelRow({
         maxLength={nameMaxLength}
         onRename={onRename}
         trailing={
-          <ChannelStateBadge
-            state={telemetry.outputState}
-            raw={telemetry.outputStateRaw}
-            hideNominal
-          />
+          <>
+            {speaker && (
+              <div className="flex min-w-0 items-center gap-1.5">
+                <Hint text="Open in the Speakers tab" className="min-w-0">
+                  <button
+                    type="button"
+                    className="block min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]"
+                    onClick={onOpenSpeakers}
+                  >
+                    {speaker.speaker.label}
+                  </button>
+                </Hint>
+                <StatusChip state={speaker} />
+              </div>
+            )}
+            <ChannelStateBadge
+              state={telemetry.outputState}
+              raw={telemetry.outputStateRaw}
+              hideNominal
+            />
+          </>
         }
       />
       <div className="flex items-center gap-2">
@@ -1613,14 +1480,150 @@ function BridgePairSidebar({
   );
 }
 
-function OutputTab({
+const SECTION_TITLE =
+  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
+
+/** One titled card of the Main tab. Both cards span the pane; `maxWidth` caps
+ * the rows inside at their natural one-line width (see `INPUT_ROW_MAX_WIDTH`). */
+function MainSection({ title, maxWidth, children }: { title: string; maxWidth: number; children: ReactNode }) {
+  return (
+    <section className="flex min-w-0 flex-col gap-1.5">
+      <h3 className={SECTION_TITLE}>{title}</h3>
+      <div className="min-w-0 rounded-xl border border-[var(--amp-color-default-border)] p-3">
+        <div className="flex w-full min-w-0 flex-col gap-4" style={{ maxWidth }}>
+          {children}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** Which per-channel editor the Main tab has open in its dialog. */
+type EditorTarget = { kind: "inputEq" | "outputEq" | "fir" | "limiter"; channelIndex: number };
+
+const EDITOR_TITLES: Record<EditorTarget["kind"], string> = {
+  inputEq: "Input EQ",
+  outputEq: "Output EQ",
+  fir: "FIR filter",
+  limiter: "Limiter",
+};
+
+/** The EQ, FIR and limiter editors, opened from a channel row's tile as in the
+ * old app. The channel switcher at the top keeps each axis's convention —
+ * inputs numbered, outputs lettered — and leaves out a bridged follower. */
+function ChannelEditorModal({
+  target,
+  onTargetChange,
   assignment,
   capability,
   actions,
-  capabilities,
   telemetry,
   deviceId,
+  locked,
+}: Pick<ConfigurableTabProps, "assignment" | "capability" | "actions" | "telemetry" | "deviceId" | "locked"> & {
+  target: EditorTarget | null;
+  onTargetChange: (target: EditorTarget | null) => void;
+}) {
+  const compact = useIsCompact();
+  const isInput = target?.kind === "inputEq";
+  const channel = assignment.channels.find((c) => c.channelIndex === target?.channelIndex) ?? assignment.channels[0];
+  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : String.fromCharCode(65 + channelIndex));
+  const channels = isInput
+    ? assignment.channels
+    : assignment.channels.filter(
+        (c) => !(c.channelIndex % 2 === 1 && assignment.channels[c.channelIndex - 1]?.outputBridged),
+      );
+  return (
+    <Modal.Backdrop isOpen={target !== null} onOpenChange={(open) => !open && onTargetChange(null)}>
+      <Modal.Container placement="center" size={compact ? "full" : "cover"}>
+        <Modal.Dialog>
+          <Modal.Header>
+            <Modal.Heading>{target ? `${EDITOR_TITLES[target.kind]} · ${label(channel.channelIndex)}` : ""}</Modal.Heading>
+            <Modal.CloseTrigger />
+          </Modal.Header>
+          <Modal.Body>
+            {target && (
+              // A dialog renders outside the tab's own locked fieldset.
+              <fieldset
+                disabled={locked}
+                className="flex h-full min-h-0 min-w-0 flex-col gap-2"
+                style={{ border: 0, margin: 0, padding: 0 }}
+              >
+                <div className="flex shrink-0 justify-center">
+                  <ButtonGroup size="sm">
+                    {channels.map((c) => (
+                      <Button
+                        key={c.channelIndex}
+                        variant={c.channelIndex === channel.channelIndex ? "primary" : "ghost"}
+                        onPress={() => onTargetChange({ kind: target.kind, channelIndex: c.channelIndex })}
+                      >
+                        {label(c.channelIndex)}
+                      </Button>
+                    ))}
+                  </ButtonGroup>
+                </div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                  {target.kind === "fir" ? (
+                    <FirPanel
+                      key={channel.channelIndex}
+                      deviceId={deviceId}
+                      channelIndex={channel.channelIndex}
+                      label={label(channel.channelIndex)}
+                      capability={capability}
+                      bypassed={channel.firBypassed ?? false}
+                      stored={channel.fir}
+                      onBypassChange={(next) => actions.setChannelFirBypass(channel.channelIndex, next)}
+                      onImportData={
+                        actions.setChannelFirData
+                          ? (name, coefficients) => actions.setChannelFirData!(channel.channelIndex, name, coefficients)
+                          : undefined
+                      }
+                      onClearData={
+                        actions.clearChannelFirData ? () => actions.clearChannelFirData!(channel.channelIndex) : undefined
+                      }
+                    />
+                  ) : target.kind === "limiter" ? (
+                    <LimiterEditor
+                      key={channel.channelIndex}
+                      assignment={assignment}
+                      channelIndex={channel.channelIndex}
+                      telemetry={channelTelemetry(telemetry, channel.channelIndex, capability.topology.ratedRmsVoltage)}
+                      capability={capability}
+                      actions={actions}
+                    />
+                  ) : (
+                    <EqEditor
+                      key={`${target.kind}:${channel.channelIndex}`}
+                      assignment={assignment}
+                      channelIndex={channel.channelIndex}
+                      direction={isInput ? "input" : "output"}
+                      capability={capability}
+                      actions={actions}
+                    />
+                  )}
+                </div>
+              </fieldset>
+            )}
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
+  );
+}
+
+/** The Main tab: every input above every output in one scrolling view, as in
+ * the old app. A row's EQ / FIR / LIM tile opens `ChannelEditorModal`. */
+function MainTab({
+  assignment,
+  capability,
+  actions,
+  telemetry,
+  deviceId,
+  speakerStates,
+  onOpenSpeakers,
+  locked,
 }: ConfigurableTabProps) {
+  const inputDelayRange = capability.paramRanges.delayInMs;
   const trimRange = capability.paramRanges.outputTrimDb;
   const volumeRange = capability.paramRanges.outputVolumeDb;
   const delayRange = capability.paramRanges.delayOutMs;
@@ -1629,12 +1632,8 @@ function OutputTab({
   const noiseGateThresholdAdjustable = capability.firmware.noiseGateThreshold;
   const powerModes = capability.topology.powerModes;
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
-  const [subChannelIndex, setSubChannelIndex] = useState(0);
-  const [view, setView] = useState<string | null>("output");
+  const [editor, setEditor] = useState<EditorTarget | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const subChannel =
-    assignment.channels.find((c) => c.channelIndex === subChannelIndex) ??
-    assignment.channels[0];
 
   async function handleChange(
     channelIndex: number,
@@ -1665,9 +1664,9 @@ function OutputTab({
     return actions.setChannelPhaseInvert(channelIndex, inverted);
   }
 
-  async function handleRename(channelIndex: number, name: string | null) {
+  async function handleRename(channelIndex: number, direction: "input" | "output", name: string | null) {
     if (!actions.setChannelName) return;
-    await actions.setChannelName(channelIndex, "output", name);
+    await actions.setChannelName(channelIndex, direction, name);
   }
 
   async function handleMuteToggle(channelIndex: number, muted: boolean) {
@@ -1703,11 +1702,6 @@ function OutputTab({
     await actions.setOutputBridge(pairLeaderChannelIndex, bridged);
   }
 
-  function openSubTab(channelIndex: number, target: "fir" | "eq" | "limiter") {
-    setSubChannelIndex(channelIndex);
-    setView(target);
-  }
-
   const letterLabel = (c: AmpAssignment["channels"][number]) =>
     String.fromCharCode(65 + c.channelIndex);
 
@@ -1726,77 +1720,37 @@ function OutputTab({
   }
 
   return (
-    <div className="flex h-full min-w-0">
+    <div className="h-full min-h-0 overflow-auto">
       {confirmDialog}
-      {(view === "fir" || view === "eq" || view === "limiter") && (
-        <ChannelRail
-          channels={assignment.channels}
-          activeChannelIndex={subChannel.channelIndex}
-          onSelectChannel={setSubChannelIndex}
-          labelFor={letterLabel}
-        />
-      )}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex justify-center py-1.5">
-          <ButtonGroup size="sm">
-            {(["output", "fir", "eq", "limiter"] as const).map((tab) => (
-              <Button key={tab} variant={view === tab ? "primary" : "ghost"} onPress={() => setView(tab)}>
-                {tab === "output" ? "Output" : tab === "fir" ? "FIR" : tab === "eq" ? "EQ" : "Limiter"}
-              </Button>
-            ))}
-          </ButtonGroup>
-        </div>
-        <div className="min-h-0 flex-1">
-          {view === "fir" ? (
-            <FirPanel
-              key={subChannel.channelIndex}
-              deviceId={deviceId}
-              channelIndex={subChannel.channelIndex}
-              label={letterLabel(subChannel)}
-              capability={capability}
-              bypassed={subChannel.firBypassed ?? false}
-              onBypassChange={(next) => actions.setChannelFirBypass(subChannel.channelIndex, next)}
-              onImportData={
-                actions.setChannelFirData
-                  ? (name, coefficients) => actions.setChannelFirData!(subChannel.channelIndex, name, coefficients)
-                  : undefined
-              }
-              onClearData={
-                actions.clearChannelFirData ? () => actions.clearChannelFirData!(subChannel.channelIndex) : undefined
-              }
+      <ChannelEditorModal
+        target={editor}
+        onTargetChange={setEditor}
+        assignment={assignment}
+        capability={capability}
+        actions={actions}
+        telemetry={telemetry}
+        deviceId={deviceId}
+        locked={locked}
+      />
+      {/* Both cards share the wider (output) row's width, so their edges line up. */}
+      <div className="mx-auto flex w-full min-w-0 flex-col gap-4 p-4" style={{ maxWidth: OUTPUT_ROW_MAX_WIDTH + 58 }}>
+        <MainSection title="Input" maxWidth={INPUT_ROW_MAX_WIDTH}>
+          {assignment.channels.map((channel) => (
+            <InputChannelRow
+              key={channel.channelIndex}
+              channel={channel}
+              telemetry={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
+              delayMin={inputDelayRange.min}
+              delayMax={inputDelayRange.max}
+              nameMaxLength={nameMaxLength}
+              onDelayChange={(value) => actions.setChannelDelayIn(channel.channelIndex, value)}
+              onMuteToggle={() => actions.setChannelInputMute(channel.channelIndex, !(channel.inputMuted ?? false))}
+              onOpenEq={() => setEditor({ kind: "inputEq", channelIndex: channel.channelIndex })}
+              onRename={(name) => handleRename(channel.channelIndex, "input", name)}
             />
-          ) : view === "eq" ? (
-            <div className="h-full overflow-y-auto">
-              <EqEditor
-                key={subChannel.channelIndex}
-                assignment={assignment}
-                channelIndex={subChannel.channelIndex}
-                direction="output"
-                capability={capability}
-                actions={actions}
-              />
-            </div>
-          ) : view === "limiter" ? (
-            <CenteredScrollPane>
-              <LimiterEditor
-                key={subChannel.channelIndex}
-                assignment={assignment}
-                channelIndex={subChannel.channelIndex}
-                telemetry={channelTelemetry(
-                  telemetry,
-                  subChannel.channelIndex,
-                  ratedRmsVoltage,
-                )}
-                capability={capability}
-                actions={actions}
-                capabilities={capabilities}
-              />
-            </CenteredScrollPane>
-          ) : (
-            <CenteredScrollPane>
-              {/* Same centred, width-capped column as the Input tab — see
-               * OUTPUT_ROW_MAX_WIDTH. */}
-              <div className="mx-auto flex w-full min-w-0 flex-col gap-4" style={{ maxWidth: OUTPUT_ROW_MAX_WIDTH }}>
+          ))}
+        </MainSection>
+        <MainSection title="Output" maxWidth={OUTPUT_ROW_MAX_WIDTH}>
                 {channelPairs.map(([leader, follower]) => {
                   const bridged = Boolean(
                     follower && (leader.outputBridged ?? false),
@@ -1805,6 +1759,8 @@ function OutputTab({
                     <OutputChannelRow
                       key={channel.channelIndex}
                       channel={channel}
+                      speaker={speakerStates?.get(channel.channelIndex)}
+                      onOpenSpeakers={onOpenSpeakers}
                       telemetry={channelTelemetry(
                         telemetry,
                         channel.channelIndex,
@@ -1827,11 +1783,9 @@ function OutputTab({
                       onChange={(field, value) =>
                         handleChange(channel.channelIndex, field, value)
                       }
-                      onOpenFir={() => openSubTab(channel.channelIndex, "fir")}
-                      onOpenEq={() => openSubTab(channel.channelIndex, "eq")}
-                      onOpenLimiter={() =>
-                        openSubTab(channel.channelIndex, "limiter")
-                      }
+                      onOpenFir={() => setEditor({ kind: "fir", channelIndex: channel.channelIndex })}
+                      onOpenEq={() => setEditor({ kind: "outputEq", channelIndex: channel.channelIndex })}
+                      onOpenLimiter={() => setEditor({ kind: "limiter", channelIndex: channel.channelIndex })}
                       onNoiseGateChange={(enabled, thresholdDbu) =>
                         handleNoiseGateChange(
                           channel.channelIndex,
@@ -1854,9 +1808,7 @@ function OutputTab({
                           !(channel.outputMuted ?? false),
                         )
                       }
-                      onRename={(name) =>
-                        handleRename(channel.channelIndex, name)
-                      }
+                      onRename={(name) => handleRename(channel.channelIndex, "output", name)}
                     />
                   );
                   if (!follower) {
@@ -1897,10 +1849,7 @@ function OutputTab({
                     </div>
                   );
                 })}
-              </div>
-            </CenteredScrollPane>
-          )}
-        </div>
+        </MainSection>
       </div>
     </div>
   );
@@ -2366,18 +2315,19 @@ function PresetSlotRow({
       >
         {String(slot.index + 1).padStart(2, "0")}
       </span>
-      <span
-        className="min-w-0 flex-1 truncate"
-        style={{
-          fontSize: "var(--amp-font-size-sm)",
-          color: empty ? "var(--amp-color-dimmed)" : undefined,
-          fontStyle: empty ? "italic" : undefined,
-          fontWeight: isActive ? 600 : 400,
-        }}
-        title={empty ? undefined : slot.name}
-      >
-        {empty ? "Empty" : slot.name}
-      </span>
+      <Hint text={empty ? undefined : slot.name} className="min-w-0 flex-1">
+        <span
+          className="block truncate"
+          style={{
+            fontSize: "var(--amp-font-size-sm)",
+            color: empty ? "var(--amp-color-dimmed)" : undefined,
+            fontStyle: empty ? "italic" : undefined,
+            fontWeight: isActive ? 600 : 400,
+          }}
+        >
+          {empty ? "Empty" : slot.name}
+        </span>
+      </Hint>
       {isActive && (
         <Chip size="sm" color="success" className="shrink-0">
           Active
@@ -2614,11 +2564,11 @@ function PresetConfigurationTab({
     );
   }
 
-  if (firmwareFamily !== "1.1.8") {
+  if (firmwareFamily !== "1.1.8" && firmwareFamily !== "1.1.9") {
     return (
       <div className="flex h-full items-center justify-center">
         <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
-          Preset fetching requires firmware 1.1.8 (detected:{" "}
+          Preset fetching requires firmware 1.1.8 or 1.1.9 (detected:{" "}
           {firmwareFamily ?? "unknown"}).
         </span>
       </div>
@@ -2659,7 +2609,7 @@ function PresetConfigurationTab({
         className="mx-auto flex w-full min-w-0 flex-col gap-3"
         style={{ maxWidth: PRESET_LIST_MAX_WIDTH }}
       >
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <div style={{ fontWeight: 600 }}>Preset Configuration</div>
           <div className="flex flex-nowrap items-center gap-2">
             {/* The counts ride on the filter buttons themselves, which is
@@ -2745,13 +2695,37 @@ function PresetConfigurationTab({
   );
 }
 
+/** A rail tab's icon with its HeroUI tooltip. `Hint` can't wrap a `Tabs.Tab`
+ * (RAC collection), and its trigger can't sit inside the tab's own button, so
+ * this opens a standalone `Tooltip.Content` from the icon's hover instead. */
+function RailTabIcon({ label, Icon }: { label: string; Icon: ComponentType<{ size?: number }> }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <span
+        ref={ref}
+        className="flex items-center justify-center"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+      >
+        <Icon size={18} />
+      </span>
+      <Tooltip>
+        <Tooltip.Content isOpen={open} triggerRef={ref} placement="right" showArrow>
+          {label}
+        </Tooltip.Content>
+      </Tooltip>
+    </>
+  );
+}
+
 const TAB_COMPONENTS: Record<
   string,
   (props: ConfigurableTabProps) => ReactNode
 > = {
+  main: MainTab,
   routing: RoutingTab,
-  input: InputTab,
-  output: OutputTab,
 };
 
 export function AmpConfigureView({
@@ -2796,7 +2770,7 @@ export function AmpConfigureView({
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const showFingerprintMenu = usePreference("showFingerprintMenu");
   // Fallback for callers that don't own the tab themselves.
-  const [ownTab, setOwnTab] = useState<string | null>("input");
+  const [ownTab, setOwnTab] = useState<string | null>("main");
   const currentTab = activeTab ?? ownTab;
   const handleTabChange = onActiveTabChange ?? setOwnTab;
 
@@ -2860,11 +2834,6 @@ export function AmpConfigureView({
             source.onProjectUpdate,
           )
       : undefined;
-  const capabilities: ConfigureCapabilities = live
-    ? LIVE_CONFIGURE_CAPABILITIES
-    : locked
-      ? LOCKED_CONFIGURE_CAPABILITIES
-      : PROJECT_CONFIGURE_CAPABILITIES;
 
   const [mismatchOpen, setMismatchOpen] = useState(false);
   // Opens the comparison straight onto the differing rows instead of its
@@ -2934,8 +2903,13 @@ export function AmpConfigureView({
   // fetch) — hidden unless this view is reading one, not rendered disabled.
   const visibleTabs = TABS.filter((t) => {
     if (t.value === "presetConfiguration" && !live) return false;
+    // The speaker library sets up *project* outputs — a Direct Edit amp has
+    // no project to hold the references (live-only writes come later).
+    if (t.value === "speakers" && !projectSource) return false;
     return true;
   });
+  const speakerLibrary = useSpeakerLibrary();
+  const speakerStates = useSpeakerStates(projectSource?.project, projectSource?.assignment.id, speakerLibrary);
   const telemetry = live?.telemetry;
   const deviceId = live?.device.id;
   const firmwareFamily = live?.device.firmwareFamily;
@@ -2963,12 +2937,12 @@ export function AmpConfigureView({
         </div>
       )}
       {live && source?.kind === "project" && (
-        <Alert status="success" className="rounded-none py-1.5">
+        <Alert status="success" className="items-center rounded-none py-1.5">
           <Alert.Indicator>
             <Radio size={16} />
           </Alert.Indicator>
           <Alert.Content>
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2">
               <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
                 Live — linked to {live.device.name || live.device.mac}. Edits go straight to the amp; this project
                 follows.
@@ -3000,12 +2974,12 @@ export function AmpConfigureView({
           the amp having gone away — that one keeps its own Offline banner
           even while this flag is set. */}
       {disengaged && (
-        <Alert status="warning" className="rounded-none py-1.5">
+        <Alert status="warning" className="items-center rounded-none py-1.5">
           <Alert.Indicator>
             <Unplug size={16} />
           </Alert.Indicator>
           <Alert.Content>
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2">
               <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
                 Disengaged — edits stay in this project. The amp is untouched.
               </span>
@@ -3038,7 +3012,7 @@ export function AmpConfigureView({
       {/* The counterpart to the Live banner: this amp is linked to hardware
           that isn't reachable, so edits land in the plan alone. */}
       {editLock?.state === "offline" && (
-        <Alert status="default" className="rounded-none py-1.5">
+        <Alert status="default" className="items-center rounded-none py-1.5">
           <Alert.Indicator>
             <WifiOff size={16} />
           </Alert.Indicator>
@@ -3050,7 +3024,7 @@ export function AmpConfigureView({
         </Alert>
       )}
       {!live && editLock?.state === "checking" && (
-        <Alert status="default" className="rounded-none py-1.5">
+        <Alert status="default" className="items-center rounded-none py-1.5">
           <Alert.Indicator>
             <Spinner size="sm" />
           </Alert.Indicator>
@@ -3062,12 +3036,12 @@ export function AmpConfigureView({
         </Alert>
       )}
       {showsDifferences && (
-        <Alert status="danger" className="rounded-none py-1.5">
+        <Alert status="danger" className="items-center rounded-none py-1.5">
           <Alert.Indicator>
             <Lock size={16} />
           </Alert.Indicator>
           <Alert.Content>
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2">
               <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
                 {editLock?.state === "unreadable"
                   ? "Locked — the online amp's settings can't be fully compared."
@@ -3144,9 +3118,7 @@ export function AmpConfigureView({
               default's own `@layer components` rule. */}
           {visibleTabs.map(({ value, label, icon: Icon }) => (
             <Tabs.Tab key={value} id={value} aria-label={label} className="w-full min-w-0! px-0!">
-              <span title={label} className="flex items-center justify-center">
-                <Icon size={18} />
-              </span>
+              <RailTabIcon label={label} Icon={Icon} />
             </Tabs.Tab>
           ))}
         </Tabs.List>
@@ -3175,6 +3147,21 @@ export function AmpConfigureView({
               firmwareFamily={firmwareFamily}
             />
           );
+        } else if (value === "speakers" && projectSource) {
+          // Refs and statuses come from the project amp even while following
+          // the linked amp (the view's `assignment` is then built from the
+          // amp and carries none); `speakersApply` pushes values through sync.
+          content = (
+            <SpeakersTab
+              project={projectSource.project}
+              assignment={projectSource.assignment}
+              library={speakerLibrary}
+              states={speakerStates}
+              locked={locked}
+              actions={actions}
+              onProjectUpdate={projectSource.onProjectUpdate}
+            />
+          );
         } else if (!CONFIGURABLE_TABS.has(value) || !assignment || !actions) {
           content = <TabSkeleton label={label} variant={skeleton} />;
         } else if (!ampModel) {
@@ -3199,8 +3186,10 @@ export function AmpConfigureView({
               capability={capability}
               telemetry={telemetry}
               actions={actions}
-              capabilities={capabilities}
               deviceId={liveAmpDeviceId}
+              speakerStates={speakerStates}
+              onOpenSpeakers={() => handleTabChange("speakers")}
+              locked={locked}
             />
           );
         }

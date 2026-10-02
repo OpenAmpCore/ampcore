@@ -37,7 +37,7 @@ export interface ChannelTelemetry {
   inputStateRaw: number | null;
 }
 
-export const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
+const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
   inputDbv: null,
   outputLevelDb: null,
   outputVoltage: null,
@@ -68,7 +68,7 @@ function stateAt(
  * including its refusal to produce a number for a non-positive voltage or
  * reference (log of zero is `-Infinity`, which would peg a meter at the
  * floor as if it were a real reading). */
-export function voltageToDb(voltage: number | null, referenceVolts: number | null): number | null {
+function voltageToDb(voltage: number | null, referenceVolts: number | null): number | null {
   if (voltage === null || referenceVolts === null) return null;
   if (voltage <= 0 || referenceVolts <= 0) return null;
   return 20 * Math.log10(voltage / referenceVolts);
@@ -129,7 +129,7 @@ const PEAK_TO_RMS_FACTOR = Math.SQRT2;
  *
  * `null` when there's no reading or the model has no known rated voltage —
  * the same honest gap `outputLevelDb` has, and for the same reason. */
-export function limiterThresholdToDb(
+function limiterThresholdToDb(
   thresholdVolts: number | null,
   kind: "rms" | "peak",
   ratedRmsVoltage: number | null,
@@ -155,11 +155,11 @@ export const FALLBACK_LIMITER: Limiter = {
  * `vibrantColor`), so the lines read as belonging to the same scale they're
  * drawn on rather than as arbitrary UI accents. Fixed regardless of the
  * user's accent colour, like every other status colour in this app. */
-export const RMS_THRESHOLD_COLOR = "rgb(255, 237, 31)";
-export const PEAK_THRESHOLD_COLOR = "rgb(255, 28, 28)";
+const RMS_THRESHOLD_COLOR = "rgb(255, 237, 31)";
+const PEAK_THRESHOLD_COLOR = "rgb(255, 28, 28)";
 /** Shaded operating bands sit under the fill, so they have to stay readable
  * through the unlit track without competing with the bar itself. */
-export const THRESHOLD_ZONE_OPACITY = 0.5;
+const THRESHOLD_ZONE_OPACITY = 0.5;
 /** Left/right halves of the track, used only while the two threshold lines
  * would otherwise occlude each other (see `buildLimiterThresholdVisuals`'s
  * `pixelsPerDb` parameter). */

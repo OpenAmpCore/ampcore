@@ -75,6 +75,9 @@ pub struct ChannelConfig {
     /// verify on hardware).
     pub load_ohms: f32,
     pub backup_priority: BackupPriority,
+    /// Output gate threshold (dBu), written by FC=87. 1.1.9 only
+    /// (`channel_config_v119`); `None` on 1.1.8, which stores none.
+    pub noise_gate_threshold_dbu: Option<i8>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -108,9 +111,13 @@ pub struct ChannelConfigSnapshot {
 /// the reassembled frame with StructHeader and checksum already stripped,
 /// channel 0 starting at offset 0 (the driver does this slicing before
 /// calling in — see `driver.rs`).
-pub fn parse_channel_config(firmware_family: Option<&str>, body: &[u8]) -> Option<ChannelConfigSnapshot> {
-    if !super::protocol::is_known_family(firmware_family) {
-        return None;
+///
+/// `output_channels` is FC=0's authoritative count — the body count can be
+/// higher (see `channel_config_v118::parse_channel_config`).
+pub fn parse_channel_config(firmware_family: Option<&str>, body: &[u8], output_channels: u32) -> Option<ChannelConfigSnapshot> {
+    match firmware_family {
+        Some("1.1.8") => super::channel_config_v118::parse_channel_config(body, output_channels),
+        Some("1.1.9") => super::channel_config_v119::parse_channel_config(body, output_channels),
+        _ => None,
     }
-    super::channel_config_v118::parse_channel_config(body)
 }

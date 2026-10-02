@@ -1,6 +1,7 @@
 mod commands;
 mod data;
 mod live;
+mod web_server;
 
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
@@ -14,14 +15,15 @@ use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_lis
 use commands::capability::{amp_capability_resolve, eq_response_curve};
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::fingerprint::{
-    fingerprint_live_device, fingerprint_live_device_with_fir, fingerprint_live_devices, fingerprint_project,
+    fingerprint_live_device, fingerprint_live_devices, fingerprint_project,
     fingerprint_project_amp,
 };
 use commands::live_control::{
     live_control_fetch_bridge, live_control_fetch_channel_fir, live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
     live_control_get_telemetry, live_control_list_devices, live_control_recall_preset, live_control_refresh_now,
     live_control_store_preset, live_control_get_bridge, live_control_set_matrix_crosspoint, live_control_set_channel_noise_gate,
-    live_control_set_channel_limiter, live_control_set_channel_name, live_control_set_channel_source,
+    live_control_set_channel_limiter, live_control_copy_channel_section, live_control_paste_channel_section,
+    live_control_set_channel_name, live_control_set_channel_source,
     live_control_set_output_bridge,
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
@@ -33,28 +35,26 @@ use commands::live_control::{
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
     projects_remove_amp_assignment, projects_set_amp_device_name, projects_set_amp_model, projects_set_channel_delay_in,
-    projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_set_channel_name,
+    projects_set_channel_fir, projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_copy_channel_section,
+    projects_paste_channel_section, projects_set_channel_name,
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
     projects_set_channel_source, projects_set_crossover_slot, projects_set_eq_band,
     projects_set_matrix_crosspoint, projects_set_output_bridge, projects_update,
     projects_set_source_trim, projects_set_backup_priority,
 };
+use commands::speakers::{
+    projects_set_channel_speaker, speakers_apply, speakers_channel_states, speakers_delete, speakers_fit, speakers_import_profiles, speakers_list,
+    speakers_save_from_outputs, speakers_update_details, speakers_update_from_output,
+};
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
-
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-#[specta::specta]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+use web_server::{web_server_set, WebServerState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let specta_builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
-            greet,
             projects_list,
             projects_get,
             projects_create,
@@ -75,13 +75,26 @@ pub fn run() {
             projects_set_crossover_slot,
             projects_set_eq_band,
             projects_set_channel_limiter,
+            projects_copy_channel_section,
+            projects_paste_channel_section,
             projects_set_channel_noise_gate,
             projects_set_channel_phase_invert,
             projects_set_channel_name,
             projects_set_channel_output_mute,
             projects_set_channel_fir_bypass,
+            projects_set_channel_fir,
             projects_set_output_bridge,
             projects_set_channel_power_mode,
+            projects_set_channel_speaker,
+            speakers_apply,
+            speakers_list,
+            speakers_import_profiles,
+            speakers_fit,
+            speakers_update_details,
+            speakers_delete,
+            speakers_save_from_outputs,
+            speakers_update_from_output,
+            speakers_channel_states,
             amp_capability_resolve,
             eq_response_curve,
             amp_models_list,
@@ -105,6 +118,8 @@ pub fn run() {
             live_control_set_matrix_crosspoint,
             live_control_set_channel_noise_gate,
             live_control_set_channel_limiter,
+            live_control_copy_channel_section,
+            live_control_paste_channel_section,
             live_control_set_channel_name,
             live_control_set_channel_source,
             live_control_set_source_trim,
@@ -128,7 +143,6 @@ pub fn run() {
             fingerprint_project_amp,
             fingerprint_project,
             fingerprint_live_device,
-            fingerprint_live_device_with_fir,
             fingerprint_live_devices,
             projects_validate_amp_link,
             projects_link_amp,
@@ -141,6 +155,7 @@ pub fn run() {
             live_control_set_rotary_lock,
             live_control_set_standby,
             live_control_set_device_name,
+            web_server_set,
         ]);
 
     #[cfg(debug_assertions)]
@@ -158,6 +173,7 @@ pub fn run() {
                 .expect("failed to load project data store");
             app.manage(project_data);
             app.manage(LiveDeviceState::new());
+            app.manage(WebServerState::default());
             Ok(())
         })
         .plugin(tauri_plugin_process::init())

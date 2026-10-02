@@ -138,11 +138,10 @@ pub struct AmpParamRanges {
     pub channel_name_max_length: u32,
 }
 
-/// Constant across the whole CVR product line today (the old app didn't vary
-/// these per model/firmware either). Returned per-resolve rather than
-/// exported as raw constants so a future per-model or per-vNum override
-/// doesn't change `AmpCapability`'s shape.
-pub fn cvr_param_ranges() -> AmpParamRanges {
+/// Constant across the CVR product line except where `firmware` says
+/// otherwise: `extended_delay` (1.1.9+) raises the input delay to 300 ms, as
+/// the vendor's `TecnareInput_119.LoadVN119` does (its default is 100).
+pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
     AmpParamRanges {
         matrix_gain_db: ParamRange {
             min: -80.0,
@@ -158,7 +157,7 @@ pub fn cvr_param_ranges() -> AmpParamRanges {
         },
         delay_in_ms: ParamRange {
             min: 0.0,
-            max: 100.0,
+            max: if firmware.extended_delay { 300.0 } else { 100.0 },
         },
         delay_out_ms: ParamRange {
             min: 0.0,
@@ -338,10 +337,26 @@ pub fn builtin_topology(model: &str, channel_count: u32, is_dante: bool) -> AmpD
 }
 
 pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> AmpCapability {
+    let firmware = CvrFirmwareCapability::from_version(firmware_version);
     AmpCapability {
         topology: model.topology.clone(),
-        firmware: CvrFirmwareCapability::from_version(firmware_version),
-        param_ranges: cvr_param_ranges(),
+        firmware,
+        param_ranges: cvr_param_ranges(&firmware),
         eq_filter_capabilities: super::eq_filter_capabilities(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1.1.9 raises the input delay ceiling to 300 ms (vendor
+    /// `TecnareInput_119.LoadVN119`); earlier firmware stays at 100.
+    #[test]
+    fn input_delay_range_follows_firmware() {
+        let max = |fw: &str| cvr_param_ranges(&CvrFirmwareCapability::from_version(Some(fw))).delay_in_ms.max;
+        assert_eq!(max("1.1.8"), 100.0);
+        assert_eq!(max("1.1.9"), 300.0);
+        assert_eq!(max("43424B06-106119-DSP-3004D"), 300.0);
     }
 }

@@ -34,14 +34,17 @@
 //!
 //! Pure status — standby, the last recalled preset's name, the front-panel
 //! knob lock — is carried in `AmpFingerprint.status` and shown, never hashed.
-//! FIR filter stats — the filter's name, effective tap count and zero-time —
-//! are shown, never hashed, and only when a caller has explicitly enriched the
-//! fingerprint via `attach_fir_stats`. They cannot be hashed while FIR
-//! coefficients are read-only and absent from the project file: a live amp with
-//! a filter loaded could never match its offline twin, which would lock the
-//! editor on a difference no push could resolve. Not covered at all: the FIR
-//! coefficients themselves (not in FC=27), the noise-gate threshold (no 1.1.8
-//! readback), MAC/IP (identity, not config).
+//!
+//! **FIR.** Each output's FIR taps are part of its speaker hash. They are the
+//! one hashed setting that isn't in FC=27: the project stores them
+//! (`AmpChannel.fir`), and the live side takes them from the driver's own
+//! FC=43 reads (`LiveDeviceInner.fir`). An output the driver hasn't read yet
+//! is unreadable, like an unreported bridge pair. The filter's *name* is
+//! shown, never hashed — an amp answering with the nameless reply form can't
+//! report one. Firmware without FIR hashes a unit impulse on both sides.
+//! Not covered at all: MAC/IP (identity, not config).
+//! The noise-gate threshold is hashed only where the firmware stores it (1.1.9+,
+//! read back by `channel_config_v119`) and only while the gate is on.
 //!
 //! **What the JSON shows vs. what is hashed.** The JSON shows what the amp
 //! actually stores, in natural units, including a bypassed band's or a
@@ -69,7 +72,7 @@ use serde::Serialize;
 use specta::Type;
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
-use super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
+use super::capability::{resolve, CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use super::device_link::{resolve_device_model, DeviceModelLink};
 use super::project::{
     AmpAssignment, AmpChannel, BackupPriority, ChannelEq, ChannelSource, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint,
@@ -77,8 +80,8 @@ use super::project::{
 };
 use crate::live::cvr::bridge::DeviceBridgeSnapshot;
 use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot};
-use crate::live::cvr::fir::ChannelFirSnapshot;
-use crate::live::cvr::protocol::detect_firmware_family;
+use crate::live::cvr::fir::{fir_order, fir_time_zero, taps_summary, trimmed_taps, ChannelFirSnapshot};
+use crate::live::cvr::protocol::{detect_firmware_family, is_known_family};
 use crate::live::state::DiscoveredDevice;
 
 /// First byte of every hash input. Bump whenever the canonicalization rules,
@@ -110,7 +113,11 @@ use crate::live::state::DiscoveredDevice;
 ///
 /// 10: AES3 removed (no supported model has it), dropping its trim/delay pair
 /// from every channel's digest.
-pub const FINGERPRINT_VERSION: u8 = 10;
+///
+/// 11: noise-gate threshold added (1.1.9+ only, while the gate is on).
+///
+/// 12: FIR taps added to the speaker hash.
+pub const FINGERPRINT_VERSION: u8 = 12;
 
 /// `_XXXX` — separator plus 4 hex chars appended to an output name.
 pub const HASH_SUFFIX_LEN: usize = 5;
@@ -281,6 +288,9 @@ pub struct ChannelAmpCanonical {
     pub output_trim_db: f64,
     pub output_volume_db: f64,
     pub noise_gate_enabled: bool,
+    /// Whole dBu. `None` when the firmware stores no threshold (1.1.8) or the
+    /// gate is off, where it doesn't affect the sound.
+    pub noise_gate_threshold_dbu: Option<f64>,
     /// Trimmed; empty when unnamed or still the default "In{n}" label.
     pub input_name: String,
     pub input_muted: bool,
@@ -293,41 +303,41 @@ pub struct ChannelAmpCanonical {
     pub backup_priority: BackupPriority,
 }
 
-/// Derived FIR facts for one output channel — shown for context, never hashed
-/// (see the module doc comment). Deliberately excludes the 512 coefficients:
-/// this is what a reader needs to tell two filters apart, not the filter.
+/// One output's FIR filter as the fingerprint shows it. Deliberately excludes
+/// the 512 coefficients: `summary` is what tells two filters apart.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelFirStats {
     /// `false` when the channel holds the unit impulse an empty channel keeps
-    /// (`order == 1`) — i.e. no real filter is loaded.
+    /// — i.e. no real filter is loaded.
     pub loaded: bool,
-    /// `None` when the amp replied with the 2048-byte nameless form.
+    /// Shown, never hashed. `None` when the amp replied with the 2048-byte
+    /// nameless form.
     pub name: Option<String>,
     /// Taps minus trailing zeros — the vendor's "Order: N Taps".
     pub order: u32,
     pub time_zero_ms: f64,
+    /// "N taps · checksum" (`fir::taps_summary`): equal exactly when the
+    /// hashed taps are.
+    pub summary: String,
 }
 
-/// Fills in `ChannelFingerprint.fir` from FC=43 reads, matched on channel
-/// index. Callers fetch the snapshots themselves — see `commands::fingerprint`.
-///
-/// Deliberately infallible, and deliberately never touches `missing`: a
-/// non-empty `missing` forces `amp_hash` to `None`, which would turn a FIR read
-/// that simply wasn't attempted into an unreadable amp and lock the editor. A
-/// channel with no snapshot just keeps `None`.
-pub fn attach_fir_stats(fingerprint: &mut AmpFingerprint, snapshots: &[ChannelFirSnapshot]) {
-    for snapshot in snapshots {
-        let Some(channel) = fingerprint.channels.iter_mut().find(|c| c.channel_index == snapshot.channel_index)
-        else {
-            continue;
-        };
-        channel.fir = Some(ChannelFirStats {
-            loaded: snapshot.order > 1,
-            name: snapshot.name.clone(),
-            order: snapshot.order,
-            time_zero_ms: snapshot.time_zero_ms,
-        });
+/// An output's FIR as both sides reduce to it.
+struct FirInput<'a> {
+    name: Option<&'a str>,
+    coefficients: &'a [f32],
+}
+
+/// What a channel without FIR hardware, or with nothing loaded, holds.
+const NO_FIR: FirInput<'static> = FirInput { name: None, coefficients: &[1.0] };
+
+fn fir_stats(fir: &FirInput) -> ChannelFirStats {
+    ChannelFirStats {
+        loaded: trimmed_taps(fir.coefficients) != [1.0],
+        name: fir.name.map(str::trim).filter(|n| !n.is_empty() && *n != "---").map(String::from),
+        order: fir_order(fir.coefficients),
+        time_zero_ms: fir_time_zero(fir.coefficients).1,
+        summary: taps_summary(fir.coefficients),
     }
 }
 
@@ -345,9 +355,8 @@ pub struct ChannelFingerprint {
     pub embedded_hash_matches: Option<bool>,
     pub speaker: SpeakerCanonical,
     pub amp_fields: ChannelAmpCanonical,
-    /// `None` unless a caller enriched this fingerprint with `attach_fir_stats`
-    /// — FIR needs its own FC=43 round trip per channel, so the ordinary
-    /// synchronous paths never populate it.
+    /// `None` only for a live output whose FIR the driver hasn't read yet
+    /// (also listed in `missing`).
     pub fir: Option<ChannelFirStats>,
 }
 
@@ -388,6 +397,8 @@ struct ChannelInput<'a> {
     output_eq: &'a ChannelEq,
     limiter: &'a Limiter,
     noise_gate_enabled: bool,
+    /// `None` where the firmware stores no threshold.
+    noise_gate_threshold_dbu: Option<f64>,
     output_phase_inverted: bool,
     input_name: Option<&'a str>,
     output_name: Option<&'a str>,
@@ -398,6 +409,8 @@ struct ChannelInput<'a> {
     input_muted: bool,
     output_muted: bool,
     fir_bypassed: bool,
+    /// `None` = a live output not read yet.
+    fir: Option<FirInput<'a>>,
     load_ohms: f64,
     source_trims: SourceTrims,
     backup_priority: BackupPriority,
@@ -410,7 +423,10 @@ struct AmpInput<'a> {
 }
 
 impl<'a> ChannelInput<'a> {
-    fn from_project(channel: &'a AmpChannel) -> Self {
+    /// `has_gate_threshold`: whether the planned firmware stores a gate
+    /// threshold at all (`CvrFirmwareCapability.noise_gate_threshold`);
+    /// `has_fir`: whether it has FIR filters at all.
+    fn from_project(channel: &'a AmpChannel, has_gate_threshold: bool, has_fir: bool) -> Self {
         Self {
             channel_index: channel.channel_index,
             source: Some(channel.source),
@@ -424,6 +440,7 @@ impl<'a> ChannelInput<'a> {
             output_eq: &channel.output_eq,
             limiter: &channel.limiter,
             noise_gate_enabled: channel.noise_gate_enabled,
+            noise_gate_threshold_dbu: has_gate_threshold.then_some(channel.noise_gate_threshold_dbu),
             output_phase_inverted: channel.output_phase_inverted,
             input_name: channel.input_name.as_deref(),
             output_name: channel.output_name.as_deref(),
@@ -432,13 +449,18 @@ impl<'a> ChannelInput<'a> {
             input_muted: channel.input_muted,
             output_muted: channel.output_muted,
             fir_bypassed: channel.fir_bypassed,
+            fir: Some(if has_fir {
+                FirInput { name: Some(&channel.fir.name), coefficients: &channel.fir.coefficients }
+            } else {
+                NO_FIR
+            }),
             load_ohms: channel.ohms,
             source_trims: channel.source_trims,
             backup_priority: channel.backup_priority,
         }
     }
 
-    fn from_live(config: &'a ChannelConfig, bridged: Option<bool>) -> Self {
+    fn from_live(config: &'a ChannelConfig, bridged: Option<bool>, fir: Option<FirInput<'a>>) -> Self {
         Self {
             channel_index: config.channel_index,
             source: config.source,
@@ -452,6 +474,7 @@ impl<'a> ChannelInput<'a> {
             output_eq: &config.output_eq,
             limiter: &config.limiter,
             noise_gate_enabled: config.noise_gate_enabled,
+            noise_gate_threshold_dbu: config.noise_gate_threshold_dbu.map(f64::from),
             output_phase_inverted: config.output_phase_inverted,
             input_name: config.input_name.as_deref(),
             output_name: config.output_name.as_deref(),
@@ -460,6 +483,7 @@ impl<'a> ChannelInput<'a> {
             input_muted: config.input_muted,
             output_muted: config.output_muted,
             fir_bypassed: config.fir_bypassed,
+            fir,
             load_ohms: config.load_ohms as f64,
             source_trims: SourceTrims {
                 analog: SourceTrim { trim_db: config.analog_trim_db as f64, delay_ms: config.analog_delay_ms as f64 },
@@ -510,7 +534,10 @@ pub fn fingerprint_project_amp(
         mac: assignment.mac.clone(),
         label: assignment.device_name.clone(),
     };
-    let inputs = channels.into_iter().map(ChannelInput::from_project).collect();
+    let firmware = model.map(|m| resolve(m, assignment.firmware_version.as_deref()).firmware);
+    let has_gate_threshold = firmware.as_ref().is_some_and(|f| f.noise_gate_threshold);
+    let has_fir = firmware.as_ref().is_some_and(|f| f.fir_filters);
+    let inputs = channels.into_iter().map(|c| ChannelInput::from_project(c, has_gate_threshold, has_fir)).collect();
     let amp_input = AmpInput {
         device_name: assignment.device_name.as_deref(),
         status: AmpStatus::default(),
@@ -518,10 +545,13 @@ pub fn fingerprint_project_amp(
     build(origin, identity, matrix_input_count, amp_input, inputs, missing)
 }
 
+/// `fir` is what the driver has read of this device's FIR filters (FC=43),
+/// one snapshot per output it has reached so far.
 pub fn fingerprint_live_device(
     device: &DiscoveredDevice,
     snapshot: &ChannelConfigSnapshot,
     bridge: Option<&DeviceBridgeSnapshot>,
+    fir: &[ChannelFirSnapshot],
     models: &[AmpModelCatalogEntry],
     links: &[DeviceModelLink],
 ) -> AmpFingerprint {
@@ -557,12 +587,21 @@ pub fn fingerprint_live_device(
         mac: Some(device.mac.clone()),
         label: Some(device.name.clone()).filter(|n| !n.trim().is_empty()),
     };
+    // The same gate every FIR command uses (`require_fir_firmware`).
+    let has_fir = is_known_family(device.firmware_family.as_deref());
     let inputs = configs
         .into_iter()
         .map(|c| {
             let pair = (c.channel_index / 2) as usize;
             let bridged = bridge.and_then(|b| b.bridged.get(pair).copied().flatten());
-            ChannelInput::from_live(c, bridged)
+            let fir = if has_fir {
+                fir.iter()
+                    .find(|f| f.channel_index == c.channel_index)
+                    .map(|f| FirInput { name: f.name.as_deref(), coefficients: &f.coefficients })
+            } else {
+                Some(NO_FIR)
+            };
+            ChannelInput::from_live(c, bridged, fir)
         })
         .collect();
     let amp_input = AmpInput {
@@ -605,14 +644,24 @@ fn build(
         let label = output_letter(input.channel_index);
 
         let speaker = canonical_speaker(input);
-        let speaker_hash = if speaker.power_mode.is_some() {
+        if speaker.power_mode.is_none() {
+            missing.push(format!("Out{label}: power mode not readable"));
+        }
+        if input.fir.is_none() {
+            missing.push(format!("Out{label}: FIR filter not read yet"));
+        }
+        let speaker_hash = input.fir.as_ref().filter(|_| speaker.power_mode.is_some()).map(|fir| {
             let mut h = HashInput::new();
             encode_speaker(&mut h, &speaker);
-            Some(crc16_xmodem(&h.0))
-        } else {
-            missing.push(format!("Out{label}: power mode not readable"));
-            None
-        };
+            // Raw bits, not rounded steps: taps are stored, sent and read
+            // back as the same f32s.
+            let taps = trimmed_taps(fir.coefficients);
+            h.u32(taps.len() as u32);
+            for tap in taps {
+                h.u32(tap.to_bits());
+            }
+            crc16_xmodem(&h.0)
+        });
 
         if !input.source_readable {
             missing.push(format!("In{}: source selection not readable", input.channel_index + 1));
@@ -640,7 +689,7 @@ fn build(
             embedded_hash_matches,
             speaker,
             amp_fields,
-            fir: None,
+            fir: input.fir.as_ref().map(fir_stats),
         });
     }
 
@@ -716,7 +765,7 @@ fn canonical_band(band: &EqBand) -> EqBandCanonical {
     }
 }
 
-fn canonical_eq(eq: &ChannelEq) -> EqCanonical {
+pub(crate) fn canonical_eq(eq: &ChannelEq) -> EqCanonical {
     EqCanonical {
         hp: canonical_crossover(&eq.hp),
         bands: eq.bands.iter().map(canonical_band).collect(),
@@ -777,6 +826,10 @@ fn canonical_amp_fields(input: &ChannelInput, matrix_input_count: u32) -> Channe
         output_trim_db: round_to_step(input.output_trim_db, GAIN_STEPS),
         output_volume_db: round_to_step(input.output_volume_db, GAIN_STEPS),
         noise_gate_enabled: input.noise_gate_enabled,
+        noise_gate_threshold_dbu: input
+            .noise_gate_threshold_dbu
+            .filter(|_| input.noise_gate_enabled)
+            .map(|t| round_to_step(t, WHOLE_STEPS)),
         input_name: canonical_input_name(input.channel_index, input.input_name),
         input_muted: input.input_muted,
         output_muted: input.output_muted,
@@ -1016,6 +1069,7 @@ fn encode_channel_amp(h: &mut HashInput, channel_index: u32, speaker_hash: u16, 
     h.i32(steps(fields.output_trim_db, GAIN_STEPS));
     h.i32(steps(fields.output_volume_db, GAIN_STEPS));
     h.bool(fields.noise_gate_enabled);
+    h.opt_i32(fields.noise_gate_threshold_dbu.map(|t| steps(t, WHOLE_STEPS)));
     h.str(&fields.input_name);
     h.bool(fields.input_muted);
     h.bool(fields.output_muted);
@@ -1091,7 +1145,7 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
-fn format_crossover(slot: &CrossoverCanonical) -> String {
+pub(crate) fn format_crossover(slot: &CrossoverCanonical) -> String {
     if slot.active {
         format!("{:?} · {:.1} Hz", slot.filter_type, slot.freq_hz)
     } else {
@@ -1099,7 +1153,7 @@ fn format_crossover(slot: &CrossoverCanonical) -> String {
     }
 }
 
-fn format_band(band: &EqBandCanonical) -> String {
+pub(crate) fn format_band(band: &EqBandCanonical) -> String {
     if !band.active {
         return "bypassed".to_string();
     }
@@ -1156,7 +1210,11 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Source", source);
         eq_entries(&mut out, &group, "Input EQ", &fields.input_eq);
         push_entry(&mut out, &group, "Input delay", format!("{:.2} ms", fields.delay_in_ms));
-        push_entry(&mut out, &group, "Noise gate", if fields.noise_gate_enabled { "on" } else { "off" });
+        let gate = match (fields.noise_gate_enabled, fields.noise_gate_threshold_dbu) {
+            (true, Some(threshold)) => format!("on · {threshold:+.0} dBu"),
+            (enabled, _) => on_off(enabled).to_string(),
+        };
+        push_entry(&mut out, &group, "Noise gate", gate);
         let name = if fields.input_name.is_empty() { "(default)".to_string() } else { fields.input_name.clone() };
         push_entry(&mut out, &group, "Name", name);
         push_entry(&mut out, &group, "Mute", on_off(fields.input_muted));
@@ -1221,16 +1279,10 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Power mode", power_mode);
         push_entry(&mut out, &group, "Load", format!("{:.1} Ω", speaker.load_ohms));
         push_entry(&mut out, &group, "FIR", if speaker.fir_bypassed { "bypassed" } else { "active" });
-        if let Some(fir) = &channel.fir {
-            let value = if fir.loaded {
-                let name = fir.name.as_deref().unwrap_or("").trim();
-                let prefix = if name.is_empty() { String::new() } else { format!("{name} · ") };
-                format!("{prefix}{} taps · zero {:.3} ms", fir.order, fir.time_zero_ms)
-            } else {
-                "none loaded".to_string()
-            };
-            push_info(&mut out, &group, "FIR filter", value);
-        }
+        let fir = channel.fir.as_ref();
+        push_entry(&mut out, &group, "FIR filter", fir.map_or("not read yet".to_string(), |f| f.summary.clone()));
+        // The name is a label an amp may not even report — see the module doc.
+        push_info(&mut out, &group, "FIR name", fir.and_then(|f| f.name.clone()).unwrap_or_else(|| "—".to_string()));
     }
 
     if fp.origin.kind == FingerprintSource::Online {
@@ -1343,16 +1395,6 @@ pub fn split_hash_suffix(name: &str) -> (&str, Option<String>) {
     (name, None)
 }
 
-/// Builds `"<base>_<hash>"`, truncating the base so the whole name fits
-/// `name_max_len` bytes (`AmpParamRanges.channel_name_max_length`). Non-ASCII
-/// characters are dropped — the device name field is ASCII only.
-#[allow(dead_code)] // used once the name-write step of the online/offline phase lands
-pub fn embed_hash_in_name(base: &str, hash: &str, name_max_len: usize) -> String {
-    let base_max = name_max_len.saturating_sub(HASH_SUFFIX_LEN);
-    let base: String = base.trim().chars().filter(|c| c.is_ascii()).take(base_max).collect();
-    format!("{base}_{hash}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::project::{PeakLimiter, RmsLimiter};
@@ -1396,6 +1438,7 @@ mod tests {
             output_eq: eq,
             limiter,
             noise_gate_enabled: false,
+            noise_gate_threshold_dbu: None,
             output_phase_inverted: false,
             input_name: None,
             output_name: None,
@@ -1404,6 +1447,7 @@ mod tests {
             input_muted: false,
             output_muted: false,
             fir_bypassed: false,
+            fir: Some(NO_FIR),
             load_ohms: 8.0,
             source_trims: SourceTrims::default(),
             backup_priority: BackupPriority::default(),
@@ -1438,57 +1482,48 @@ mod tests {
         build(origin, identity, matrix_input_count, no_amp_settings(), inputs, Vec::new()).amp_hash
     }
 
-    /// The one real corruption vector: FIR stats are shown but must never
-    /// reach the reduce path, or every existing hash comparison shifts.
+    /// FIR taps are hashed bit for bit, minus the wire's zero padding; the
+    /// name is a label; and an output nobody has read makes the amp
+    /// unreadable rather than guessed at.
     #[test]
-    fn attaching_fir_stats_leaves_every_hash_untouched() {
+    fn fir_taps_are_hashed_and_the_name_is_not() {
         let limiter = limiter();
         let eq = eq(0.1, 1.41);
-        let origin = FingerprintOrigin {
-            kind: FingerprintSource::Offline,
-            project_id: None,
-            assignment_id: None,
-            device_id: None,
-            mac: None,
-            label: None,
-        };
-        let identity = AmpIdentity {
-            model: Some("DSP-1002".to_string()),
-            amp_model_id: None,
-            channel_count: 1,
-            firmware_family: Some("1.1.8".to_string()),
-        };
-        let mut fp =
-            build(origin, identity, 0, no_amp_settings(), vec![input(&eq, &limiter, 2.35)], Vec::new());
-        let before_amp = fp.amp_hash.clone();
-        let before_speaker: Vec<_> = fp.channels.iter().map(|c| c.speaker_hash.clone()).collect();
+        let with = |fir: Option<FirInput<'static>>| amp_hash(vec![ChannelInput { fir, ..input(&eq, &limiter, 0.0) }], 0);
+        let fir = |name: Option<&'static str>, coefficients: &'static [f32]| Some(FirInput { name, coefficients });
 
-        let snapshot = |order: u32| ChannelFirSnapshot {
-            channel_index: 0,
-            name: Some("lowpass".to_string()),
-            sample_rate_hz: 48_000,
-            max_taps: 512,
-            order,
-            time_zero_index: 256,
-            time_zero_ms: 5.333,
-            coefficients: vec![0.0; 512],
-            body_len: 2080,
-            received_at: 0.0,
+        let base = with(fir(Some("top"), &[0.5, 0.25]));
+        assert!(base.is_some());
+        assert_eq!(base, with(fir(None, &[0.5, 0.25, 0.0, 0.0])), "padding and a missing name change nothing");
+        assert_eq!(base, with(fir(Some("other"), &[0.5, 0.25])), "the name is not hashed");
+        assert_ne!(base, with(fir(Some("top"), &[0.5, 0.250_000_03])), "one tap, one bit");
+        assert_ne!(base, with(Some(NO_FIR)));
+        assert_eq!(with(None), None, "an unread FIR is unreadable, not a default");
+
+        let stats = fir_stats(&FirInput { name: Some("---"), coefficients: &[1.0, 0.0] });
+        assert!(!stats.loaded && stats.name.is_none() && stats.summary == "none");
+    }
+
+    /// The 1.1.9 gate threshold counts only while the gate is on, and a
+    /// firmware without one (`None`) hashes the same whatever the project holds.
+    #[test]
+    fn gate_threshold_is_hashed_only_where_stored_and_while_on() {
+        let limiter = limiter();
+        let eq = eq(0.1, 1.41);
+        let gate = |enabled: bool, threshold: Option<f64>| ChannelInput {
+            noise_gate_enabled: enabled,
+            noise_gate_threshold_dbu: threshold,
+            ..input(&eq, &limiter, 0.0)
         };
 
-        attach_fir_stats(&mut fp, &[snapshot(257)]);
-        let stats = fp.channels[0].fir.as_ref().expect("channel 0 enriched");
-        assert!(stats.loaded);
-        assert_eq!(stats.order, 257);
-
-        assert_eq!(fp.amp_hash, before_amp);
-        assert_eq!(fp.channels.iter().map(|c| c.speaker_hash.clone()).collect::<Vec<_>>(), before_speaker);
-        // Enriching must never make the amp look unreadable.
-        assert!(fp.missing.is_empty());
-
-        // A channel holding only the unit impulse has no filter loaded.
-        attach_fir_stats(&mut fp, &[snapshot(1)]);
-        assert!(!fp.channels[0].fir.as_ref().unwrap().loaded);
+        assert_ne!(amp_hash(vec![gate(true, Some(-40.0))], 0), amp_hash(vec![gate(true, Some(-30.0))], 0));
+        assert_eq!(amp_hash(vec![gate(false, Some(-40.0))], 0), amp_hash(vec![gate(false, Some(-30.0))], 0));
+        assert_eq!(
+            amp_hash(vec![gate(true, Some(-40.0))], 0),
+            amp_hash(vec![gate(true, Some(-40.2))], 0),
+            "whole dBu, as the wire stores it"
+        );
+        assert_ne!(amp_hash(vec![gate(true, None)], 0), amp_hash(vec![gate(true, Some(-40.0))], 0));
     }
 
     #[test]
@@ -1634,11 +1669,8 @@ mod tests {
     }
 
     #[test]
-    fn name_suffix_round_trip() {
-        let name = embed_hash_in_name("  Top Left Speaker ", "A91C", 16);
-        assert_eq!(name, "Top Left Sp_A91C");
-        assert_eq!(name.len(), 16);
-        assert_eq!(split_hash_suffix(&name), ("Top Left Sp", Some("A91C".to_string())));
+    fn name_suffix_split() {
+        assert_eq!(split_hash_suffix("Top Left Sp_A91C"), ("Top Left Sp", Some("A91C".to_string())));
         assert_eq!(split_hash_suffix("Sub_a91c").1.as_deref(), Some("A91C"));
         assert_eq!(split_hash_suffix("Sub_XYZ1"), ("Sub_XYZ1", None));
         assert_eq!(split_hash_suffix("Sub"), ("Sub", None));

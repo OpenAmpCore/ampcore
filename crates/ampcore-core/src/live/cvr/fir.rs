@@ -100,6 +100,13 @@ pub struct ChannelFirSnapshot {
     pub received_at: f64,
 }
 
+impl ChannelFirSnapshot {
+    /// `"name" N taps · checksum`, for a log line.
+    pub fn describe(&self) -> String {
+        format!("\"{}\" {}", self.name.as_deref().unwrap_or("(nameless reply)"), taps_summary(&self.coefficients))
+    }
+}
+
 /// The FIR read carries no body at all. A named function rather than a bare
 /// `Vec::new()` at the call site so the emptiness reads as the vendor's
 /// documented request shape and not as an oversight.
@@ -119,12 +126,31 @@ fn decode_name_field(field: &[u8]) -> String {
 /// backwards from 512 while the coefficient is exactly `0f`. An amp with no
 /// filter loaded holds a unit impulse (`[1.0, 0, 0, ...]`) and so reports 1 —
 /// which is what the vendor's "Order: 1 Taps" means on an empty channel.
-fn fir_order(coefficients: &[f32]) -> u32 {
-    let mut order = coefficients.len();
-    while order > 0 && coefficients[order - 1] == 0.0 {
-        order -= 1;
+pub(crate) fn fir_order(coefficients: &[f32]) -> u32 {
+    trimmed_taps(coefficients).len() as u32
+}
+
+/// The taps without their trailing zeros — what identifies a filter: the
+/// wire always pads to `FIR_MAX_TAPS`, a stored one need not.
+pub fn trimmed_taps(coefficients: &[f32]) -> &[f32] {
+    let len = coefficients.iter().rposition(|&c| c != 0.0).map_or(0, |i| i + 1);
+    &coefficients[..len]
+}
+
+/// "N taps · checksum" for a filter, "none" for the unit impulse an empty
+/// output holds. Equal exactly when the trimmed taps are bit-identical, which
+/// is also what the fingerprint hashes.
+pub fn taps_summary(coefficients: &[f32]) -> String {
+    use std::hash::{Hash, Hasher};
+    let taps = trimmed_taps(coefficients);
+    if taps == [1.0] {
+        return "none".to_string();
     }
-    order as u32
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tap in taps {
+        tap.to_bits().hash(&mut hasher);
+    }
+    format!("{} taps · {:08x}", taps.len(), hasher.finish() as u32)
 }
 
 /// Index of the largest-magnitude tap, and that index as milliseconds at
@@ -136,7 +162,7 @@ fn fir_order(coefficients: &[f32]) -> u32 {
 /// `IndexOf`. (The prior web port uses a strict `>` on the absolute value,
 /// which differs from this only when a filter's largest positive and largest
 /// negative taps have exactly equal magnitude.)
-fn fir_time_zero(coefficients: &[f32]) -> (u32, f64) {
+pub(crate) fn fir_time_zero(coefficients: &[f32]) -> (u32, f64) {
     let mut max_value = f32::NEG_INFINITY;
     let mut min_value = f32::INFINITY;
     for &c in coefficients {

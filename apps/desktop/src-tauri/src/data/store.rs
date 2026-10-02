@@ -8,6 +8,7 @@ use ampcore_core::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use ampcore_core::data::capability::cvr::builtin_topology;
 use ampcore_core::data::device_link::DeviceModelLink;
 use ampcore_core::data::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
+use ampcore_core::data::speaker::SpeakerLibraryEntry;
 
 /// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
 /// here are infrequent and user-paced (not a polling loop), so a single
@@ -20,6 +21,9 @@ pub struct ProjectDataInner {
     pub projects: Vec<Project>,
     pub amp_models: Vec<AmpModelCatalogEntry>,
     pub device_model_links: Vec<DeviceModelLink>,
+    /// This machine's speaker library (`speakers.json`), shared by every
+    /// project — see `ampcore_core::data::speaker`.
+    pub speakers: Vec<SpeakerLibraryEntry>,
 }
 
 /// Builtin CVR amp product line — (model, channel_count). Seeded into the
@@ -83,9 +87,10 @@ impl ProjectDataState {
             .join("project-data");
         fs::create_dir_all(data_dir.join("projects")).map_err(|e| e.to_string())?;
 
-        // The Speaker Library was removed from the app together with speaker
-        // planning, and its saved data is deleted rather than left orphaned —
-        // nothing reads it any more. Idempotent: a no-op once the file is gone.
+        // The old metadata-only Speaker Library (`speaker_library.json`) was
+        // removed together with speaker planning, and its saved data is
+        // deleted rather than left orphaned — nothing reads it any more. The
+        // current library lives in `speakers.json`. Idempotent: a no-op once the file is gone.
         // A failed delete is logged, not fatal; it must never block loading
         // the projects the user can still open.
         let speaker_library_path = data_dir.join("speaker_library.json");
@@ -95,6 +100,7 @@ impl ProjectDataState {
             }
         }
         let device_model_links = load_json_or_default(&data_dir.join("device_model_links.json"))?;
+        let speakers = load_json_or_default(&data_dir.join("speakers.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
         let seeded = seed_builtin_amp_models(&mut amp_models);
         if seeded {
@@ -117,6 +123,7 @@ impl ProjectDataState {
             projects,
             amp_models,
             device_model_links,
+            speakers,
         })))
     }
 }
@@ -230,6 +237,12 @@ pub fn save_amp_models(data_dir: &Path, entries: &[AmpModelCatalogEntry]) -> Res
 
 pub fn save_device_model_links(data_dir: &Path, entries: &[DeviceModelLink]) -> Result<(), String> {
     let path = data_dir.join("device_model_links.json");
+    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+pub fn save_speakers(data_dir: &Path, entries: &[SpeakerLibraryEntry]) -> Result<(), String> {
+    let path = data_dir.join("speakers.json");
     let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
 }

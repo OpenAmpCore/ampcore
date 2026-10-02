@@ -170,7 +170,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
           {activeTab === "operator" && <OperatorView />}
           {activeDevice && (
             <AmpConfigureView
-              activeTab={configureTabById[activeDevice.id] ?? "input"}
+              activeTab={configureTabById[activeDevice.id] ?? "main"}
               onActiveTabChange={(tab) =>
                 setConfigureTabById((prev) => ({ ...prev, [activeDevice.id]: tab }))
               }

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { commands, type AmpEditLock, type DeviceChannelConfig } from "../lib/bindings";
+import { commands, type AmpEditLock, type DeviceChannelConfig, type DeviceChannelFir } from "../lib/bindings";
 
 /** Edit-lock state for one project amp (`projects_amp_edit_lock`). Re-resolves
- * when the project changes, when the linked amp's FC=27 settings arrive, and
- * when the linked amp appears/disappears or goes on/offline.
+ * when the project changes, when the linked amp's FC=27 settings arrive, when
+ * one of its FIR filters is read or changes, and when the linked amp
+ * appears/disappears or goes on/offline.
  *
  * FC=27 lands several times a second for a polled amp, so a new result is only
  * committed to state when it actually differs — the editor re-renders on a
@@ -30,11 +31,17 @@ export function useAmpEditLock(
       const config = await listen<DeviceChannelConfig>("live_channel_config:updated", (event) => {
         if (event.payload.deviceId === deviceIdRef.current) refresh.current();
       });
+      // FIR is hashed too, and arrives on its own event: the driver reads it
+      // separately from FC=27 and only emits when it changed.
+      const fir = await listen<DeviceChannelFir>("live_fir:updated", (event) => {
+        if (event.payload.deviceId === deviceIdRef.current) refresh.current();
+      });
       if (cancelled) {
         project();
         config();
+        fir();
       } else {
-        unlisteners.push(project, config);
+        unlisteners.push(project, config, fir);
       }
     })();
     return () => {

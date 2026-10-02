@@ -148,6 +148,7 @@ pub(crate) fn read_linked_amp(
         device: device.clone(),
         snapshot: inner.channel_config.get(&device.id).cloned(),
         bridge: inner.bridge.get(&device.id).cloned(),
+        fir: inner.fir_of(&device.id),
     });
     Ok(reading)
 }
@@ -217,6 +218,7 @@ pub fn projects_merge_amp_from_live(
             &reading.device,
             snapshot,
             reading.bridge.as_ref(),
+            &reading.fir,
             &inner.amp_models,
             &inner.device_model_links,
         );

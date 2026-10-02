@@ -41,7 +41,7 @@ export interface VuMeterZone {
   opacity?: number;
 }
 
-export interface VuMeterProps {
+interface VuMeterProps {
   orientation: "horizontal" | "vertical";
   min: number;
   max: number;

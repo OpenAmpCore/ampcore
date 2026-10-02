@@ -1,6 +1,8 @@
 import {
   commands,
   type AppError,
+  type ChannelClip,
+  type ClipSection,
   type CrossoverSlotKind,
   type CrossoverSlotPatch,
   type EqBandPatch,
@@ -24,15 +26,12 @@ import { actionFailed, toActionResult, type ActionResult } from "./actionResult"
  * try/catch. Callers that don't care can keep ignoring the return value.
  *
  * As of the 1.1.8 Tier-A pass the only member Direct Edit mode still leaves
- * undefined is `setChannelOhms` — a Project-only concept, gated by
- * `ConfigureCapabilities.ohmsEditable` so it explains itself rather than
- * sitting inert. Every other member has a live wire command. FIR is partly
- * here: its bypass flag (FC=44) is an ordinary action on both sources, while
- * `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) are
- * Direct-Edit-only — coefficients aren't part of the project file (see
- * `AmpChannel.fir_bypassed`, the only persisted FIR field), so Project mode
- * leaves them undefined and the FIR tab says so rather than offering a dead
- * control.
+ * undefined is `setChannelOhms` — a Project-only concept; the Load field
+ * renders disabled when it is absent rather than sitting inert. Every other member has a live wire command. FIR is partly
+ * here: its bypass flag (FC=44) is an ordinary action on both sources, and so
+ * are `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) —
+ * Direct Edit writes the amp (FC=43), Project mode stores `AmpChannel.fir`,
+ * which the next push writes. Only an edit-locked amp leaves them undefined.
  *
  * Note that an early-return on `undefined` is silent by design *only* where
  * a capability flag already explains the absence. Adding a new optional
@@ -52,10 +51,9 @@ export interface ConfigureActions {
   setChannelFirBypass(channelIndex: number, bypassed: boolean): Promise<ActionResult>;
   setChannelPowerMode(channelIndex: number, mode: PowerMode): Promise<ActionResult>;
 
-  /** FC=43 Import — coefficients live on the amp only, never in the project
-   * file, so this is undefined outside Direct Edit. */
+  /** FC=43 Import. Undefined only for an edit-locked amp. */
   setChannelFirData?(channelIndex: number, name: string, coefficients: number[]): Promise<ActionResult>;
-  /** FC=43 Remove — same live-only reasoning as `setChannelFirData`. */
+  /** FC=43 Remove — same rule as `setChannelFirData`. */
   clearChannelFirData?(channelIndex: number): Promise<ActionResult>;
 
   setChannelName?(channelIndex: number, side: EqDirection, name: string | null): Promise<ActionResult>;
@@ -96,22 +94,13 @@ export interface ConfigureActions {
   setChannelNoiseGate?(channelIndex: number, enabled: boolean, thresholdDbu: number): Promise<ActionResult>;
   setChannelOhms?(channelIndex: number, ohms: number): Promise<ActionResult>;
   setDeviceName?(name: string | null): Promise<ActionResult>;
+
+  /** Copy/paste of an EQ chain or a limiter stage — the logic lives in core
+   * (`data/channel_clipboard.rs`), so a clip from either source pastes into
+   * either. `null` from copy means nothing could be read. */
+  copyChannelSection?(channelIndex: number, section: ClipSection): Promise<ChannelClip | null>;
+  pasteChannelSection?(channelIndex: number, section: ClipSection, clip: ChannelClip): Promise<ActionResult>;
 }
-
-/** Affordances that are conceptually Project-only (no live-device
- * equivalent exists at all, not just "not implemented yet") — today just the
- * Limiter tab's Ohms field, rendered disabled rather than silently inert. */
-export interface ConfigureCapabilities {
-  ohmsEditable: boolean;
-}
-
-export const PROJECT_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  ohmsEditable: true,
-};
-
-export const LOCKED_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  ohmsEditable: false,
-};
 
 /** Actions for an edit-locked project amp (see `data/edit_lock.rs`). Required
  * members refuse with `message`; optional members are omitted so the controls
@@ -169,6 +158,11 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetChannelOutputMute(projectId, assignmentId, channelIndex, muted)),
     setChannelFirBypass: (channelIndex, bypassed) =>
       apply(commands.projectsSetChannelFirBypass(projectId, assignmentId, channelIndex, bypassed)),
+    setChannelFirData: (channelIndex, name, coefficients) =>
+      apply(commands.projectsSetChannelFir(projectId, assignmentId, channelIndex, { name, coefficients })),
+    // What an amp holds after the vendor's Remove: a unit impulse.
+    clearChannelFirData: (channelIndex) =>
+      apply(commands.projectsSetChannelFir(projectId, assignmentId, channelIndex, { name: "", coefficients: [1] })),
     setChannelPowerMode: (channelIndex, mode) =>
       apply(commands.projectsSetChannelPowerMode(projectId, assignmentId, channelIndex, mode)),
     setChannelName: (channelIndex, side, name) =>
@@ -202,5 +196,11 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetChannelOhms(projectId, assignmentId, channelIndex, ohms)),
     setDeviceName: (name) =>
       apply(commands.projectsSetAmpDeviceName(projectId, assignmentId, name)),
+    copyChannelSection: async (channelIndex, section) => {
+      const result = await commands.projectsCopyChannelSection(projectId, assignmentId, channelIndex, section);
+      return result.status === "ok" ? result.data : null;
+    },
+    pasteChannelSection: (channelIndex, section, clip) =>
+      apply(commands.projectsPasteChannelSection(projectId, assignmentId, channelIndex, section, clip)),
   };
 }

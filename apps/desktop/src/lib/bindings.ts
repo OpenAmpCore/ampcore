@@ -4,7 +4,6 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
-	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	projectsList: () => typedError<Project[], AppError>(__TAURI_INVOKE("projects_list")),
 	projectsGet: (id: string) => typedError<{
 	id: string,
@@ -107,6 +106,16 @@ export const commands = {
 	 */
 	projectsSetChannelLimiter: (projectId: string, assignmentId: string, channelIndex: number, patch: LimiterPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_limiter", { projectId, assignmentId, channelIndex, patch })),
 	/**
+	 *  Copies one channel section (an EQ chain or a limiter stage) for pasting —
+	 *  see `data/channel_clipboard.rs`. Read-only.
+	 */
+	projectsCopyChannelSection: (projectId: string, assignmentId: string, channelIndex: number, section: ClipSection) => typedError<ChannelClip, AppError>(__TAURI_INVOKE("projects_copy_channel_section", { projectId, assignmentId, channelIndex, section })),
+	/**
+	 *  Pastes a `ChannelClip` into one channel section. The clip may come from a
+	 *  project or a live amp alike.
+	 */
+	projectsPasteChannelSection: (projectId: string, assignmentId: string, channelIndex: number, section: ClipSection, clip: ChannelClip) => typedError<Project, AppError>(__TAURI_INVOKE("projects_paste_channel_section", { projectId, assignmentId, channelIndex, section, clip })),
+	/**
 	 *  Partial update of a channel's noise gate — Output tab. The threshold is
 	 *  always persisted regardless of firmware; the frontend only shows it as
 	 *  user-adjustable when `CvrFirmwareCapability.noise_gate_threshold` is true.
@@ -129,10 +138,14 @@ export const commands = {
 	 *  Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
 	 *  already merged in from a live amp (`amp_merge`) and already pushed back to
 	 *  one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
-	 *  Only the bypass flag lives here — the coefficients themselves are read from
-	 *  the device with FC=43 and never enter the project file.
+	 *  The filter itself is `projects_set_channel_fir`.
 	 */
 	projectsSetChannelFirBypass: (projectId: string, assignmentId: string, channelIndex: number, bypassed: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_fir_bypass", { projectId, assignmentId, channelIndex, bypassed })),
+	/**
+	 *  Sets an output's FIR filter — the FIR tab's Import, and its Clear (a unit
+	 *  impulse). Reaches the amp with the next push (`amp_push::plan_fir`).
+	 */
+	projectsSetChannelFir: (projectId: string, assignmentId: string, channelIndex: number, fir: ChannelFir) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_fir", { projectId, assignmentId, channelIndex, fir })),
 	/**
 	 *  Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
 	 *  must be even and have a following odd-indexed partner in the same
@@ -142,6 +155,45 @@ export const commands = {
 	projectsSetOutputBridge: (projectId: string, assignmentId: string, pairLeaderChannelIndex: number, bridged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_bridge", { projectId, assignmentId, pairLeaderChannelIndex, bridged })),
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
+	/**
+	 *  Removes an output's speaker reference. Its values are left alone —
+	 *  `speakers_apply` is what sets a speaker up.
+	 */
+	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
+	/**
+	 *  Sets outputs up from the library: each item's output gets its way's values
+	 *  (fitted to the amp), reference and label as its name. A way that doesn't
+	 *  fit as is is refused unless `accept_lossy`.
+	 * 
+	 *  The change is made on a copy of the project amp. With the linked amp
+	 *  online (and not disengaged) that copy is pushed, and only becomes the
+	 *  project's once the amp holds it; otherwise it is saved as the plan.
+	 */
+	speakersApply: (projectId: string, assignmentId: string, items: SpeakerItem[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, items, acceptLossy })),
+	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
+	/**
+	 *  Parses the old app's speaker preset files (JSON). With `commit`, every file
+	 *  that parses is added to the library; without, nothing is saved (the import
+	 *  preview).
+	 */
+	speakersImportProfiles: (files: ProfileUpload[], commit: boolean) => typedError<ProfileImportResult[], AppError>(__TAURI_INVOKE("speakers_import_profiles", { files, commit })),
+	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
+	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
+	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
+	/**  Outputs set up from the entry keep their values and read as detached. */
+	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
+	/**
+	 *  Creates a library entry from consecutive outputs — one way per output, in
+	 *  order — and sets those outputs up from it.
+	 */
+	speakersSaveFromOutputs: (projectId: string, assignmentId: string, channelIndices: number[], details: SpeakerDetails) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_save_from_outputs", { projectId, assignmentId, channelIndices, details })),
+	/**
+	 *  Replaces one way of an entry with an output's current values. Only that
+	 *  output is marked current; every other output set up from the entry then
+	 *  reads "library updated".
+	 */
+	speakersUpdateFromOutput: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_update_from_output", { projectId, assignmentId, channelIndex })),
+	speakersChannelStates: (projectId: string, assignmentId: string) => typedError<ChannelSpeakerState[], AppError>(__TAURI_INVOKE("speakers_channel_states", { projectId, assignmentId })),
 	/**
 	 *  Resolves what can be configured, and within what ranges, for a given amp
 	 *  model + firmware version — purely offline, no live device involved.
@@ -284,9 +336,8 @@ export const commands = {
 	 */
 	liveControlSetMatrixCrosspoint: (deviceId: string, channelIndex: number, sourceIndex: number, gainDb: number | null, active: boolean | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_matrix_crosspoint", { deviceId, channelIndex, sourceIndex, gainDb, active })),
 	/**
-	 *  FC=69 NOISE_GATE. `threshold_dbu` is only carried on 1.1.9+ — on 1.1.8 the
-	 *  wire body is the enable flag alone, matching
-	 *  `CvrFirmwareCapability.noise_gate_threshold`.
+	 *  FC=69 NOISE_GATE, plus FC=87 for the threshold on 1.1.9+ — on 1.1.8 only
+	 *  the enable flag is sent, matching `CvrFirmwareCapability.noise_gate_threshold`.
 	 */
 	liveControlSetChannelNoiseGate: (deviceId: string, channelIndex: number, enabled: boolean, thresholdDbu: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_noise_gate", { deviceId, channelIndex, enabled, thresholdDbu })),
 	/**
@@ -299,6 +350,17 @@ export const commands = {
 	 *  from the current snapshot (see `current_channel`).
 	 */
 	liveControlSetChannelLimiter: (deviceId: string, channelIndex: number, patch: LimiterPatch) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_limiter", { deviceId, channelIndex, patch })),
+	/**
+	 *  Copies one channel section out of the last FC=27 snapshot — see
+	 *  `data/channel_clipboard.rs`. Reads the cache, sends nothing.
+	 */
+	liveControlCopyChannelSection: (deviceId: string, channelIndex: number, section: ClipSection) => typedError<ChannelClip, AppError>(__TAURI_INVOKE("live_control_copy_channel_section", { deviceId, channelIndex, section })),
+	/**
+	 *  Pastes a `ChannelClip` onto a live channel: an EQ is one FC=52 whole-chain
+	 *  write, a limiter stage its FC=54/55 record (plus the other stage when the
+	 *  peak floor is raised). Planned in core, encoded by `action_packets`.
+	 */
+	liveControlPasteChannelSection: (deviceId: string, channelIndex: number, section: ClipSection, clip: ChannelClip) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_paste_channel_section", { deviceId, channelIndex, section, clip })),
 	/**
 	 *  FC=77 SPEAKER_NAME. `direction` picks which side of the channel is
 	 *  renamed — the only wire difference is `in_out_flag`.
@@ -374,7 +436,7 @@ export const commands = {
 	liveControlSetFirBypass: (deviceId: string, channelIndex: number, bypassed: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_fir_bypass", { deviceId, channelIndex, bypassed })),
 	/**
 	 *  FC=43 write (the vendor's Import): a 2093-byte frame that needs outbound
-	 *  fragmentation (see `send_fragmented_write`/`fir::build_set_fir_data`).
+	 *  fragmentation (see `send_writes`/`fir::build_set_fir_data`).
 	 *  `coefficients` longer than the device's fixed 512-tap array is rejected —
 	 *  silently truncating an import would drop the tail of the caller's filter.
 	 */
@@ -477,28 +539,11 @@ export const commands = {
 	/**  Every amp in a project, in assignment order. */
 	fingerprintProject: (projectId: string) => typedError<AmpFingerprint[], AppError>(__TAURI_INVOKE("fingerprint_project", { projectId })),
 	/**
-	 *  Read-only: fingerprint of a live device from its latest FC=27 snapshot
-	 *  (plus FC=50 bridge state). Fails when no snapshot has arrived yet — the
-	 *  device must be polled first.
+	 *  Read-only: fingerprint of a live device from its latest FC=27 snapshot,
+	 *  FC=50 bridge state and the FIR filters the driver has read (FC=43). Fails
+	 *  when no snapshot has arrived yet — the device must be polled first.
 	 */
 	fingerprintLiveDevice: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device", { deviceId })),
-	/**
-	 *  `fingerprint_live_device` plus one FIR read (FC=43) per output channel.
-	 * 
-	 *  A separate command rather than a flag on the synchronous one, because
-	 *  `projects_amp_edit_lock` rebuilds a live fingerprint on every FC=27 poll
-	 *  tick (see `useAmpEditLock`) — putting eight five-fragment FIR exchanges on
-	 *  that path would saturate the line several times a second. This is the
-	 *  opt-in variant, called only by the fingerprint inspector.
-	 * 
-	 *  Reads are sequential, never concurrent: the per-IP reassembler cannot
-	 *  interleave two fragmented exchanges. Per-channel failures are swallowed —
-	 *  an unreadable (or pre-1.1.8, which `live_control_fetch_channel_fir` refuses
-	 *  before any I/O) channel simply keeps `fir: None` rather than failing the
-	 *  whole fingerprint, and nothing is added to `missing`, which would null
-	 *  `amp_hash` and flip the editor to `Unreadable`.
-	 */
-	fingerprintLiveDeviceWithFir: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device_with_fir", { deviceId })),
 	/**
 	 *  Every discovered device that has an FC=27 snapshot, ordered by device id.
 	 *  Devices never polled are skipped rather than failing the whole call.
@@ -583,6 +628,12 @@ export const commands = {
 	 *  name comes back through the next FC=0 `BASIC_INFO` read.
 	 */
 	liveControlSetDeviceName: (deviceId: string, name: string) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_device_name", { deviceId, name })),
+	/**
+	 *  Starts the server on `port`, moves it there, or stops it. Returns the
+	 *  addresses it is reachable at (empty when stopped). Asking for what is
+	 *  already running changes nothing, so the frontend can call this freely.
+	 */
+	webServerSet: (enabled: boolean, port: number) => typedError<string[], AppError>(__TAURI_INVOKE("web_server_set", { enabled, port })),
 };
 
 /* Types */
@@ -764,6 +815,18 @@ export type AmpChannel = {
 	 *  second source to fail over to (`AmpModelCatalogEntry.is_dante`).
 	 */
 	backupPriority?: BackupPriority,
+	/**
+	 *  The speaker-library way this output was set up from, if any — a
+	 *  reference only. The values themselves live in the fields above, so the
+	 *  project never needs the library to open or push; see `data/speaker.rs`.
+	 */
+	speaker?: SpeakerRef | null,
+	/**
+	 *  The FIR filter this output holds; a unit impulse when none is loaded,
+	 *  as on the amp. Hashed (taps only) and pushed like every other setting;
+	 *  the amp's own comes from the driver's FC=43 reads, not from FC=27.
+	 */
+	fir?: ChannelFir,
 };
 
 /**
@@ -1163,6 +1226,11 @@ export type ChannelAmpCanonical = {
 	outputTrimDb: number | null,
 	outputVolumeDb: number | null,
 	noiseGateEnabled: boolean,
+	/**
+	 *  Whole dBu. `None` when the firmware stores no threshold (1.1.8) or the
+	 *  gate is off, where it doesn't affect the sound.
+	 */
+	noiseGateThresholdDbu: number | null,
 	/**  Trimmed; empty when unnamed or still the default "In{n}" label. */
 	inputName: string,
 	inputMuted: boolean,
@@ -1176,6 +1244,8 @@ export type ChannelAmpCanonical = {
 	/**  Shown, never hashed — see the module doc comment. */
 	backupPriority: BackupPriority,
 };
+
+export type ChannelClip = { kind: "eq"; eq: ChannelEq } | { kind: "rmsLimiter"; rms: RmsLimiter } | { kind: "peakLimiter"; peak: PeakLimiter };
 
 export type ChannelConfig = {
 	channelIndex: number,
@@ -1219,6 +1289,11 @@ export type ChannelConfig = {
 	 */
 	loadOhms: number | null,
 	backupPriority: BackupPriority,
+	/**
+	 *  Output gate threshold (dBu), written by FC=87. 1.1.9 only
+	 *  (`channel_config_v119`); `None` on 1.1.8, which stores none.
+	 */
+	noiseGateThresholdDbu: number | null,
 };
 
 export type ChannelConfigSnapshot = {
@@ -1275,11 +1350,19 @@ export type ChannelFingerprint = {
 	speaker: SpeakerCanonical,
 	ampFields: ChannelAmpCanonical,
 	/**
-	 *  `None` unless a caller enriched this fingerprint with `attach_fir_stats`
-	 *  — FIR needs its own FC=43 round trip per channel, so the ordinary
-	 *  synchronous paths never populate it.
+	 *  `None` only for a live output whose FIR the driver hasn't read yet
+	 *  (also listed in `missing`).
 	 */
 	fir: ChannelFirStats | null,
+};
+
+/**
+ *  An output's FIR filter: the amp's 32-byte name and its taps (at most
+ *  `fir::FIR_MAX_TAPS`; shorter is zero-padded on the wire).
+ */
+export type ChannelFir = {
+	name: string,
+	coefficients: (number | null)[],
 };
 
 export type ChannelFirSnapshot = {
@@ -1322,21 +1405,28 @@ export type ChannelFirSnapshot = {
 };
 
 /**
- *  Derived FIR facts for one output channel — shown for context, never hashed
- *  (see the module doc comment). Deliberately excludes the 512 coefficients:
- *  this is what a reader needs to tell two filters apart, not the filter.
+ *  One output's FIR filter as the fingerprint shows it. Deliberately excludes
+ *  the 512 coefficients: `summary` is what tells two filters apart.
  */
 export type ChannelFirStats = {
 	/**
 	 *  `false` when the channel holds the unit impulse an empty channel keeps
-	 *  (`order == 1`) — i.e. no real filter is loaded.
+	 *  — i.e. no real filter is loaded.
 	 */
 	loaded: boolean,
-	/**  `None` when the amp replied with the 2048-byte nameless form. */
+	/**
+	 *  Shown, never hashed. `None` when the amp replied with the 2048-byte
+	 *  nameless form.
+	 */
 	name: string | null,
 	/**  Taps minus trailing zeros — the vendor's "Order: N Taps". */
 	order: number,
 	timeZeroMs: number | null,
+	/**
+	 *  "N taps · checksum" (`fir::taps_summary`): equal exactly when the
+	 *  hashed taps are.
+	 */
+	summary: string,
 };
 
 /**
@@ -1349,6 +1439,15 @@ export type ChannelSource = {
 	kind: SourceKind,
 	index: number,
 };
+
+export type ChannelSpeakerState = {
+	channelIndex: number,
+	speaker: SpeakerRef,
+	status: SpeakerStatus,
+};
+
+/**  Where a clip comes from or goes to on a channel. */
+export type ClipSection = "inputEq" | "outputEq" | "rmsLimiter" | "peakLimiter";
 
 export type CrossoverCanonical = {
 	filterType: CrossoverFilterType,
@@ -1448,11 +1547,8 @@ export type DeviceChannelConfig = {
 };
 
 /**
- *  Command payload pairing a device id with one output channel's FC=43 FIR
- *  snapshot — what `live_control_fetch_channel_fir` returns. Unlike its
- *  siblings above there is no matching `LiveDeviceInner` field and no event:
- *  FIR is fetched on demand per channel and never refreshed behind the
- *  caller's back (see that command's doc comment).
+ *  Pairs a device id with one output channel's FC=43 FIR snapshot — what
+ *  `live_control_fetch_channel_fir` returns and `live_fir:updated` emits.
  */
 export type DeviceChannelFir = {
 	deviceId: string,
@@ -1661,6 +1757,17 @@ export type FingerprintRow = {
 
 export type FingerprintSource = "offline" | "online";
 
+/**  One compared value, three ways: the debug comparator's diff row. */
+export type FitRow = {
+	label: string,
+	/**  What the output holds now. */
+	current: string,
+	/**  What the library way stores. */
+	preset: string,
+	/**  What applying writes, after `fit`. */
+	written: string,
+};
+
 /**
  *  A channel's output protection: independent RMS and Peak limiter stages,
  *  ported from the old app's `limiter-panel.tsx` (both stages can be engaged
@@ -1723,6 +1830,14 @@ export type MatrixCrosspoint = {
 	active: boolean,
 };
 
+export type OutputFit = {
+	channelIndex: number,
+	/**  What applying changes from the way as stored; empty when it fits as is. */
+	issues: string[],
+	/**  Every compared value: now, stored, written (the debug comparator). */
+	rows: FitRow[],
+};
+
 /**  An inclusive min/max bound for a numeric parameter. */
 export type ParamRange = {
 	min: number | null,
@@ -1753,6 +1868,21 @@ export type PowerMode = "lowOhm" | "v70" | "v100";
 export type PresetSlot = {
 	index: number,
 	name: string,
+};
+
+export type ProfileImportResult = {
+	fileName: string,
+	/**  Why the file can't be imported; `None` when it can (or was). */
+	error: string | null,
+	/**  The entry the file makes. Not in the library unless `commit` was set. */
+	entry: SpeakerLibraryEntry | null,
+	/**  Brand, family and model already exist in the library — imported anyway. */
+	duplicate: boolean,
+};
+
+export type ProfileUpload = {
+	fileName: string,
+	text: string,
 };
 
 export type Project = {
@@ -1871,6 +2001,99 @@ export type SpeakerCanonical = {
 	powerMode: PowerMode | null,
 	loadOhms: number | null,
 	firBypassed: boolean,
+};
+
+/**
+ *  The user-editable metadata of an entry. `way_labels` must have one label
+ *  per way.
+ */
+export type SpeakerDetails = {
+	brand: string,
+	family: string,
+	model: string,
+	application: string,
+	notes: string,
+	wayLabels: string[],
+};
+
+/**
+ *  One output to set up: which way of which library entry goes onto it.
+ *  Entries may differ between items, so any number of speakers is one apply
+ *  — and one push.
+ */
+export type SpeakerItem = {
+	channelIndex: number,
+	libraryId: string,
+	wayIndex: number,
+};
+
+export type SpeakerLibraryEntry = {
+	id: string,
+	brand: string,
+	family: string,
+	model: string,
+	application: string,
+	notes: string,
+	/**
+	 *  Bumped whenever a way's processing changes, never for metadata, so
+	 *  outputs set up from an older revision can say so.
+	 */
+	revision: number,
+	ways: SpeakerWay[],
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+export type SpeakerProcessing = {
+	outputEq: ChannelEq,
+	limiter: Limiter,
+	delayOutMs: number | null,
+	phaseInverted: boolean,
+	outputTrimDb?: number | null,
+	noiseGateEnabled?: boolean | null,
+	noiseGateThresholdDbu?: number | null,
+	powerMode?: PowerMode | null,
+	firBypassed?: boolean | null,
+	/**
+	 *  The FIR filter itself. An imported blob always carries one (a unit
+	 *  impulse is the preset saying "no FIR").
+	 */
+	fir?: ChannelFir | null,
+};
+
+/**  Which library way an output was set up from, and which revision of it. */
+export type SpeakerRef = {
+	libraryId: string,
+	wayIndex: number,
+	revision: number,
+	/**
+	 *  "Brand Model · Way" at assign time, so a reference whose entry was
+	 *  deleted from this machine's library still reads as something.
+	 */
+	label: string,
+};
+
+export type SpeakerStatus = 
+/**  The output holds exactly what its library way says. */
+{ kind: "match" } | 
+/**  The output was changed after it was set up. */
+{ kind: "edited"; fields: string[] } | 
+/**
+ *  The library way changed after the output was set up. `fields` is what
+ *  re-applying would change (empty when only the revision moved).
+ */
+{ kind: "libraryUpdated"; fields: string[] } | 
+/**  The entry or way is gone from this machine's library. */
+{ kind: "detached" };
+
+export type SpeakerWay = {
+	label: string,
+	processing: SpeakerProcessing,
+	/**
+	 *  The way's FC=57 blob as imported, hex — lossless (FIR, volume, DEQ),
+	 *  kept for a later live write. `None` for a way saved from an output.
+	 */
+	fc57Hex?: string | null,
 };
 
 export type Telemetry = {

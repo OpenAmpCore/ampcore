@@ -5,6 +5,7 @@ import type { AmpEditLock, AmpEditLockState, AmpMergeResult, FingerprintRow, Pro
 import { useIsCompact } from "../lib/breakpoints";
 import { AmpMergePanel, type MergeDirection } from "./AmpMergePanel";
 import { AmpPushSteps } from "./AmpPushSteps";
+import { CopyJsonButton } from "./FingerprintInspector";
 
 const STATE_BADGE: Record<AmpEditLockState, { color: "default" | "success" | "danger" | "warning"; label: string }> = {
   unlinked: { color: "default", label: "Unlinked" },
@@ -15,27 +16,6 @@ const STATE_BADGE: Record<AmpEditLockState, { color: "default" | "success" | "da
   unreadable: { color: "danger", label: "Unreadable" },
   disengaged: { color: "warning", label: "Disengaged" },
 };
-
-/** Minimal copy-to-clipboard button, replacing Mantine's `CopyButton` render
- * prop — see `FingerprintInspector.tsx`'s identical helper. */
-function CopyJsonButton({ value, disabled }: { value: string; disabled: boolean }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Button
-      size="sm"
-      variant={copied ? "primary" : "secondary"}
-      isDisabled={disabled}
-      onPress={() => {
-        void navigator.clipboard.writeText(value).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        });
-      }}
-    >
-      {copied ? "Copied" : "Copy all as JSON"}
-    </Button>
-  );
-}
 
 // `transition-colors`: after a match, the red tints fade out instead of
 // vanishing.
@@ -270,7 +250,7 @@ export function FingerprintMismatchModal({
                         <span style={{ fontSize: "var(--amp-font-size-sm)" }}>Only differences</span>
                       </Switch.Content>
                     </Switch>
-                    <CopyJsonButton value={json} disabled={!lock} />
+                    <CopyJsonButton value={json} disabled={!lock} label="Copy all as JSON" />
                   </div>
 
                   {remaining && (

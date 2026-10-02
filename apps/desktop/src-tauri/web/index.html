@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AmpCore</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 16px; background: #0a0b0c; color: #e8e9ea; font: 15px/1.4 system-ui, sans-serif; }
+      main { max-width: 640px; margin: 0 auto; }
+      h1 { margin: 0; font-size: 20px; }
+      .muted { color: #8b8f94; font-size: 13px; }
+      ul { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
+      li { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid #26282b; border-radius: 12px; }
+      .dot { width: 10px; height: 10px; flex: none; border-radius: 50%; background: #5c6066; }
+      .dot.on { background: #2fb344; }
+      .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .grow { flex: 1; min-width: 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>AmpCore</h1>
+      <div class="muted">Version {{version}} · <span id="status">connecting…</span></div>
+      <ul id="amps"></ul>
+    </main>
+    <script>
+      const list = document.getElementById("amps");
+      const status = document.getElementById("status");
+      const el = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      };
+      async function refresh() {
+        try {
+          const amps = await (await fetch("/api/devices", { cache: "no-store" })).json();
+          status.textContent = amps.length ? `${amps.length} amp${amps.length === 1 ? "" : "s"}` : "no amps found yet";
+          list.replaceChildren(
+            ...amps.map((amp) => {
+              const row = el("li");
+              const text = el("div", "grow");
+              text.append(el("div", "name", amp.name || amp.mac), el("div", "muted", `${amp.brand} · ${amp.ip}`));
+              row.append(el("span", amp.online ? "dot on" : "dot"), text, el("span", "muted", amp.online ? "online" : "offline"));
+              return row;
+            }),
+          );
+        } catch {
+          status.textContent = "AmpCore isn't answering";
+        }
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>

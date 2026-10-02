@@ -5,7 +5,7 @@ use serde::Serialize;
 use specta::Type;
 use tokio::sync::mpsc;
 
-use crate::data::common::now_millis;
+use crate::data::common::{log_clock, now_millis};
 
 use super::cvr::bridge::DeviceBridgeSnapshot;
 use super::cvr::channel_config::ChannelConfigSnapshot;
@@ -71,6 +71,12 @@ pub struct LiveDeviceInner {
     /// Latest FC=50 bridge state per device id. Polled by the driver on its
     /// own tick (see `bridge.rs` for why this is not read out of FC=27).
     pub bridge: HashMap<String, DeviceBridgeSnapshot>,
+    /// Latest FC=43 FIR filter per device id and output channel. Read by the
+    /// driver one output at a time in place of an FC=27 cycle (see
+    /// `driver.rs`), because the fingerprint hashes it. An output missing
+    /// here hasn't been read yet — or was dropped by `forget_fir` after a
+    /// write, so the driver reads it again first.
+    pub fir: HashMap<String, HashMap<u32, ChannelFirSnapshot>>,
     /// Which devices receive the heavy polls (heartbeat, FC=27, FC=50), keyed
     /// by subscription token. Every discovered amp not in any set gets
     /// discovery alone. One token per live consumer — Live Control's current
@@ -79,6 +85,9 @@ pub struct LiveDeviceInner {
     /// Maintained by `live_control_set_poll_subscription`; read through
     /// `is_polled`.
     pub poll_subscriptions: HashMap<String, HashSet<String>>,
+    /// How many `PollHold`s are alive. While any is, the driver sends no
+    /// background traffic at all — see `LiveDeviceState::hold_polls`.
+    pub polls_held: u32,
     /// Reaches into the running CVR driver's request engine from outside its
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
     /// running. `Some` while `cvr::driver::start`'s spawned task is alive.
@@ -97,6 +106,11 @@ impl LiveDeviceInner {
     pub fn is_polled(&self, device_id: &str) -> bool {
         self.poll_subscriptions.values().any(|ids| ids.contains(device_id))
     }
+
+    /// What the driver has read of one device's FIR filters so far.
+    pub fn fir_of(&self, device_id: &str) -> Vec<ChannelFirSnapshot> {
+        self.fir.get(device_id).map(|channels| channels.values().cloned().collect()).unwrap_or_default()
+    }
 }
 
 /// Arc-wrapped (unlike `ProjectDataState`'s bare `Mutex<T>`) because a clone
@@ -113,7 +127,9 @@ impl LiveDeviceState {
             channel_config: HashMap::new(),
             presets: HashMap::new(),
             bridge: HashMap::new(),
+            fir: HashMap::new(),
             poll_subscriptions: HashMap::new(),
+            polls_held: 0,
             request_tx: None,
             write_tx: None,
         })))
@@ -151,6 +167,34 @@ impl LiveDeviceState {
         Ok(())
     }
 
+    /// Stops every background poll (heartbeat, FC=27/FC=43, bridge, discovery)
+    /// until the returned guard is dropped.
+    ///
+    /// The driver already pauses polling while a write awaits its ACK, but a
+    /// multi-packet operation leaves a gap after each ACK in which a poll
+    /// goes out — and since an ACK carries nothing but the device's IP, that
+    /// poll's ACK can then be taken for the next write's. Holding across the
+    /// whole operation is what the vendor's `isRefresh = false` bracket does.
+    pub fn hold_polls(&self) -> Result<PollHold, AppError> {
+        self.lock()?.polls_held += 1;
+        Ok(PollHold(self.0.clone()))
+    }
+
+    /// Drops one output's cached FIR after it was written, so the next thing
+    /// the driver does for this amp is read it back — until then a
+    /// fingerprint of the amp is honestly "not read yet", never stale.
+    pub fn forget_fir(&self, device_id: &str, channel_index: u32) -> Result<(), AppError> {
+        if let Some(channels) = self.lock()?.fir.get_mut(device_id) {
+            channels.remove(&channel_index);
+        }
+        Ok(())
+    }
+
+    /// `LiveDeviceInner::fir_of`, for a caller that doesn't hold the lock.
+    pub fn fir_of(&self, device_id: &str) -> Result<Vec<ChannelFirSnapshot>, AppError> {
+        Ok(self.lock()?.fir_of(device_id))
+    }
+
     /// Replaces one subscription token's polled-device set; an empty list
     /// removes the token (see `LiveDeviceInner::poll_subscriptions`).
     pub fn set_poll_subscription(&self, token: String, device_ids: Vec<String>) -> Result<(), AppError> {
@@ -161,6 +205,39 @@ impl LiveDeviceState {
             inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
         }
         Ok(())
+    }
+}
+
+/// Keeps the driver's background polling off while it lives — see
+/// `LiveDeviceState::hold_polls`. Released on drop, so an early return or a
+/// panic in the holder can't leave an amp unpolled.
+pub struct PollHold(Arc<Mutex<LiveDeviceInner>>);
+
+impl Drop for PollHold {
+    fn drop(&mut self) {
+        // A poisoned lock still holds the counter; leaving it raised would
+        // silence every amp for good.
+        let mut inner = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.polls_held = inner.polls_held.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_holds_nest_and_release_on_drop() {
+        let state = LiveDeviceState::new();
+        let held = |state: &LiveDeviceState| state.0.lock().unwrap().polls_held;
+        let outer = state.hold_polls().unwrap();
+        {
+            let _inner = state.hold_polls().unwrap();
+            assert_eq!(held(&state), 2);
+        }
+        assert_eq!(held(&state), 1);
+        drop(outer);
+        assert_eq!(held(&state), 0);
     }
 }
 
@@ -235,11 +312,8 @@ pub struct DevicePresets {
     pub presets: DevicePresetsSnapshot,
 }
 
-/// Command payload pairing a device id with one output channel's FC=43 FIR
-/// snapshot — what `live_control_fetch_channel_fir` returns. Unlike its
-/// siblings above there is no matching `LiveDeviceInner` field and no event:
-/// FIR is fetched on demand per channel and never refreshed behind the
-/// caller's back (see that command's doc comment).
+/// Pairs a device id with one output channel's FC=43 FIR snapshot — what
+/// `live_control_fetch_channel_fir` returns and `live_fir:updated` emits.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceChannelFir {
@@ -256,6 +330,8 @@ pub enum LiveEvent {
     ChannelConfig(DeviceChannelConfig),
     Presets(DevicePresets),
     Bridge(DeviceBridge),
+    /// One output's FIR filter, when it is first read or has changed.
+    Fir(DeviceChannelFir),
     /// The full device list, re-broadcast whenever any device's snapshot
     /// changes (see `upsert`/`touch_by_ip`/`mark_stale_offline` below).
     Devices(Vec<DiscoveredDevice>),
@@ -324,6 +400,30 @@ impl LiveEventSink {
             entry.clone()
         };
         self.emitter.emit(LiveEvent::Bridge(DeviceBridge { device_id, bridge: snapshot }));
+    }
+
+    /// Records one output's FIR filter. The driver re-reads every output in
+    /// rotation and almost always finds what it already has, so this emits
+    /// only for a first reading or one whose name or taps changed.
+    pub fn set_fir(&self, device_id: String, fir: ChannelFirSnapshot) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            let previous = inner.fir.entry(device_id.clone()).or_default().insert(fir.channel_index, fir.clone());
+            if previous.as_ref().is_some_and(|p| p.name == fir.name && p.coefficients == fir.coefficients) {
+                return;
+            }
+            // Every change is logged: a filter that differs between two reads
+            // nobody wrote in between is otherwise invisible.
+            println!(
+                "[fir {}] {device_id} ch {} ({}-byte reply): {} -> {}",
+                log_clock(),
+                fir.channel_index,
+                fir.body_len,
+                previous.map_or("(not read)".to_string(), |p| p.describe()),
+                fir.describe()
+            );
+        }
+        self.emitter.emit(LiveEvent::Fir(DeviceChannelFir { device_id, fir }));
     }
 
     /// Records a discovery reply. Emits **only when something actually

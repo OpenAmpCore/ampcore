@@ -3,7 +3,7 @@ import { Alert, Button, ButtonGroup, Spinner, Switch, Tooltip } from "@heroui/re
 import { Copy, Download, RefreshCw, Trash2, Upload } from "lucide-react";
 
 import type { ActionResult } from "../lib/actionResult";
-import { commands, type AmpCapability, type ChannelFirSnapshot } from "../lib/bindings";
+import { commands, type AmpCapability, type ChannelFir, type ChannelFirSnapshot } from "../lib/bindings";
 import { buildFirResponseCurve } from "../lib/filterResponse";
 import { useConfirm } from "./ConfirmDialog";
 import { FIR_MIN_DB, FirFrequencyGraph, FirImpulseGraph } from "./FirGraph";
@@ -29,6 +29,29 @@ function parseFirTextFile(text: string): number[] {
   return values;
 }
 
+/** The project's stored filter in the shape the amp's reading has, so one
+ * view draws both. Order and zero-time follow `live/cvr/fir.rs`: taps minus
+ * trailing zeros, and the peak-magnitude tap (the positive one on a tie). */
+function storedSnapshot(stored: ChannelFir, channelIndex: number): ChannelFirSnapshot {
+  const coefficients = Array.from({ length: 512 }, (_, i) => stored.coefficients[i] ?? 0);
+  let order = coefficients.length;
+  while (order > 0 && coefficients[order - 1] === 0) order--;
+  const [max, min] = [Math.max(...coefficients), Math.min(...coefficients)];
+  const timeZeroIndex = Math.max(0, coefficients.indexOf(Math.abs(max) >= Math.abs(min) ? max : min));
+  return {
+    channelIndex,
+    name: stored.name,
+    sampleRateHz: 48000,
+    maxTaps: 512,
+    order,
+    timeZeroIndex,
+    timeZeroMs: Math.round((timeZeroIndex / 48) * 1000) / 1000,
+    coefficients,
+    bodyLen: 0,
+    receivedAt: 0,
+  };
+}
+
 const CAPTION_STYLE = {
   color: "var(--amp-color-dimmed)",
   fontSize: "var(--amp-font-size-xs)",
@@ -46,30 +69,29 @@ const CAPTION_STYLE = {
  * verbatim is what keeps that distinction visible rather than buried under a
  * chart.
  *
- * The **bypass flag** is editable here (FC=44, a one-byte write) and is the one
- * piece of FIR state that also lives in the project file, so it stays settable
- * on an offline amp even though the coefficients do not.
+ * With a reachable device the plot is the amp's own reading. Without one it
+ * is the filter the project prescribes (`stored`, `AmpChannel.fir`), if any;
+ * Import and Clear then edit the project, and the next push writes the amp.
+ * The **bypass flag** (FC=44) is project state as well.
  *
- * Two things this panel cannot do, each for a different reason:
- * - **Plot an offline amp** — the coefficients are not in FC=27 and are not
- *   persisted, so there is nothing to draw without a reachable device.
- * - **Anything on pre-1.1.8 firmware** — `capability.firmware.firFilters` is
- *   false, which gates the FC=43 read/write and the FC=44 write alike.
- *
- * Both say so rather than rendering a dead control, per
- * `configureActions.ts`'s "absence must explain itself" rule. Import/Export/
- * Clear (FC=43's write side) need a device for the same reason as the read —
- * see `onImportData`/`onClearData`. */
+ * The one thing this panel cannot do is anything on pre-1.1.8 firmware —
+ * `capability.firmware.firFilters` is false, which gates FC=43 and FC=44
+ * alike — and it says so rather than rendering a dead control, per
+ * `configureActions.ts`'s "absence must explain itself" rule. */
 export function FirPanel({
   deviceId,
   channelIndex,
   label,
   capability,
   bypassed = false,
+  stored,
   onBypassChange,
   onImportData,
   onClearData,
 }: {
+  /** The filter the project prescribes for this output (`AmpChannel.fir`) —
+   * what is plotted when there is no device to read. */
+  stored?: ChannelFir;
   /** The live amp this editor can actually reach right now — Direct Edit's
    * own device, or the online amp a project amp is following. `undefined` for
    * an offline project amp, or one deliberately disengaged from its device. */
@@ -92,7 +114,9 @@ export function FirPanel({
   onClearData?: () => Promise<ActionResult>;
 }) {
   const supported = capability.firmware.firFilters;
-  const [fir, setFir] = useState<ChannelFirSnapshot | null>(null);
+  const [read, setFir] = useState<ChannelFirSnapshot | null>(null);
+  // With a device its reading is shown; without one, the project's filter.
+  const fir = useMemo(() => read ?? (deviceId || !stored ? null : storedSnapshot(stored, channelIndex)), [read, deviceId, stored, channelIndex]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -152,36 +176,6 @@ export function FirPanel({
         FIR filters require firmware 1.1.8 or newer
         {capability.firmware.vNum != null ? ` — this amp reports ${capability.firmware.vNum}.` : "."}
       </Centered>
-    );
-  }
-
-  // The coefficients need a device, but the bypass flag is project state — so
-  // this branch explains the missing plot and still offers the toggle.
-  if (!deviceId) {
-    return (
-      <div className="flex h-full min-w-0 flex-col items-center justify-center gap-3 p-4">
-        <span
-          style={{
-            color: "var(--amp-color-dimmed)",
-            fontSize: "var(--amp-font-size-sm)",
-            textAlign: "center",
-            maxWidth: 420,
-          }}
-        >
-          FIR coefficients live on the amp — they aren&apos;t part of the project
-          file, so there is nothing to plot for Out{label} without a reachable
-          device.
-          {bypassToggle
-            ? " The bypass flag below is stored in the project and applied on the next push."
-            : ""}
-        </span>
-        {bypassToggle}
-        {writeError && (
-          <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-xs)" }}>
-            {writeError}
-          </span>
-        )}
-      </div>
     );
   }
 
@@ -248,7 +242,7 @@ export function FirPanel({
         {fir && (
           <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-xs)" }}>
             {fir.order} of {fir.maxTaps} taps · {fir.sampleRateHz / 1000} kHz · zero-time{" "}
-            {fir.timeZeroMs ?? 0} ms · {fir.bodyLen}-byte reply
+            {fir.timeZeroMs ?? 0} ms · {deviceId ? `${fir.bodyLen}-byte reply` : "from the project"}
           </span>
         )}
         <div className="flex-1" />
@@ -263,19 +257,21 @@ export function FirPanel({
             </Button>
           </ButtonGroup>
         )}
-        <Tooltip delay={300}>
-          <Tooltip.Trigger>
-            <Button
-              isIconOnly
-              variant="ghost"
-              aria-label="Refresh FIR data"
-              onPress={() => void fetchFir({ cancelled: false })}
-            >
-              {loading ? <Spinner size="sm" /> : <RefreshCw size={16} />}
-            </Button>
-          </Tooltip.Trigger>
-          <Tooltip.Content showArrow>Re-read from the amp</Tooltip.Content>
-        </Tooltip>
+        {deviceId && (
+          <Tooltip delay={300}>
+            <Tooltip.Trigger>
+              <Button
+                isIconOnly
+                variant="ghost"
+                aria-label="Refresh FIR data"
+                onPress={() => void fetchFir({ cancelled: false })}
+              >
+                {loading ? <Spinner size="sm" /> : <RefreshCw size={16} />}
+              </Button>
+            </Tooltip.Trigger>
+            <Tooltip.Content showArrow>Re-read from the amp</Tooltip.Content>
+          </Tooltip>
+        )}
         <Button size="sm" variant="secondary" isDisabled={!fir} onPress={() => void handleCopy()}>
           <Copy size={14} /> {copied ? "Copied" : "Copy JSON"}
         </Button>
@@ -312,10 +308,8 @@ export function FirPanel({
         )}
       </div>
 
-      {!onImportData && (
-        <span style={CAPTION_STYLE}>
-          Import and Clear write the amp directly, so they&apos;re only available in Direct Edit.
-        </span>
+      {!deviceId && fir && (
+        <span style={CAPTION_STYLE}>The project&apos;s filter for Out{label} — written to the amp with the next push.</span>
       )}
 
       {error && (

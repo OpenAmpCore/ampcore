@@ -36,8 +36,8 @@ function useMediaQuery(query: string): boolean {
  * listener attaches); every hook here coerces that to `false` so the
  * desktop layout is what renders first and narrow layouts only ever appear
  * after a real match — never a flash of the wrong one at full size. */
-export const COMPACT_MAX_WIDTH = 900;
-export const TIGHT_MAX_WIDTH = 640;
+const COMPACT_MAX_WIDTH = 900;
+const TIGHT_MAX_WIDTH = 640;
 
 export function useIsCompact(): boolean {
   return useMediaQuery(`(max-width: ${COMPACT_MAX_WIDTH}px)`) ?? false;

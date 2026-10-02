@@ -12,7 +12,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateAvailableModal } from "./components/UpdateAvailableModal";
 import { getPreference, setPreference } from "./lib/preferences";
-import type { Project } from "./lib/bindings";
+import { commands, type Project } from "./lib/bindings";
 
 type AppMode = "modeSelect" | "liveControl" | "projectDesign";
 
@@ -33,6 +33,11 @@ function App() {
 
   useEffect(() => {
     getVersion().then(setVersion);
+
+    // The web server is the backend's; it only learns here that it was left on.
+    if (getPreference("webServerEnabled")) {
+      void commands.webServerSet(true, getPreference("webServerPort"));
+    }
 
     if (import.meta.env.DEV || !getPreference("autoUpdateChecks")) {
       return;
