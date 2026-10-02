@@ -35,13 +35,13 @@ export const ACCENT_LIGHTNESS = 80;
 
 /** Dark, theme-independent ink — legible on every pastel hue in both colour
  * schemes, unlike the white text the old vibrant swatches used. */
-export const ACCENT_FOREGROUND = "oklch(0.32 0 0)";
+const ACCENT_FOREGROUND = "oklch(0.32 0 0)";
 
-export function accentColorForHue(hue: number): string {
+function accentColorForHue(hue: number): string {
   return `hsl(${hue} ${ACCENT_SATURATION}% ${ACCENT_LIGHTNESS}%)`;
 }
 
-export interface RadiusOption {
+interface RadiusOption {
   id: string;
   label: string;
   /** Written to `--radius`; HeroUI derives the named steps from it. */
@@ -56,8 +56,8 @@ export const RADII: RadiusOption[] = [
 ];
 
 /** A blue-ish hue, roughly matching HeroUI's own stock accent hue. */
-export const DEFAULT_ACCENT_HUE = 217;
-export const DEFAULT_RADIUS_ID = "default";
+const DEFAULT_ACCENT_HUE = 217;
+const DEFAULT_RADIUS_ID = "default";
 
 export interface Appearance {
   colorScheme: ColorScheme;

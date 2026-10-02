@@ -119,6 +119,8 @@ struct PendingRequest {
 pub struct ResolvedRequest {
     pub ip: String,
     pub function_code: u8,
+    /// The request's own `chx` — what a per-channel reply (FC=43) answers.
+    pub chx: u8,
     pub result: Result<Vec<u8>, RequestError>,
     pub sink: ResultSink,
 }
@@ -178,6 +180,7 @@ impl RequestRegistry {
         let superseded = self.pending.remove(&key).map(|old| ResolvedRequest {
             ip: key.0.clone(),
             function_code: key.1,
+            chx: old.chx,
             result: Err(RequestError::Timeout),
             sink: old.sink,
         });
@@ -266,7 +269,7 @@ impl RequestRegistry {
             } else {
                 Ok(pending.frames.into_iter().flatten().collect())
             };
-            resolved.push(ResolvedRequest { ip, function_code, result, sink: pending.sink });
+            resolved.push(ResolvedRequest { ip, function_code, chx: pending.chx, result, sink: pending.sink });
         }
 
         (resolved, retransmits)
@@ -353,21 +356,28 @@ impl FragmentReassembler {
 // Write ACK confirmation
 // ---------------------------------------------------------------------------
 
-/// How long to wait for a write's ACK echo before refiring. Deliberately
-/// tighter than the vendor reference's `UDP_tool.outTime(1.0, ip)` 1s budget:
-/// on the LAN this app targets, an ACK round trip is single-digit
-/// milliseconds, so 1s spends almost all of its time waiting on a packet that
-/// is already lost. Trading that for more, faster refires recovers a dropped
-/// write sooner and keeps the worst case well under the old single timeout.
-pub const WRITE_ACK_TIMEOUT_MS: u64 = 200;
+/// How long to wait for a write's ACK echo before refiring — the vendor
+/// reference's `UDP_tool.outTime(1.0, ip)` budget, and the prior web app's.
+///
+/// **Do not tighten this.** It was 200ms once, on the reasoning that a LAN
+/// round trip is single-digit milliseconds. The amp's own processing isn't:
+/// measured on a DSP-2004, the packet after an FC=52 EQ-chain write is ACKed
+/// after ~192ms, and one sent right after an FC=43 FIR frame is dropped
+/// outright (the refire got through at ~270ms). At 200ms the first case
+/// refired every so often, the amp then ACKed both copies, and — since an ACK
+/// carries nothing but the device's IP (see `on_ack`) — the spare ACK
+/// confirmed the *next* write before the amp had taken it, with every later
+/// write off by one. A refire has to be a genuinely lost packet for IP-only
+/// matching to hold, which is what this budget buys.
+pub const WRITE_ACK_TIMEOUT_MS: u64 = 1000;
 /// Retransmissions after the initial send before a write is failed — so
-/// 6 transmissions total, and a worst case of
-/// `(1 + WRITE_MAX_REFIRES) * WRITE_ACK_TIMEOUT_MS` = 1.2s before the caller
-/// sees an error (versus 3s for the reference's 3-attempt/1s loop).
-pub const WRITE_MAX_REFIRES: u8 = 5;
+/// 3 transmissions total, and a worst case of
+/// `(1 + WRITE_MAX_REFIRES) * WRITE_ACK_TIMEOUT_MS` = 3s before the caller
+/// sees an error, the reference's own 3-attempt/1s loop.
+pub const WRITE_MAX_REFIRES: u8 = 2;
 /// Upper bound on writes queued behind the in-flight one for a single device.
 /// Only reachable when a device stops ACKing (each write then costs the full
-/// 1.2s above) while the UI keeps producing them — a fader drag against an
+/// 3s above) while the UI keeps producing them — a fader drag against an
 /// amp that just went offline. The *oldest* queued write is dropped rather
 /// than the newest, so the final position of a drag is the one that survives.
 pub const WRITE_QUEUE_MAX: usize = 64;
@@ -693,6 +703,18 @@ mod tests {
         // `pending` holds one entry per (ip, fc), so a second would supersede
         // the first rather than run beside it.
         assert!(registry.conflicts_with(IP, FC_BRIDGE, false));
+    }
+
+    /// A per-channel reply (FC=43 FIR) doesn't say which channel it answers,
+    /// so the resolved request has to.
+    #[test]
+    fn a_resolved_request_reports_its_chx() {
+        let mut registry = RequestRegistry::default();
+        let now = Instant::now();
+        let _ = registry.register(RequestSpec { chx: 2, ..spec(IP, 43, true) }, now);
+        registry.on_frame(IP, 43, vec![0; 16], now);
+        let (resolved, _) = registry.poll_deadlines(now + Duration::from_millis(SETTLE_MS + 1));
+        assert_eq!(resolved.iter().map(|r| r.chx).collect::<Vec<_>>(), [2]);
     }
 
     #[test]

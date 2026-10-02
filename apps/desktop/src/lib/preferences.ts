@@ -29,7 +29,7 @@ const DEFAULTS = {
 };
 
 type Preferences = typeof DEFAULTS;
-export type PreferenceKey = keyof Preferences;
+type PreferenceKey = keyof Preferences;
 
 /** Kept verbatim from before the store rewrite, so a user who had already
  * turned update checks off stays opted out. Every other key is `ampcore.<key>`. */

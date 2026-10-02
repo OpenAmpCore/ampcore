@@ -28,12 +28,10 @@ import { actionFailed, toActionResult, type ActionResult } from "./actionResult"
  * As of the 1.1.8 Tier-A pass the only member Direct Edit mode still leaves
  * undefined is `setChannelOhms` — a Project-only concept; the Load field
  * renders disabled when it is absent rather than sitting inert. Every other member has a live wire command. FIR is partly
- * here: its bypass flag (FC=44) is an ordinary action on both sources, while
- * `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) are
- * Direct-Edit-only — coefficients aren't part of the project file (see
- * `AmpChannel.fir_bypassed`, the only persisted FIR field), so Project mode
- * leaves them undefined and the FIR tab says so rather than offering a dead
- * control.
+ * here: its bypass flag (FC=44) is an ordinary action on both sources, and so
+ * are `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) —
+ * Direct Edit writes the amp (FC=43), Project mode stores `AmpChannel.fir`,
+ * which the next push writes. Only an edit-locked amp leaves them undefined.
  *
  * Note that an early-return on `undefined` is silent by design *only* where
  * a capability flag already explains the absence. Adding a new optional
@@ -53,10 +51,9 @@ export interface ConfigureActions {
   setChannelFirBypass(channelIndex: number, bypassed: boolean): Promise<ActionResult>;
   setChannelPowerMode(channelIndex: number, mode: PowerMode): Promise<ActionResult>;
 
-  /** FC=43 Import — coefficients live on the amp only, never in the project
-   * file, so this is undefined outside Direct Edit. */
+  /** FC=43 Import. Undefined only for an edit-locked amp. */
   setChannelFirData?(channelIndex: number, name: string, coefficients: number[]): Promise<ActionResult>;
-  /** FC=43 Remove — same live-only reasoning as `setChannelFirData`. */
+  /** FC=43 Remove — same rule as `setChannelFirData`. */
   clearChannelFirData?(channelIndex: number): Promise<ActionResult>;
 
   setChannelName?(channelIndex: number, side: EqDirection, name: string | null): Promise<ActionResult>;
@@ -161,6 +158,11 @@ export function createProjectConfigureActions(
       apply(commands.projectsSetChannelOutputMute(projectId, assignmentId, channelIndex, muted)),
     setChannelFirBypass: (channelIndex, bypassed) =>
       apply(commands.projectsSetChannelFirBypass(projectId, assignmentId, channelIndex, bypassed)),
+    setChannelFirData: (channelIndex, name, coefficients) =>
+      apply(commands.projectsSetChannelFir(projectId, assignmentId, channelIndex, { name, coefficients })),
+    // What an amp holds after the vendor's Remove: a unit impulse.
+    clearChannelFirData: (channelIndex) =>
+      apply(commands.projectsSetChannelFir(projectId, assignmentId, channelIndex, { name: "", coefficients: [1] })),
     setChannelPowerMode: (channelIndex, mode) =>
       apply(commands.projectsSetChannelPowerMode(projectId, assignmentId, channelIndex, mode)),
     setChannelName: (channelIndex, side, name) =>

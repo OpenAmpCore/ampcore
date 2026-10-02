@@ -8,9 +8,10 @@ import { commands, type AmpEditLock, type AmpPushPlan, type PushStage } from "..
  * `commands/amp_push.rs`). Declared here rather than imported because specta
  * only exports types a command's signature reaches, and this one is only ever
  * emitted. */
-type PushProgress = {
+export type PushProgress = {
   assignmentId: string;
   stageIndex: number;
+  stagesTotal: number;
   stageId: string;
   state: "running" | "done" | "failed";
   packetsDone: number;

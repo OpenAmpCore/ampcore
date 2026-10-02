@@ -2,7 +2,7 @@ import type { AmpAssignment, DiscoveredDevice } from "./bindings";
 
 /** Whether a project amp is tied to real hardware, and if so whether that
  * hardware is currently reachable. */
-export type AmpLinkStatus = "online" | "offline" | "unlinked";
+type AmpLinkStatus = "online" | "offline" | "unlinked";
 
 export const AMP_LINK_STATUS_META: Record<AmpLinkStatus, { color: string; label: string }> = {
   online: { color: "green", label: "Online" },

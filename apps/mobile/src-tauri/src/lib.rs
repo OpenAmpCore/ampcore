@@ -30,6 +30,7 @@ impl EventEmitter for MobileEmitter {
             LiveEvent::Telemetry(p) => self.0.emit("live_telemetry:updated", &p),
             LiveEvent::Presets(p) => self.0.emit("live_presets:updated", &p),
             LiveEvent::Bridge(_) => Ok(()),
+            LiveEvent::Fir(_) => Ok(()),
         }
         .ok();
     }

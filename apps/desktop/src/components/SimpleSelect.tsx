@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import { Description, Label, ListBox, Select } from "@heroui/react";
 
-export interface SimpleSelectOption {
+interface SimpleSelectOption {
   value: string;
   label: string;
 }

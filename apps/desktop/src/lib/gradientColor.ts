@@ -9,7 +9,7 @@
  * with no percentage are distributed evenly, the same as CSS does.
  */
 
-export type Rgb = readonly [r: number, g: number, b: number];
+type Rgb = readonly [r: number, g: number, b: number];
 
 interface GradientStop {
   color: Rgb;

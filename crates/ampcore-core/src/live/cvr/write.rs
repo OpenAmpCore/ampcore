@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::data::capability::PowerMode;
 use crate::data::project::{CrossoverSlotKind, EqDirection};
 
-use super::protocol::{is_known_family, wire_log_enabled, CHECKSUM_LEN, NETWORK_HEADER_LEN, STRUCT_HEADER_LEN};
+use super::protocol::{is_known_family, parse_network_data_header, wire_log_enabled, CHECKSUM_LEN, NETWORK_HEADER_LEN, STRUCT_HEADER_LEN};
 use super::request::{write_max_attempts, WriteError, WriteOutcome, WriteSpec};
 
 /// Wire `in_out_flag`: 0 = input side of a channel, 1 = output side.
@@ -390,7 +390,7 @@ pub async fn send_control(
     // Success lines are gated behind `AMPCORE_WIRE_LOG` (see
     // `protocol::wire_log_enabled`) because stdout from inside the driver loop
     // is what stalls ACK correlation in the first place. When enabled, the
-    // attempt count is the point: `1/6` is a clean link, anything higher is
+    // attempt count is the point: `1/3` is a clean link, anything higher is
     // packet loss the refires papered over and that would otherwise be
     // invisible. Failures always log, unconditionally: a device whose firmware
     // does not ACK writes at all shows up as a FAILED line on *every* write —
@@ -412,7 +412,22 @@ pub async fn send_control(
         Ok(_) => {}
         Err(e) => eprintln!("[cvr driver] write to {ip} FAILED: {e}"),
     }
+    if result.is_ok() && has_following_fragment(packet) {
+        tokio::time::sleep(FRAGMENT_GAP).await;
+    }
     result
+}
+
+/// Pause after each fragment of a multi-datagram frame (a FIR filter is five)
+/// before the next one. The amp ACKs a fragment within a few ms but, sent the
+/// next one straight away, ends up keeping a mix of the new filter and the one
+/// it held before. The old app paced fragments 5–10 ms apart for the same
+/// reason ("avoid overrunning DSP reassembly").
+const FRAGMENT_GAP: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// True for a fragment that is not the last of its frame.
+fn has_following_fragment(packet: &[u8]) -> bool {
+    parse_network_data_header(packet).is_some_and(|h| h.packets_step < h.packets_count)
 }
 
 #[cfg(test)]
@@ -436,5 +451,18 @@ mod tests {
         assert_eq!((fc(&v119[1]), body(&v119[1])), (87, vec![-40i8 as u8]));
 
         assert!(build_set_noise_gate(None, 2, true, -40).is_none());
+    }
+
+    /// Only the fragments of a FIR frame before its last are paced; a
+    /// single-datagram write and the replayed commit ACK never are.
+    #[test]
+    fn only_non_final_fragments_are_paced() {
+        let fir = build_set_fir_data(Some("1.1.8"), 0, "x", &[1.0]).unwrap();
+        let paced: Vec<bool> = fir.iter().map(|p| has_following_fragment(p)).collect();
+        assert!(fir.len() > 1);
+        assert_eq!(paced.iter().filter(|p| **p).count(), fir.len() - 1);
+        assert!(!paced[fir.len() - 1]);
+        assert!(!has_following_fragment(&build_set_output_mute(Some("1.1.8"), 0, true).unwrap()));
+        assert!(!has_following_fragment(&CROSSOVER_COMMIT_PACKET));
     }
 }

@@ -138,10 +138,14 @@ export const commands = {
 	 *  Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
 	 *  already merged in from a live amp (`amp_merge`) and already pushed back to
 	 *  one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
-	 *  Only the bypass flag lives here — the coefficients themselves are read from
-	 *  the device with FC=43 and never enter the project file.
+	 *  The filter itself is `projects_set_channel_fir`.
 	 */
 	projectsSetChannelFirBypass: (projectId: string, assignmentId: string, channelIndex: number, bypassed: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_fir_bypass", { projectId, assignmentId, channelIndex, bypassed })),
+	/**
+	 *  Sets an output's FIR filter — the FIR tab's Import, and its Clear (a unit
+	 *  impulse). Reaches the amp with the next push (`amp_push::plan_fir`).
+	 */
+	projectsSetChannelFir: (projectId: string, assignmentId: string, channelIndex: number, fir: ChannelFir) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_fir", { projectId, assignmentId, channelIndex, fir })),
 	/**
 	 *  Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
 	 *  must be even and have a following odd-indexed partner in the same
@@ -157,16 +161,15 @@ export const commands = {
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
 	/**
-	 *  Sets outputs up from one library entry: `items` are `(channel_index,
-	 *  way_index)` pairs, and each output gets its way's values (fitted to the
-	 *  amp) and reference. A way that doesn't fit as is is refused unless
-	 *  `accept_lossy`.
+	 *  Sets outputs up from the library: each item's output gets its way's values
+	 *  (fitted to the amp), reference and label as its name. A way that doesn't
+	 *  fit as is is refused unless `accept_lossy`.
 	 * 
 	 *  The change is made on a copy of the project amp. With the linked amp
 	 *  online (and not disengaged) that copy is pushed, and only becomes the
 	 *  project's once the amp holds it; otherwise it is saved as the plan.
 	 */
-	speakersApply: (projectId: string, assignmentId: string, libraryId: string, items: ([number, number])[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, libraryId, items, acceptLossy })),
+	speakersApply: (projectId: string, assignmentId: string, items: SpeakerItem[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, items, acceptLossy })),
 	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
 	/**
 	 *  Parses the old app's speaker preset files (JSON). With `commit`, every file
@@ -175,7 +178,7 @@ export const commands = {
 	 */
 	speakersImportProfiles: (files: ProfileUpload[], commit: boolean) => typedError<ProfileImportResult[], AppError>(__TAURI_INVOKE("speakers_import_profiles", { files, commit })),
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
-	speakersFit: (projectId: string, assignmentId: string, libraryId: string, items: ([number, number])[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, libraryId, items })),
+	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
@@ -536,28 +539,11 @@ export const commands = {
 	/**  Every amp in a project, in assignment order. */
 	fingerprintProject: (projectId: string) => typedError<AmpFingerprint[], AppError>(__TAURI_INVOKE("fingerprint_project", { projectId })),
 	/**
-	 *  Read-only: fingerprint of a live device from its latest FC=27 snapshot
-	 *  (plus FC=50 bridge state). Fails when no snapshot has arrived yet — the
-	 *  device must be polled first.
+	 *  Read-only: fingerprint of a live device from its latest FC=27 snapshot,
+	 *  FC=50 bridge state and the FIR filters the driver has read (FC=43). Fails
+	 *  when no snapshot has arrived yet — the device must be polled first.
 	 */
 	fingerprintLiveDevice: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device", { deviceId })),
-	/**
-	 *  `fingerprint_live_device` plus one FIR read (FC=43) per output channel.
-	 * 
-	 *  A separate command rather than a flag on the synchronous one, because
-	 *  `projects_amp_edit_lock` rebuilds a live fingerprint on every FC=27 poll
-	 *  tick (see `useAmpEditLock`) — putting eight five-fragment FIR exchanges on
-	 *  that path would saturate the line several times a second. This is the
-	 *  opt-in variant, called only by the fingerprint inspector.
-	 * 
-	 *  Reads are sequential, never concurrent: the per-IP reassembler cannot
-	 *  interleave two fragmented exchanges. Per-channel failures are swallowed —
-	 *  an unreadable (or pre-1.1.8, which `live_control_fetch_channel_fir` refuses
-	 *  before any I/O) channel simply keeps `fir: None` rather than failing the
-	 *  whole fingerprint, and nothing is added to `missing`, which would null
-	 *  `amp_hash` and flip the editor to `Unreadable`.
-	 */
-	fingerprintLiveDeviceWithFir: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device_with_fir", { deviceId })),
 	/**
 	 *  Every discovered device that has an FC=27 snapshot, ordered by device id.
 	 *  Devices never polled are skipped rather than failing the whole call.
@@ -829,6 +815,12 @@ export type AmpChannel = {
 	 *  project never needs the library to open or push; see `data/speaker.rs`.
 	 */
 	speaker?: SpeakerRef | null,
+	/**
+	 *  The FIR filter this output holds; a unit impulse when none is loaded,
+	 *  as on the amp. Hashed (taps only) and pushed like every other setting;
+	 *  the amp's own comes from the driver's FC=43 reads, not from FC=27.
+	 */
+	fir?: ChannelFir,
 };
 
 /**
@@ -1352,11 +1344,19 @@ export type ChannelFingerprint = {
 	speaker: SpeakerCanonical,
 	ampFields: ChannelAmpCanonical,
 	/**
-	 *  `None` unless a caller enriched this fingerprint with `attach_fir_stats`
-	 *  — FIR needs its own FC=43 round trip per channel, so the ordinary
-	 *  synchronous paths never populate it.
+	 *  `None` only for a live output whose FIR the driver hasn't read yet
+	 *  (also listed in `missing`).
 	 */
 	fir: ChannelFirStats | null,
+};
+
+/**
+ *  An output's FIR filter: the amp's 32-byte name and its taps (at most
+ *  `fir::FIR_MAX_TAPS`; shorter is zero-padded on the wire).
+ */
+export type ChannelFir = {
+	name: string,
+	coefficients: (number | null)[],
 };
 
 export type ChannelFirSnapshot = {
@@ -1399,21 +1399,28 @@ export type ChannelFirSnapshot = {
 };
 
 /**
- *  Derived FIR facts for one output channel — shown for context, never hashed
- *  (see the module doc comment). Deliberately excludes the 512 coefficients:
- *  this is what a reader needs to tell two filters apart, not the filter.
+ *  One output's FIR filter as the fingerprint shows it. Deliberately excludes
+ *  the 512 coefficients: `summary` is what tells two filters apart.
  */
 export type ChannelFirStats = {
 	/**
 	 *  `false` when the channel holds the unit impulse an empty channel keeps
-	 *  (`order == 1`) — i.e. no real filter is loaded.
+	 *  — i.e. no real filter is loaded.
 	 */
 	loaded: boolean,
-	/**  `None` when the amp replied with the 2048-byte nameless form. */
+	/**
+	 *  Shown, never hashed. `None` when the amp replied with the 2048-byte
+	 *  nameless form.
+	 */
 	name: string | null,
 	/**  Taps minus trailing zeros — the vendor's "Order: N Taps". */
 	order: number,
 	timeZeroMs: number | null,
+	/**
+	 *  "N taps · checksum" (`fir::taps_summary`): equal exactly when the
+	 *  hashed taps are.
+	 */
+	summary: string,
 };
 
 /**
@@ -1534,11 +1541,8 @@ export type DeviceChannelConfig = {
 };
 
 /**
- *  Command payload pairing a device id with one output channel's FC=43 FIR
- *  snapshot — what `live_control_fetch_channel_fir` returns. Unlike its
- *  siblings above there is no matching `LiveDeviceInner` field and no event:
- *  FIR is fetched on demand per channel and never refreshed behind the
- *  caller's back (see that command's doc comment).
+ *  Pairs a device id with one output channel's FC=43 FIR snapshot — what
+ *  `live_control_fetch_channel_fir` returns and `live_fir:updated` emits.
  */
 export type DeviceChannelFir = {
 	deviceId: string,
@@ -2006,6 +2010,17 @@ export type SpeakerDetails = {
 	wayLabels: string[],
 };
 
+/**
+ *  One output to set up: which way of which library entry goes onto it.
+ *  Entries may differ between items, so any number of speakers is one apply
+ *  — and one push.
+ */
+export type SpeakerItem = {
+	channelIndex: number,
+	libraryId: string,
+	wayIndex: number,
+};
+
 export type SpeakerLibraryEntry = {
 	id: string,
 	brand: string,
@@ -2033,6 +2048,11 @@ export type SpeakerProcessing = {
 	noiseGateThresholdDbu?: number | null,
 	powerMode?: PowerMode | null,
 	firBypassed?: boolean | null,
+	/**
+	 *  The FIR filter itself. An imported blob always carries one (a unit
+	 *  impulse is the preset saying "no FIR").
+	 */
+	fir?: ChannelFir | null,
 };
 
 /**  Which library way an output was set up from, and which revision of it. */

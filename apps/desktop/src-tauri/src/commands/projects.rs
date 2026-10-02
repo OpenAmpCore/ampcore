@@ -4,9 +4,10 @@ use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::capability::{PowerMode, SourceKind};
 use ampcore_core::data::channel_clipboard::{copy_from_project, paste_into_project, ChannelClip, ClipSection};
 use ampcore_core::data::project::{
-    AmpAssignment, AmpChannel, BackupPriorityPatch, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection,
-    LimiterPatch, Project, SourceTrimPatch,
+    AmpAssignment, AmpChannel, BackupPriorityPatch, ChannelFir, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch,
+    EqDirection, LimiterPatch, Project, SourceTrimPatch,
 };
+use ampcore_core::live::cvr::fir::FIR_MAX_TAPS;
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 
@@ -747,8 +748,7 @@ pub fn projects_set_channel_output_mute(
 /// Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
 /// already merged in from a live amp (`amp_merge`) and already pushed back to
 /// one (`PushAction::FirBypass`); this is the direct-edit leg that was missing.
-/// Only the bypass flag lives here — the coefficients themselves are read from
-/// the device with FC=43 and never enter the project file.
+/// The filter itself is `projects_set_channel_fir`.
 #[tauri::command]
 #[specta::specta]
 pub fn projects_set_channel_fir_bypass(
@@ -761,6 +761,33 @@ pub fn projects_set_channel_fir_bypass(
 ) -> Result<Project, AppError> {
     edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
         channel.fir_bypassed = bypassed;
+        Ok(())
+    })
+}
+
+/// Sets an output's FIR filter — the FIR tab's Import, and its Clear (a unit
+/// impulse). Reaches the amp with the next push (`amp_push::plan_fir`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_fir(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    fir: ChannelFir,
+) -> Result<Project, AppError> {
+    if fir.coefficients.len() > FIR_MAX_TAPS {
+        return Err(AppError::from(format!(
+            "FIR import has {} taps, more than the device's {FIR_MAX_TAPS}-tap array",
+            fir.coefficients.len()
+        )));
+    }
+    if fir.coefficients.iter().any(|c| !c.is_finite()) {
+        return Err(AppError::from("FIR coefficients must be finite numbers"));
+    }
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+        channel.fir = fir;
         Ok(())
     })
 }

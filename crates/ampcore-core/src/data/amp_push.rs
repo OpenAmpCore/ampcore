@@ -36,6 +36,7 @@ use super::fingerprint::{
     GAIN_STEPS, OHM_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
 use super::project::{AmpAssignment, AmpChannel, ChannelEq, CrossoverSlot, EqBand, EqDirection, SourceTrim};
+use crate::live::cvr::fir::ChannelFirSnapshot;
 use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use crate::live::cvr::write;
@@ -83,6 +84,9 @@ pub enum PushAction {
     PhaseInvert { channel: u8, inverted: bool },
     PowerMode { channel: u8, mode: PowerMode },
     FirBypass { channel: u8, bypassed: bool },
+    /// The whole FIR filter (FC=43). Planned by `plan_fir`, not `plan_push`:
+    /// the amp's FIR isn't in the FC=27 snapshot `plan_push` diffs against.
+    FirData { channel: u8, name: String, coefficients: Vec<f32> },
     NoiseGate { channel: u8, enabled: bool, threshold_dbu: i8 },
     RmsLimiter { channel: u8, enabled: bool, threshold_vrms: f64, attack_ms: f64, release_multiplier: f64 },
     RmsLimiterAuto { channel: u8, auto: bool },
@@ -99,6 +103,8 @@ impl PushAction {
         match self {
             // FC=11 SOURCE_SELECT, plus FC=79 for an analog pick.
             PushAction::Source { analog_index, .. } => 1 + u32::from(analog_index.is_some()),
+            // A 2093-byte frame in 450-byte fragments (see `fir.rs`).
+            PushAction::FirData { .. } => 5,
             // Everything else is one packet — including a whole EQ chain,
             // which is the entire point of FC=52.
             _ => 1,
@@ -617,6 +623,31 @@ fn plan_output_name(
     stage.finish(stages);
 }
 
+/// One "FIR filter" stage per output whose FIR taps the amp doesn't hold.
+/// Separate from `plan_push` because the amp's FIR isn't in the FC=27
+/// snapshot that diffs against: `live` is the driver's FC=43 readings
+/// (`LiveAmpReading.fir`). An output with no reading is left alone — the
+/// caller has already refused the push, since such an amp can't be
+/// fingerprinted. Compared exactly as the hash does: taps only, never the name.
+pub fn plan_fir(assignment: &AmpAssignment, live: &[ChannelFirSnapshot]) -> Vec<PlannedStage> {
+    let mut stages = Vec::new();
+    for channel in &assignment.channels {
+        let index = channel.channel_index;
+        let Some(held) = live.iter().find(|f| f.channel_index == index) else { continue };
+        let Ok(ch) = u8::try_from(index) else { continue };
+        let mut stage = StageBuilder::new(format!("fir-{index}"), format!("Out {}", output_letter(index)), "FIR filter");
+        if !channel.fir.same_taps(&held.coefficients) {
+            stage.push(PushAction::FirData {
+                channel: ch,
+                name: channel.fir.name.clone(),
+                coefficients: channel.fir.coefficients.clone(),
+            });
+        }
+        stage.finish(&mut stages);
+    }
+    stages
+}
+
 // ---------------------------------------------------------------------------
 // Device-determined fields
 // ---------------------------------------------------------------------------
@@ -785,6 +816,9 @@ pub fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec
         }
         PushAction::PowerMode { channel, mode } => vec![write::build_set_power_mode(firmware, *channel, *mode)?],
         PushAction::FirBypass { channel, bypassed } => vec![write::build_set_fir_bypass(firmware, *channel, *bypassed)?],
+        PushAction::FirData { channel, name, coefficients } => {
+            write::build_set_fir_data(firmware, *channel, name, coefficients)?
+        }
         PushAction::NoiseGate { channel, enabled, threshold_dbu } => {
             write::build_set_noise_gate(firmware, *channel, *enabled, *threshold_dbu)?
         }
@@ -831,7 +865,7 @@ mod tests {
     use super::super::amp_merge::mirror_live_into_assignment;
     use super::super::edit_lock::LiveAmpReading;
     use super::super::fingerprint::{fingerprint_live_device, fingerprint_project_amp};
-    use super::super::project::{ChannelSource, Project};
+    use super::super::project::{ChannelFir, ChannelSource, Project};
     use super::super::test_fixtures::*;
     use super::*;
     use crate::live::cvr::bridge::DeviceBridgeSnapshot;
@@ -945,6 +979,8 @@ mod tests {
                 let i = channel_of(snapshot, *channel);
                 snapshot.channels[i].fir_bypassed = *bypassed;
             }
+            // Not in the FC=27 snapshot, and never planned by `plan_push`.
+            PushAction::FirData { .. } => {}
             PushAction::NoiseGate { channel, enabled, threshold_dbu } => {
                 let i = channel_of(snapshot, *channel);
                 let config = &mut snapshot.channels[i];
@@ -1008,18 +1044,29 @@ mod tests {
         let (models, links) = (models(), links());
         let project = Project::new("Test".to_string(), String::new());
         let mut assignment = assignment();
+        // A filter the amp doesn't hold yet, so the FIR stage has work too.
+        assignment.channels[0].fir = ChannelFir { name: "top".to_string(), coefficients: vec![0.5, 0.25] };
         let mut snapshot = snapshot();
         let mut name = DEVICE_NAME.to_string();
         let mut bridged = bridged();
+        let mut fir = firs();
 
         let before = fingerprint_project_amp(&project, &assignment, &models);
-        let live_before = fingerprint_live_device(&device(), &snapshot, Some(&DeviceBridgeSnapshot { bridged: bridged.clone(), received_at: 0.0 }), &models, &links);
+        let live_before = fingerprint_live_device(&device(), &snapshot, Some(&DeviceBridgeSnapshot { bridged: bridged.clone(), received_at: 0.0 }), &fir, &models, &links);
         assert!(live_before.missing.is_empty(), "{:?}", live_before.missing);
         assert_ne!(before.amp_hash, live_before.amp_hash, "the fixture must start out different");
 
         let plan = plan_push(&assignment, &snapshot, &name, &bridged, 4).expect("plan");
         assert!(!plan.stages.is_empty());
         replay(&plan, &mut snapshot, &mut name, &mut bridged);
+        // FIR is planned against the driver's own readings and obeyed likewise.
+        for stage in plan_fir(&assignment, &fir) {
+            for action in &stage.actions {
+                if let PushAction::FirData { channel, name, coefficients } = action {
+                    fir[*channel as usize] = fir_snapshot(u32::from(*channel), name, coefficients);
+                }
+            }
+        }
         adopt_device_facts(&mut assignment, &snapshot);
 
         let mut device = device();
@@ -1029,6 +1076,7 @@ mod tests {
             &device,
             &snapshot,
             Some(&DeviceBridgeSnapshot { bridged: bridged.clone(), received_at: 0.0 }),
+            &fir,
             &models,
             &links,
         );
@@ -1050,7 +1098,7 @@ mod tests {
             config.noise_gate_threshold_dbu = Some(-37);
         }
         let reading =
-            LiveAmpReading { device: device.clone(), snapshot: Some(snapshot.clone()), bridge: Some(DeviceBridgeSnapshot { bridged: bridged(), received_at: 0.0 }) };
+            LiveAmpReading { device: device.clone(), snapshot: Some(snapshot.clone()), bridge: Some(DeviceBridgeSnapshot { bridged: bridged(), received_at: 0.0 }), fir: firs() };
         let mut assignment = assignment();
         assignment.firmware_version = Some("1.1.9".to_string());
         let mut assignment = mirror_live_into_assignment(&assignment, &reading, 4);
@@ -1072,7 +1120,7 @@ mod tests {
 
         let (mut name, mut bridged) = (DEVICE_NAME.to_string(), bridged());
         replay(&plan, &mut snapshot, &mut name, &mut bridged);
-        let live = fingerprint_live_device(&device, &snapshot, Some(&DeviceBridgeSnapshot { bridged, received_at: 0.0 }), &models, &links);
+        let live = fingerprint_live_device(&device, &snapshot, Some(&DeviceBridgeSnapshot { bridged, received_at: 0.0 }), &firs(), &models, &links);
         assert_eq!(fingerprint_project_amp(&project, &assignment, &models).amp_hash, live.amp_hash);
     }
 
@@ -1084,6 +1132,7 @@ mod tests {
             device: device(),
             snapshot: Some(snapshot()),
             bridge: Some(DeviceBridgeSnapshot { bridged: bridged(), received_at: 0.0 }),
+            fir: firs(),
         };
         let mirrored = mirror_live_into_assignment(&assignment(), &reading, 4);
         let plan = plan_push(&mirrored, &snapshot(), DEVICE_NAME, &bridged(), 4).expect("plan");
@@ -1105,6 +1154,7 @@ mod tests {
             device: device(),
             snapshot: Some(snapshot()),
             bridge: Some(DeviceBridgeSnapshot { bridged: bridged(), received_at: 0.0 }),
+            fir: firs(),
         };
         let mut assignment = mirror_live_into_assignment(&assignment(), &reading, 4);
         let mut snapshot = snapshot();
@@ -1159,6 +1209,29 @@ mod tests {
         assignment.channels[0].source = ChannelSource { kind: SourceKind::Dante, index: 2 };
         let error = plan_push(&assignment, &snapshot(), DEVICE_NAME, &bridged(), 4).expect_err("must refuse");
         assert!(error.0.contains("wired 1:1"), "{}", error.0);
+    }
+
+    #[test]
+    fn fir_is_planned_only_where_the_amp_holds_another() {
+        let fir = |name: &str, taps: &[f32]| ChannelFir { name: name.to_string(), coefficients: taps.to_vec() };
+        let mut assignment = assignment();
+        assignment.channels[0].fir = fir("top", &[0.5, 0.25]);
+        assignment.channels[2].fir = fir("sub", &[0.1]);
+        assignment.channels[3].fir = fir("mine", &[0.9]);
+        let live = [
+            fir_snapshot(0, "top", &[0.5, 0.3]),
+            // The wire's zero padding is no difference to the default unit impulse.
+            fir_snapshot(1, "---", &[1.0]),
+            // Nor is a name: it isn't hashed, so writing it could never help.
+            fir_snapshot(3, "theirs", &[0.9]),
+        ];
+        let stages = plan_fir(&assignment, &live);
+        // Channel 2 was never read, so it is left alone rather than guessed at.
+        assert_eq!(stages.iter().map(|s| s.stage.id.as_str()).collect::<Vec<_>>(), ["fir-0"]);
+        assert_eq!(stages[0].stage.packets, 5);
+        assert!(matches!(&stages[0].actions[..], [PushAction::FirData { channel: 0, .. }]));
+        let packets = action_packets(&stages[0].actions[0], Some("1.1.8")).expect("1.1.8 encodes FIR");
+        assert_eq!(packets.len() as u32, stages[0].stage.packets);
     }
 
     /// The regression this change exists for: a chain that differs anywhere is

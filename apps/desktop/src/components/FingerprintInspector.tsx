@@ -143,11 +143,7 @@ export function FingerprintInspector({
     const call =
       target.kind === "project"
         ? commands.fingerprintProjectAmp(target.projectId, target.assignmentId)
-        : // The enriching variant: adds a FIR read per channel, which the
-          // synchronous command deliberately skips because the edit lock
-          // rebuilds it on every poll tick. This modal is manual, so the extra
-          // round trips are affordable here and nowhere else.
-          commands.fingerprintLiveDeviceWithFir(target.deviceId);
+        : commands.fingerprintLiveDevice(target.deviceId);
     call.then((result) => {
       if (cancelled) return;
       setLoading(false);

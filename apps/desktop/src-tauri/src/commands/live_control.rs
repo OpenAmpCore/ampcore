@@ -14,7 +14,7 @@ use ampcore_core::live::state::{
     LiveWriteAck,
 };
 use ampcore_core::live::write_helpers::{
-    current_channel, current_crossover_slot, current_eq_band, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
+    current_channel, current_crossover_slot, current_eq_band, fetch_channel_fir, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
     resolve_write_target, send_writes, send_request_with_retry, unknown_firmware_error, validate_name, WriteTally,
 };
 
@@ -568,10 +568,13 @@ pub async fn live_control_set_channel_fir_data(
             fir::FIR_MAX_TAPS
         )));
     }
-    send_writes(&state, &device_id, |firmware| {
+    let ack = send_writes(&state, &device_id, |firmware| {
         write::build_set_fir_data(firmware, channel_index, &name, &coefficients)
     })
-    .await
+    .await?;
+    // The cached filter is the old one now; the driver reads this output next.
+    state.forget_fir(&device_id, u32::from(channel_index))?;
+    Ok(ack)
 }
 
 /// FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram.
@@ -584,7 +587,10 @@ pub async fn live_control_clear_channel_fir_data(
 ) -> Result<LiveWriteAck, AppError> {
     let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_fir_firmware(&device_id, firmware_family.as_deref())?;
-    send_writes(&state, &device_id, |firmware| Some(vec![write::build_clear_fir_data(firmware, channel_index)?])).await
+    let ack =
+        send_writes(&state, &device_id, |firmware| Some(vec![write::build_clear_fir_data(firmware, channel_index)?])).await?;
+    state.forget_fir(&device_id, u32::from(channel_index))?;
+    Ok(ack)
 }
 
 /// Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
@@ -893,32 +899,6 @@ pub async fn live_control_fetch_channel_fir(
     device_id: String,
     channel_index: u8,
 ) -> Result<DeviceChannelFir, AppError> {
-    let (ip, firmware_family, request_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
-        (device.ip, device.firmware_family, request_tx)
-    };
-    require_fir_firmware(&device_id, firmware_family.as_deref())?;
-
-    let frame = send_request_with_retry(
-        &request_tx,
-        &ip,
-        fir::FC_FIR_DATA,
-        channel_index,
-        fir::build_fir_request_body(),
-        true,
-        fir::FIR_IN_OUT_FLAG,
-    )
-    .await?;
-
-    let snapshot = fir::parse_fir_data(&frame, channel_index).ok_or_else(|| {
-        AppError::from(format!(
-            "device {} FC=43 response for channel {} had an unexpected shape ({} bytes)",
-            device_id,
-            channel_index,
-            frame.len()
-        ))
-    })?;
+    let snapshot = fetch_channel_fir(&state, &device_id, channel_index).await?;
     Ok(DeviceChannelFir { device_id, fir: snapshot })
 }

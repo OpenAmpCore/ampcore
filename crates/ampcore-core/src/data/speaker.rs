@@ -9,12 +9,12 @@
 //!
 //! What a way carries is `SpeakerProcessing`: the whole output side of a
 //! channel — output EQ, both limiter stages, delay, polarity, trim, noise
-//! gate, power mode and FIR bypass. Fields after polarity
+//! gate, power mode, FIR bypass and the FIR filter itself. Fields after polarity
 //! are `Option`: a preset that lacks one (an imported blob, an older way)
 //! leaves the amp's own value. `fit` adapts a way to the target amp's
 //! capability and reports what it had to drop or clamp. Left out:
-//! - FIR coefficients: the project stores none. The raw FC=57 blob is kept
-//!   (`SpeakerWay.fc57_hex`) for a later live pass that can write it whole;
+//! - the blob's DEQ block: this app has no DEQ. The raw FC=57 blob is kept
+//!   (`SpeakerWay.fc57_hex`), so nothing is lost for a later pass;
 //! - limiter `auto`/`max_*`: the maxima describe the amp, not the speaker
 //!   (the same rule as `channel_clipboard.rs`);
 //! - load (`ohms`): a fact the push adopts *from* the amp (`amp_push.rs`),
@@ -31,7 +31,7 @@ use super::common::{new_id, now_millis};
 use super::fingerprint::{
     canonical_eq, format_band, format_crossover, round_to_step, DELAY_STEPS, GAIN_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
-use super::project::{AmpAssignment, AmpChannel, ChannelEq, Limiter, SpeakerRef};
+use super::project::{AmpAssignment, AmpChannel, ChannelEq, ChannelFir, Limiter, SpeakerRef};
 use crate::live::cvr::speaker_data::{decode_speaker_data, hex_to_bytes, SpeakerData};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -53,6 +53,10 @@ pub struct SpeakerProcessing {
     pub power_mode: Option<PowerMode>,
     #[serde(default)]
     pub fir_bypassed: Option<bool>,
+    /// The FIR filter itself. An imported blob always carries one (a unit
+    /// impulse is the preset saying "no FIR").
+    #[serde(default)]
+    pub fir: Option<ChannelFir>,
 }
 
 /// `v` limited to `range`; a change is reported as `label: before → after`.
@@ -76,6 +80,7 @@ impl SpeakerProcessing {
             noise_gate_threshold_dbu: Some(channel.noise_gate_threshold_dbu),
             power_mode: Some(channel.power_mode),
             fir_bypassed: Some(channel.fir_bypassed),
+            fir: Some(channel.fir.clone()),
         }
     }
 
@@ -91,6 +96,7 @@ impl SpeakerProcessing {
             delay_out_ms: data.delay_ms as f64,
             phase_inverted: data.phase_inverted,
             fir_bypassed: Some(data.fir_bypassed),
+            fir: Some(ChannelFir { name: data.fir_name.clone().unwrap_or_default(), coefficients: data.fir_taps.clone() }),
             // The blob's volume and mute are never taken (see the module doc),
             // and it carries no trim, gate or power mode.
             output_trim_db: None,
@@ -176,6 +182,12 @@ impl SpeakerProcessing {
             issues.push("FIR bypass: dropped, this firmware has no FIR".into());
             out.fir_bypassed = None;
         }
+        if !fw.fir_filters {
+            if out.fir.as_ref().is_some_and(|f| !f.same_taps(&[1.0])) {
+                issues.push("FIR filter: dropped, this firmware has no FIR".into());
+            }
+            out.fir = None;
+        }
         let modes = &cap.topology.power_modes;
         if let Some(mode) = out.power_mode.filter(|m| !modes.is_empty() && !modes.contains(m)) {
             issues.push(format!("Power mode: {mode:?} dropped, this amp has no such mode"));
@@ -190,6 +202,7 @@ impl SpeakerProcessing {
         out.noise_gate_threshold_dbu = out.noise_gate_threshold_dbu.or(own.noise_gate_threshold_dbu);
         out.power_mode = out.power_mode.or(own.power_mode);
         out.fir_bypassed = out.fir_bypassed.or(own.fir_bypassed);
+        out.fir = out.fir.or(own.fir);
         Ok((out, issues))
     }
 
@@ -207,6 +220,7 @@ impl SpeakerProcessing {
         if let Some(v) = self.noise_gate_threshold_dbu { channel.noise_gate_threshold_dbu = v; }
         if let Some(v) = self.power_mode { channel.power_mode = v; }
         if let Some(v) = self.fir_bypassed { channel.fir_bypassed = v; }
+        if let Some(v) = &self.fir { channel.fir = v.clone(); }
     }
 
     /// Labelled, display-ready values, compared entry by entry. Uses the
@@ -257,6 +271,7 @@ impl SpeakerProcessing {
         out.push(("Noise gate threshold".into(), show(self.noise_gate_threshold_dbu.map(|v| format!("{v:.0} dBu")))));
         out.push(("Power mode".into(), show(self.power_mode.map(|m| format!("{m:?}")))));
         out.push(("FIR".into(), show(self.fir_bypassed.map(|b| if b { "bypassed" } else { "active" }.to_string()))));
+        out.push(("FIR filter".into(), show(self.fir.as_ref().map(ChannelFir::summary))));
         out
     }
 
@@ -493,14 +508,23 @@ pub struct ChannelSpeakerState {
     pub status: SpeakerStatus,
 }
 
-pub fn speaker_status(channel: &AmpChannel, speaker: &SpeakerRef, library: &[SpeakerLibraryEntry]) -> SpeakerStatus {
+/// With `cap`, the output is compared against the way as `fit` would write it
+/// onto this amp, so "Match" means "holds what applying would write" — a way
+/// the amp had to clamp must not read "Edited" for ever.
+pub fn speaker_status(
+    channel: &AmpChannel,
+    speaker: &SpeakerRef,
+    library: &[SpeakerLibraryEntry],
+    cap: Option<&AmpCapability>,
+) -> SpeakerStatus {
     let Some(entry) = library.iter().find(|e| e.id == speaker.library_id) else {
         return SpeakerStatus::Detached;
     };
     let Some(way) = entry.ways.get(speaker.way_index as usize) else {
         return SpeakerStatus::Detached;
     };
-    let fields = way.processing.differences(&SpeakerProcessing::from_channel(channel));
+    let fitted = cap.and_then(|cap| way.processing.fit(channel, cap).ok()).map(|(fitted, _)| fitted);
+    let fields = fitted.as_ref().unwrap_or(&way.processing).differences(&SpeakerProcessing::from_channel(channel));
     if entry.revision != speaker.revision {
         SpeakerStatus::LibraryUpdated { fields }
     } else if fields.is_empty() {
@@ -511,7 +535,11 @@ pub fn speaker_status(channel: &AmpChannel, speaker: &SpeakerRef, library: &[Spe
 }
 
 /// One state per output that has a speaker.
-pub fn speaker_states(assignment: &AmpAssignment, library: &[SpeakerLibraryEntry]) -> Vec<ChannelSpeakerState> {
+pub fn speaker_states(
+    assignment: &AmpAssignment,
+    library: &[SpeakerLibraryEntry],
+    cap: Option<&AmpCapability>,
+) -> Vec<ChannelSpeakerState> {
     assignment
         .channels
         .iter()
@@ -520,7 +548,7 @@ pub fn speaker_states(assignment: &AmpAssignment, library: &[SpeakerLibraryEntry
             Some(ChannelSpeakerState {
                 channel_index: channel.channel_index,
                 speaker: speaker.clone(),
-                status: speaker_status(channel, speaker, library),
+                status: speaker_status(channel, speaker, library, cap),
             })
         })
         .collect()
@@ -553,26 +581,26 @@ mod tests {
         let speaker = entry.reference(0).unwrap();
         assert_eq!(speaker.label, "Seeburg Hi");
         let library = vec![entry.clone()];
-        assert!(matches!(speaker_status(&ch, &speaker, &library), SpeakerStatus::Match));
+        assert!(matches!(speaker_status(&ch, &speaker, &library, None), SpeakerStatus::Match));
 
         // f32 wire rounding must not read as an edit.
         ch.delay_out_ms = 2.5 + 1e-9;
-        assert!(matches!(speaker_status(&ch, &speaker, &library), SpeakerStatus::Match));
+        assert!(matches!(speaker_status(&ch, &speaker, &library, None), SpeakerStatus::Match));
 
         ch.output_eq.bands[2].gain_db += 1.5;
         ch.output_eq.bands[2].active = true;
-        match speaker_status(&ch, &speaker, &library) {
+        match speaker_status(&ch, &speaker, &library, None) {
             SpeakerStatus::Edited { fields } => assert_eq!(fields, ["EQ · Band 3"]),
             other => panic!("{other:?}"),
         }
 
         entry.set_way_processing(0, SpeakerProcessing::from_channel(&ch)).unwrap();
-        match speaker_status(&ch, &speaker, &[entry.clone()]) {
+        match speaker_status(&ch, &speaker, &[entry.clone()], None) {
             SpeakerStatus::LibraryUpdated { fields } => assert!(fields.is_empty()),
             other => panic!("{other:?}"),
         }
 
-        assert!(matches!(speaker_status(&ch, &speaker, &[]), SpeakerStatus::Detached));
+        assert!(matches!(speaker_status(&ch, &speaker, &[], None), SpeakerStatus::Detached));
     }
 
     /// A way whose peak sits below the floor used to read "Edited" forever:
@@ -589,7 +617,7 @@ mod tests {
         let mut ch = channel();
         processing.apply_to(&mut ch);
         let speaker = entry.reference(0).unwrap();
-        assert!(matches!(speaker_status(&ch, &speaker, &[entry]), SpeakerStatus::Match));
+        assert!(matches!(speaker_status(&ch, &speaker, &[entry], None), SpeakerStatus::Match));
     }
 
     fn capability(firmware: &str) -> AmpCapability {
@@ -653,6 +681,24 @@ mod tests {
         assert!(way.fit(&ch, &capability("1.0.5")).is_err(), "no speaker management before 1.1.8");
     }
 
+    /// A way the amp had to clamp reads Match once applied — and Edited only
+    /// when the output is changed after that.
+    #[test]
+    fn a_clamped_way_matches_once_applied() {
+        let cap = capability("1.1.8");
+        let mut ch = channel();
+        let mut way = SpeakerProcessing::from_channel(&ch);
+        way.delay_out_ms = 25.0; // the amp takes 20
+        let entry = SpeakerLibraryEntry::new(details(1), vec![way.clone()]).unwrap();
+        let speaker = entry.reference(0).unwrap();
+        way.fit(&ch, &cap).unwrap().0.apply_to(&mut ch);
+        let library = [entry];
+        assert!(matches!(speaker_status(&ch, &speaker, &library, Some(&cap)), SpeakerStatus::Match));
+        assert!(matches!(speaker_status(&ch, &speaker, &library, None), SpeakerStatus::Edited { .. }));
+        ch.delay_out_ms = 3.0;
+        assert!(matches!(speaker_status(&ch, &speaker, &library, Some(&cap)), SpeakerStatus::Edited { .. }));
+    }
+
     #[test]
     fn whole_output_conflicts_with_older_firmware() {
         let mut saved_on_119 = channel();
@@ -670,6 +716,32 @@ mod tests {
         partial.output_trim_db = None;
         target.output_trim_db = -6.0;
         assert!(!partial.differences(&SpeakerProcessing::from_channel(&target)).contains(&"Output trim".to_string()));
+    }
+
+    #[test]
+    fn fir_travels_with_the_preset() {
+        let mut hex = "00".repeat(2310);
+        // FIR name "top" at +32, first tap 0.5 at +64.
+        hex.replace_range(64..70, "746f70");
+        hex.replace_range(128..136, "0000003f");
+        let profile: OldProfile = serde_json::from_str(&profile_json(&[&hex])).unwrap();
+        let entry = SpeakerLibraryEntry::from_profile(&profile).unwrap();
+        let fir = entry.ways[0].processing.fir.clone().expect("an imported way carries its FIR");
+        assert_eq!((fir.name.as_str(), fir.coefficients[0], fir.coefficients.len()), ("top", 0.5, 512));
+
+        // Applied, the output matches; with another filter on it, it doesn't.
+        let mut ch = channel();
+        let (fitted, issues) = entry.ways[0].processing.fit(&ch, &capability("1.1.8")).unwrap();
+        assert!(!issues.iter().any(|i| i.starts_with("FIR")), "{issues:?}");
+        assert!(fitted.fir.as_ref().is_some_and(|f| f.same_taps(&fir.coefficients)), "1.1.8 has FIR, so it is kept");
+        entry.ways[0].processing.apply_to(&mut ch);
+        let speaker = entry.reference(0).unwrap();
+        assert!(matches!(speaker_status(&ch, &speaker, &[entry.clone()], None), SpeakerStatus::Match));
+        ch.fir = ChannelFir::identity();
+        match speaker_status(&ch, &speaker, &[entry], None) {
+            SpeakerStatus::Edited { fields } => assert_eq!(fields, ["FIR filter"]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

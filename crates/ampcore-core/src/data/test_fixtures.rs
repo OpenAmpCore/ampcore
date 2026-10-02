@@ -11,11 +11,37 @@ use super::project::{
 };
 use crate::live::cvr::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
 use crate::live::cvr::channel_state::AmpChannelState;
+use crate::live::cvr::fir::{ChannelFirSnapshot, FIR_MAX_TAPS};
 use crate::live::state::DiscoveredDevice;
 
 pub(crate) const MAC: &str = "6A:20:67:18:B5:8A";
 pub(crate) const MODEL_ID: &str = "builtin-dsp-2004";
 pub(crate) const DEVICE_NAME: &str = "AMP-2004-ETH";
+
+/// One output's FIR as the driver reads it: `taps` zero-padded to the 512
+/// the wire always carries.
+pub(crate) fn fir_snapshot(channel_index: u32, name: &str, taps: &[f32]) -> ChannelFirSnapshot {
+    let mut coefficients = taps.to_vec();
+    coefficients.resize(FIR_MAX_TAPS, 0.0);
+    ChannelFirSnapshot {
+        channel_index,
+        name: Some(name.to_string()),
+        sample_rate_hz: 48_000,
+        max_taps: FIR_MAX_TAPS as u32,
+        order: taps.len() as u32,
+        time_zero_index: 0,
+        time_zero_ms: 0.0,
+        coefficients,
+        body_len: 2080,
+        received_at: 0.0,
+    }
+}
+
+/// The amp with no FIR loaded on any output — a unit impulse each, which is
+/// also what a freshly planned project output holds.
+pub(crate) fn firs() -> Vec<ChannelFirSnapshot> {
+    (0..4).map(|i| fir_snapshot(i, "---", &[1.0])).collect()
+}
 
 pub(crate) fn models() -> Vec<AmpModelCatalogEntry> {
     let mut entry = AmpModelCatalogEntry::new_builtin(MODEL_ID, "CVR", "DSP-2004", 4, false, AmpProtocol::CvrUdp);

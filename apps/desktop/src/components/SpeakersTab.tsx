@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
-import { Button, ButtonGroup, Chip, Dropdown, Modal, Spinner, dropdownVariants, toast } from "@heroui/react";
-import { FileUp, GripVertical, MoreHorizontal } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button, Chip, Modal, Spinner, toast } from "@heroui/react";
+import { listen } from "@tauri-apps/api/event";
+import { FileUp, GripVertical, Info, ListFilter, RotateCcw, Save, SplitSquareVertical, Trash2, Upload } from "lucide-react";
 import {
   commands,
   type AmpAssignment,
@@ -10,55 +11,60 @@ import {
   type ProfileImportResult,
   type SpeakerDetails,
   type SpeakerLibraryEntry,
+  type SpeakerProcessing,
 } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
+import type { ConfigureActions } from "../lib/configureActions";
 import { usePreference } from "../lib/preferences";
-import { speakerFields, speakerName } from "../lib/speakers";
+import { speakerName } from "../lib/speakers";
+import type { PushProgress } from "./AmpPushSteps";
 import { useConfirm } from "./ConfirmDialog";
 import { Hint } from "./Hint";
 import { SimpleSelect } from "./SimpleSelect";
+import {
+  MUTED,
+  RowMenu,
+  SpeakerBench,
+  buildCabinets,
+  outputRows,
+  type Cabinet,
+  type OutputRow,
+  type RowHighlight,
+} from "./SpeakerBench";
 import { FIELD_INPUT } from "./fieldClasses";
 
-const DROPDOWN_SLOTS = dropdownVariants();
 const DRAG_TYPE = "application/x-ampcore-speaker-id";
-const MUTED = "text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]";
-
-/** One output as this tab sees it: a bridged pair is one output, driven by
- * its leader — the follower is inert, as in the Output tab. */
-interface OutputRow {
-  leader: number;
-  label: string;
-}
-
-function letter(channelIndex: number): string {
-  return String.fromCharCode(65 + channelIndex);
-}
-
-function outputRows(assignment: AmpAssignment): OutputRow[] {
-  const channels = [...assignment.channels].sort((a, b) => a.channelIndex - b.channelIndex);
-  const bridged = new Set(channels.filter((c) => c.outputBridged && c.channelIndex % 2 === 0).map((c) => c.channelIndex));
-  return channels
-    .filter((c) => !(c.channelIndex % 2 === 1 && bridged.has(c.channelIndex - 1)))
-    .map((c) => ({
-      leader: c.channelIndex,
-      label: bridged.has(c.channelIndex) && c.channelIndex + 1 < channels.length
-        ? `${letter(c.channelIndex)}+${letter(c.channelIndex + 1)}`
-        : letter(c.channelIndex),
-    }));
-}
 
 type Assignment = { row: OutputRow; wayIndex: number };
+/** One output to set up; entries may differ between the items of one apply. */
+type ApplyItem = Assignment & { entry: SpeakerLibraryEntry };
+type ProjectResult = { status: "ok"; data: Project } | { status: "error"; error: { message: string } };
 
-/** The Speakers tab: this project amp's outputs on one side, this machine's
- * speaker library on the other. Assigning is one `speakersApply` — values and
- * reference together; the backend pushes them to the linked amp through the
- * sync endpoint when it is online. Project amps only; see `data/speaker.rs`. */
+/** A way's limiter thresholds, delay, polarity and FIR filter on one line. */
+function waySummary(p: SpeakerProcessing): string {
+  const { rms, peak } = p.limiter;
+  return [
+    rms.enabled ? `${(rms.thresholdVrms ?? 0).toFixed(1)} Vrms` : "RMS off",
+    peak.enabled ? `${(peak.thresholdVp ?? 0).toFixed(1)} Vp` : "peak off",
+    `${(p.delayOutMs ?? 0).toFixed(2)} ms`,
+    ...(p.phaseInverted ? ["inverted"] : []),
+    // Anything but a unit impulse is a real filter.
+    ...(p.fir?.coefficients.some((c, i) => (c ?? 0) !== (i === 0 ? 1 : 0)) ? [`FIR ${p.fir.name.trim() || "unnamed"}`] : []),
+  ].join(" · ");
+}
+
+/** The Speakers tab: a patch bench (`SpeakerBench`) of this project amp's
+ * outputs and speakers over this machine's speaker library. Assigning is one
+ * `speakersApply` — values and reference together; the backend pushes them to
+ * the linked amp through the sync endpoint when it is online. Project amps
+ * only; see `data/speaker.rs`. */
 export function SpeakersTab({
   project,
   assignment,
   library,
   states,
   locked,
+  actions,
   onProjectUpdate,
 }: {
   project: Project;
@@ -68,6 +74,8 @@ export function SpeakersTab({
   library: SpeakerLibraryEntry[];
   states: Map<number, ChannelSpeakerState>;
   locked: boolean;
+  /** For bridging only — everything else here goes through `commands`. */
+  actions: ConfigureActions | undefined;
   onProjectUpdate: (project: Project) => void;
 }) {
   const compact = useIsCompact();
@@ -77,68 +85,131 @@ export function SpeakersTab({
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState<SpeakerLibraryEntry | null>(null);
   const [dropRow, setDropRow] = useState<number | null>(null);
-  const [assignTarget, setAssignTarget] = useState<SpeakerLibraryEntry | null>(null);
+  const [loadTarget, setLoadTarget] = useState<SpeakerLibraryEntry | null>(null);
   const [details, setDetails] = useState<DetailsTarget | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  /** Selected output leaders, and the row a Shift-click ranges from. */
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const anchor = useRef<number | null>(null);
+  /** The running apply's last push event; `null` until its first write. */
+  const [progress, setProgress] = useState<PushProgress | null>(null);
 
-  async function assign(entry: SpeakerLibraryEntry, items: Assignment[]) {
-    if (locked || busy || items.length === 0) return;
+  // The push reports each packet; an apply to an offline amp reports nothing
+  // and is over at once.
+  useEffect(() => {
+    if (!busy) return;
+    let cancelled = false;
+    let stop: (() => void) | undefined;
+    void listen<PushProgress>("amp_push:progress", ({ payload: p }) => {
+      if (p.assignmentId === assignment.id && p.stagesTotal > 0) setProgress(p);
+    }).then((unlisten) => (cancelled ? unlisten() : (stop = unlisten)));
+    return () => {
+      cancelled = true;
+      stop?.();
+      setProgress(null);
+    };
+  }, [busy, assignment.id]);
+
+  const progressFraction = progress ? (progress.stageIndex + progress.packetsDone / (progress.packetsTotal || 1)) / progress.stagesTotal : 0;
+  const progressText = !progress ? "Applying…"
+    : progress.state === "done" && progress.stageIndex + 1 === progress.stagesTotal ? "Checking the amp…"
+    : `Writing ${progress.stageIndex + 1}/${progress.stagesTotal}`;
+
+  const off = locked || busy;
+  const cabinets = buildCabinets(rows, states, library);
+  const selectedRows = rows.flatMap((row, i) => (selected.has(row.leader) ? [i] : []));
+  const adjacent = selectedRows.every((r, i) => i === 0 || r === selectedRows[i - 1] + 1);
+
+  async function run(call: Promise<ProjectResult>, failure: string): Promise<boolean> {
+    const r = await call;
+    if (r.status === "ok") onProjectUpdate(r.data);
+    else toast.danger(failure, { description: r.error.message });
+    return r.status === "ok";
+  }
+
+  /** Removes the outputs' speaker references; their values stay. */
+  async function release(leaders: number[]) {
+    for (const leader of leaders) {
+      await run(commands.projectsSetChannelSpeaker(project.id, assignment.id, leader), "Speaker not removed");
+    }
+  }
+
+  /** The one way a speaker gets onto an output: fit, let the user decide,
+   * apply — every item in one `speakersApply`, so the amp gets one push.
+   * `preconfirmed` (the Load dialog, where the outputs were just picked) skips
+   * the question unless the amp has to adjust something. */
+  async function apply(
+    items: ApplyItem[],
+    ui: { title: string; intro: ReactNode; confirmLabel: string; preconfirmed?: boolean },
+  ): Promise<boolean> {
+    if (off || items.length === 0) return false;
     const outputs = items.map((i) => i.row.label).join(", ");
-    const pairs = items.map(({ row, wayIndex }): [number, number] => [row.leader, wayIndex]);
+    const pairs = items.map(({ row, entry, wayIndex }) => ({ channelIndex: row.leader, libraryId: entry.id, wayIndex }));
     // What this amp can't take as stored is shown first; the user decides.
-    const fit = await commands.speakersFit(project.id, assignment.id, entry.id, pairs);
+    const fit = await commands.speakersFit(project.id, assignment.id, pairs);
     if (fit.status !== "ok") {
-      toast.danger(`${speakerName(entry)} can't be applied`, { description: fit.error.message });
-      return;
+      toast.danger(`Speaker can't be applied to ${outputs}`, { description: fit.error.message });
+      return false;
     }
     const issues = fit.data.flatMap((f) => {
       const label = items.find((i) => i.row.leader === f.channelIndex)?.row.label;
       return f.issues.map((issue) => `${label}: ${issue}`);
     });
-    const ok = await confirm({
-      title: `Set up ${items.length === 1 ? "output" : "outputs"} ${outputs} as ${speakerName(entry)}?`,
-      description: showComparator ? (
-        <div className="flex max-h-[60vh] flex-col gap-3 overflow-auto">
-          {issues.length > 0 && (
-            <ul className="list-disc pl-5">
-              {issues.map((issue) => (
-                <li key={issue}>{issue}</li>
-              ))}
-            </ul>
-          )}
-          {fit.data.map((f) => {
-            const item = items.find((i) => i.row.leader === f.channelIndex);
-            const way = item ? entry.ways[item.wayIndex] : undefined;
-            return (
-              <FitDiff
-                key={f.channelIndex}
-                title={`Out ${item?.row.label}${way && entry.ways.length > 1 ? ` · ${way.label}` : ""}`}
-                rows={f.rows}
-              />
-            );
-          })}
-        </div>
-      ) : issues.length ? (
-        <div className="flex flex-col gap-2">
-          <span>This amp can't take the speaker exactly as stored. Applying writes these adjusted values:</span>
-          <ul className="max-h-48 list-disc overflow-auto pl-5">
-            {issues.map((issue) => (
-              <li key={issue}>{issue}</li>
-            ))}
-          </ul>
-        </div>
-      ) : (
-        "Their output EQ, limiters, delay and polarity are replaced with the speaker's."
-      ),
-      confirmLabel: issues.length ? "Apply anyway" : "Apply",
-    });
-    if (!ok) return;
-    setBusy(true);
-    await runProjectCommand(
-      commands.speakersApply(project.id, assignment.id, entry.id, pairs, true),
-      `Speaker not applied to ${outputs}`,
+    const issueList = issues.length > 0 && (
+      <ul className="max-h-48 list-disc overflow-auto pl-5">
+        {issues.map((issue) => (
+          <li key={issue}>{issue}</li>
+        ))}
+      </ul>
     );
+    if (!ui.preconfirmed || issues.length > 0 || showComparator) {
+      const ok = await confirm({
+        title: ui.title,
+        description: showComparator ? (
+          <div className="flex max-h-[60vh] flex-col gap-3 overflow-auto">
+            {issueList}
+            {fit.data.map((f) => {
+              const item = items.find((i) => i.row.leader === f.channelIndex);
+              const way = item?.entry.ways[item.wayIndex];
+              return (
+                <FitDiff
+                  key={f.channelIndex}
+                  title={`Out ${item?.row.label}${way && item && item.entry.ways.length > 1 ? ` · ${way.label}` : ""}`}
+                  rows={f.rows}
+                />
+              );
+            })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {ui.intro}
+            {issueList && <span>This amp can't take everything exactly as stored. Applying writes these adjusted values:</span>}
+            {issueList}
+          </div>
+        ),
+        confirmLabel: issues.length ? "Apply anyway" : ui.confirmLabel,
+      });
+      if (!ok) return false;
+    }
+    setBusy(true);
+    const r = await commands.speakersApply(project.id, assignment.id, pairs, true);
     setBusy(false);
+    if (r.status === "ok") onProjectUpdate(r.data);
+    // Stays up: it says what the amp does and doesn't hold now.
+    else toast.danger(`Speaker not applied to ${outputs}`, { description: r.error.message, timeout: 0 });
+    return r.status === "ok";
+  }
+
+  function assign(entry: SpeakerLibraryEntry, items: Assignment[], preconfirmed = false): Promise<boolean> {
+    return apply(
+      items.map((item) => ({ ...item, entry })),
+      {
+        title: `Set up ${items.length === 1 ? "output" : "outputs"} ${items.map((i) => i.row.label).join(", ")} as ${speakerName(entry)}?`,
+        intro: <span>Their output EQ, limiters, delay, polarity and FIR filter are replaced with the speaker's.</span>,
+        confirmLabel: "Apply",
+        preconfirmed,
+      },
+    );
   }
 
   /** A drop on `rowIndex` fills one output per way, starting there. */
@@ -147,51 +218,186 @@ export function SpeakersTab({
     return entry.ways.map((_, wayIndex) => ({ row: rows[rowIndex + wayIndex], wayIndex }));
   }
 
-  async function runProjectCommand(call: Promise<{ status: "ok"; data: Project } | { status: "error"; error: { message: string } }>, failure: string) {
-    const r = await call;
-    if (r.status === "ok") onProjectUpdate(r.data);
-    else toast.danger(failure, { description: r.error.message });
+  function select(rowIndex: number | null, { toggle, range }: { toggle: boolean; range: boolean }) {
+    if (rowIndex === null) {
+      setSelected(new Set());
+      anchor.current = null;
+      return;
+    }
+    const leader = rows[rowIndex].leader;
+    if (range && anchor.current !== null) {
+      const [lo, hi] = [Math.min(anchor.current, rowIndex), Math.max(anchor.current, rowIndex)];
+      setSelected(new Set(rows.slice(lo, hi + 1).map((r) => r.leader)));
+      return;
+    }
+    if (toggle) {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(leader)) next.add(leader);
+        return next;
+      });
+    } else {
+      setSelected(new Set([leader]));
+    }
+    anchor.current = rowIndex;
   }
 
-  async function handleRowAction(row: OutputRow, rowIndex: number, action: string) {
+  /** A cable dragged from a cabinet's way to an output: that way moves there. */
+  async function link(cabinet: Cabinet, wayIndex: number, rowIndex: number) {
+    if (!cabinet.entry) return;
+    const from = cabinet.ports.find((p) => p.wayIndex === wayIndex)?.rowIndex ?? null;
+    const oldLeader = from !== null ? rows[from].leader : null;
+    if (!(await assign(cabinet.entry, [{ row: rows[rowIndex], wayIndex }]))) return;
+    if (oldLeader !== null) await release([oldLeader]);
+  }
+
+  // One unbridged pair (A and B) selected bridges it; one bridged output selected unbridges it.
+  const [first, second] = [rows[selectedRows[0]], rows[selectedRows[1]]];
+  const bridgeTarget =
+    selectedRows.length === 1 && first.bridged ? { leader: first.leader, bridged: false }
+    : selectedRows.length === 2 && first.leader % 2 === 0 && second.leader === first.leader + 1 ? { leader: first.leader, bridged: true }
+    : null;
+  // Two outputs that hold a speaker are not merged into one behind the user's
+  // back: their speakers are removed first.
+  const bridgeBlocked = !!bridgeTarget?.bridged && (states.has(first.leader) || states.has(second.leader));
+
+  async function toggleBridge() {
+    if (!bridgeTarget || bridgeBlocked || !actions?.setOutputBridge) return;
+    const { leader, bridged } = bridgeTarget;
+    const [a, b] = [String.fromCharCode(65 + leader), String.fromCharCode(66 + leader)];
+    // The Output tab's own wording (`handleBridgeToggle`).
+    const ok = await confirm(
+      bridged
+        ? {
+            title: `Bridge outputs ${a} and ${b}?`,
+            description: `${b} will follow ${a} at combined power. Make sure it's wired for bridge mode first.`,
+            image: { light: "/bridged_graphic_b.png", dark: "/bridged_graphic_w.png" },
+            confirmLabel: "Bridge",
+          }
+        : {
+            title: `Unbridge outputs ${a} and ${b}?`,
+            description: `${a} and ${b} go back to driving separate speakers. Rewire them first.`,
+            confirmLabel: "Unbridge",
+          },
+    );
+    if (!ok) return;
+    setBusy(true);
+    const r = await actions.setOutputBridge(leader, bridged);
+    setBusy(false);
+    if (!r.ok) toast.danger(bridged ? "Outputs not bridged" : "Outputs not unbridged", { description: r.message });
+    setSelected(new Set());
+  }
+
+  const heldRows = selectedRows.map((i) => rows[i]).filter((row) => states.has(row.leader));
+
+  async function removeSpeakers() {
+    const ok = await confirm({
+      title: `Remove the speaker from ${heldRows.length === 1 ? "output" : "outputs"} ${heldRows.map((r) => r.label).join(", ")}?`,
+      description: "The outputs keep their values; only the link to the library is removed.",
+      confirmLabel: "Remove",
+    });
+    if (!ok) return;
+    setBusy(true);
+    await release(heldRows.map((r) => r.leader));
+    setBusy(false);
+    setSelected(new Set());
+  }
+
+  /** Outputs that no longer hold what their library way says, and can be re-applied. */
+  const stale = rows.flatMap((row) => {
     const state = states.get(row.leader);
+    const kind = state?.status.kind;
     const entry = state && library.find((e) => e.id === state.speaker.libraryId);
-    if (action === "reapply" && entry && state) {
-      await assign(entry, [{ row, wayIndex: state.speaker.wayIndex }]);
-    } else if (action === "update" && state) {
+    return state && entry && (kind === "edited" || kind === "libraryUpdated") ? [{ row, state, entry }] : [];
+  });
+
+  async function applyAll() {
+    const done = await apply(
+      stale.map(({ row, state, entry }) => ({ row, entry, wayIndex: state.speaker.wayIndex })),
+      {
+        title: `Re-apply ${stale.length} ${stale.length === 1 ? "output" : "outputs"} from the library?`,
+        intro: (
+          <>
+            <span>These outputs get their library values back. Edits made on them are lost.</span>
+            <ul className="max-h-48 list-disc overflow-auto pl-5">
+              {stale.map(({ row, state }) => (
+                <li key={row.leader}>
+                  {row.label}: {state.speaker.label} ({state.status.kind === "edited" ? "edited" : "library updated"})
+                </li>
+              ))}
+            </ul>
+          </>
+        ),
+        confirmLabel: "Apply all",
+      },
+    );
+    if (done) toast.success(`${stale.length} ${stale.length === 1 ? "output" : "outputs"} re-applied`);
+  }
+
+  const bridgedRows = rows.filter((r) => r.bridged);
+
+  async function clearAll() {
+    const setBridge = actions?.setOutputBridge;
+    const pairs = bridgedRows.map((r) => r.label).join(", ");
+    const ok = await confirm({
+      title: "Remove every speaker from this amp?",
+      description:
+        "All outputs keep their values; only their links to the library are removed." +
+        (bridgedRows.length === 0 ? ""
+          : setBridge ? ` ${pairs} ${bridgedRows.length === 1 ? "is" : "are"} unbridged — rewire first.`
+          : ` Bridging (${pairs}) can't be changed here and is left as it is.`),
+      confirmLabel: "Clear all",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setSelected(new Set());
+    setBusy(true);
+    await release([...states.keys()]);
+    if (setBridge) {
+      for (const row of bridgedRows) {
+        const r = await setBridge(row.leader, false);
+        if (!r.ok) toast.danger(`Outputs ${row.label} not unbridged`, { description: r.message });
+      }
+    }
+    setBusy(false);
+  }
+
+  function cabinetMenu(cabinet: Cabinet) {
+    const kinds = cabinet.ports.map((p) => p.state?.status.kind);
+    return [
+      ...(cabinet.entry && kinds.some((k) => k === "edited" || k === "libraryUpdated") ? [{ id: "reapply", label: "Re-apply from library" }] : []),
+      ...(kinds.includes("edited") ? [{ id: "update", label: "Update library from these outputs…" }] : []),
+      ...(cabinet.entry ? [{ id: "edit", label: "Edit details…" }] : []),
+      { id: "remove", label: "Remove speaker (keep values)" },
+    ];
+  }
+
+  async function handleCabinetAction(cabinet: Cabinet, action: string) {
+    const linked = cabinet.ports.flatMap((p) => (p.rowIndex !== null && p.rowIndex >= 0 ? [{ ...p, row: rows[p.rowIndex] }] : []));
+    if (action === "reapply" && cabinet.entry) {
+      await assign(cabinet.entry, linked.map(({ row, wayIndex }) => ({ row, wayIndex })));
+    } else if (action === "update") {
+      const edited = linked.filter((p) => p.state?.status.kind === "edited");
       const ok = await confirm({
-        title: `Update ${state.speaker.label} from output ${row.label}?`,
-        description: "The library way takes this output's values. Other outputs set up from it will show \"Library updated\".",
+        title: `Update ${cabinet.title} from ${edited.length === 1 ? "output" : "outputs"} ${edited.map((p) => p.row.label).join(", ")}?`,
+        description: "The library takes these outputs' values. Other outputs set up from it will show \"Library updated\".",
         confirmLabel: "Update library",
       });
-      if (ok) await runProjectCommand(commands.speakersUpdateFromOutput(project.id, assignment.id, row.leader), "Library not updated");
-    } else if (action === "remove") {
-      await runProjectCommand(
-        commands.projectsSetChannelSpeaker(project.id, assignment.id, row.leader),
-        "Speaker not removed",
-      );
-    } else if (action === "save") {
-      setDetails({ kind: "save", rowIndex });
-    } else if (action === "why" && state) {
-      // Asks the backend now, so a chip that stopped updating gives itself away.
-      const r = await commands.speakersChannelStates(project.id, assignment.id);
-      const fresh = r.status === "ok" ? r.data.find((s) => s.channelIndex === row.leader) : undefined;
-      if (!fresh) {
-        toast.danger(`Output ${row.label}: status not readable`, { description: r.status === "ok" ? "No speaker here any more." : r.error.message });
-        return;
+      if (!ok) return;
+      for (const p of edited) {
+        await run(commands.speakersUpdateFromOutput(project.id, assignment.id, p.row.leader), "Library not updated");
       }
-      const s = fresh.status;
-      const fields = speakerFields(s);
-      let description = "Every compared value matches.";
-      if (fields.length) description = `Differs from the library: ${fields.join(", ")}.`;
-      else if (s.kind === "detached") description = "Not in this machine's library.";
-      if (s.kind !== state.status.kind) description += ` This view showed "${state.status.kind}" — it was stale.`;
-      toast(`Output ${row.label}: ${s.kind}`, { description, timeout: 0 });
+    } else if (action === "edit" && cabinet.entry) {
+      setDetails({ kind: "edit", entry: cabinet.entry });
+    } else if (action === "remove") {
+      setBusy(true);
+      await release(linked.map((p) => p.row.leader));
+      setBusy(false);
     }
   }
 
   async function handleLibraryAction(entry: SpeakerLibraryEntry, action: string) {
-    if (action === "assign") setAssignTarget(entry);
+    if (action === "assign") setLoadTarget(entry);
     else if (action === "edit") setDetails({ kind: "edit", entry });
     else if (action === "delete") {
       const ok = await confirm({
@@ -209,52 +415,108 @@ export function SpeakersTab({
 
   const span = dragging && dropRow !== null ? dropSpan(dragging, dropRow) : null;
   const spanRows = new Set(span?.map((s) => s.row.leader) ?? (dragging && dropRow !== null ? [rows[dropRow].leader] : []));
+  const highlightFor = (rowIndex: number): RowHighlight =>
+    spanRows.has(rows[rowIndex].leader)
+      ? span ? "fits" : "overflow"
+      : dragging && !locked && dropSpan(dragging, rowIndex) ? "start" : null;
+
+  const counts = [...states.values()].reduce<Record<string, number>>((acc, s) => {
+    acc[s.status.kind] = (acc[s.status.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+  const summary = [
+    counts.match && `${counts.match} match`,
+    counts.edited && `${counts.edited} edited`,
+    counts.libraryUpdated && `${counts.libraryUpdated} library updated`,
+    counts.detached && `${counts.detached} detached`,
+  ].filter(Boolean).join(" · ");
+
+  const tool = (label: string, icon: ReactNode, hint: string, enabled: boolean, onPress: () => void) => (
+    <Hint text={hint} className="shrink-0">
+      <Button size="sm" variant="secondary" isDisabled={off || !enabled} onPress={onPress}>
+        {icon} {label}
+      </Button>
+    </Hint>
+  );
 
   return (
+    // Bench and library side by side; stacked once neither would be usable.
     <div className={`flex h-full min-h-0 min-w-0 gap-4 p-4 ${compact ? "flex-col overflow-auto" : ""}`}>
-      <Pane title="Outputs" compact={compact}>
-        {rows.map((row, rowIndex) => (
-          <OutputSpeakerRow
-            key={row.leader}
-            row={row}
-            state={states.get(row.leader)}
-            continues={isSameSpeaker(states.get(rows[rowIndex - 1]?.leader), states.get(row.leader))}
-            highlight={spanRows.has(row.leader) ? (span ? "fits" : "overflow") : null}
-            disabled={locked || busy}
-            onDragOver={(e) => {
-              if (!dragging || locked) return;
-              e.preventDefault();
-              setDropRow(rowIndex);
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              const entry = library.find((l) => l.id === e.dataTransfer.getData(DRAG_TYPE));
-              setDragging(null);
-              setDropRow(null);
-              const items = entry && dropSpan(entry, rowIndex);
-              if (entry && items) void assign(entry, items);
-            }}
-            onAction={(action) => void handleRowAction(row, rowIndex, action)}
-          />
-        ))}
-        {busy && (
-          <div className="flex items-center gap-2">
-            <Spinner size="sm" />
-            <span className={MUTED}>Applying…</span>
-          </div>
+     <div className={`flex min-w-0 flex-[3] flex-col gap-3 ${compact ? "" : "min-h-0"}`}>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        {tool(
+          bridgeTarget && !bridgeTarget.bridged ? "Unbridge" : "Bridge",
+          <SplitSquareVertical size={14} />,
+          bridgeBlocked ? "Remove the speakers from these outputs first."
+            : actions?.setOutputBridge || locked
+              ? "Select both outputs of a pair (A and B) to bridge them, or a bridged output to unbridge it."
+              : "Bridging isn't available for this amp.",
+          !!bridgeTarget && !bridgeBlocked && !!actions?.setOutputBridge,
+          () => void toggleBridge(),
         )}
-      </Pane>
+        {tool("Remove speaker", <RotateCcw size={14} />, "Remove the speaker from the selected outputs. Their values stay.", heldRows.length > 0, () => void removeSpeakers())}
+        {tool("Save as speaker…", <Save size={14} />, "Save the selected adjacent outputs to the library, one way per output.", selectedRows.length > 0 && adjacent, () =>
+          setDetails({ kind: "save", rowIndex: selectedRows[0], ways: selectedRows.length }),
+        )}
+        <span className="mx-1 h-5 w-px shrink-0 bg-[var(--amp-color-default-border)]" />
+        {tool("Apply all", <Upload size={14} />, "Re-apply every output that no longer matches its library speaker.", stale.length > 0, () => void applyAll())}
+        {tool("Clear all", <Trash2 size={14} />, "Remove every speaker and every bridge from this amp. The outputs keep their values.", states.size > 0 || bridgedRows.length > 0, () => void clearAll())}
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+          {busy && <Spinner size="sm" />}
+          <span className={`${MUTED} truncate`}>{busy ? progressText : summary}</span>
+        </div>
+      </div>
+      {/* One bar for the whole apply; always laid out, so nothing jumps. */}
+      <div className="h-1 shrink-0 overflow-hidden rounded-full bg-[var(--amp-color-gray-light)]" style={{ opacity: busy ? 1 : 0 }}>
+        <div className="h-full bg-accent transition-[width] duration-150" style={{ width: `${Math.min(1, progressFraction) * 100}%` }} />
+      </div>
 
-      <Pane
-        title="Library"
-        compact={compact}
-        actions={
-          <Button size="sm" variant="secondary" isDisabled={locked} onPress={() => setImportOpen(true)}>
-            <FileUp size={14} /> Import .sl…
-          </Button>
-        }
+      <div className={`min-w-0 overflow-auto ${compact ? "" : "min-h-0 flex-1"}`}>
+        <SpeakerBench
+          rows={rows}
+          states={states}
+          cabinets={cabinets}
+          selected={selected}
+          disabled={off}
+          highlightFor={highlightFor}
+          onSelect={select}
+          onRowDragOver={(rowIndex, e) => {
+            if (!dragging || locked) return;
+            e.preventDefault();
+            setDropRow(rowIndex);
+          }}
+          onRowDrop={(rowIndex, e) => {
+            e.preventDefault();
+            const entry = library.find((l) => l.id === e.dataTransfer.getData(DRAG_TYPE));
+            setDragging(null);
+            setDropRow(null);
+            const items = entry && dropSpan(entry, rowIndex);
+            if (entry && items) void assign(entry, items);
+          }}
+          onLink={(cabinet, wayIndex, rowIndex) => void link(cabinet, wayIndex, rowIndex)}
+          menuFor={cabinetMenu}
+          onCabinetAction={(cabinet, action) => void handleCabinetAction(cabinet, action)}
+        />
+      </div>
+      <span className={`${MUTED} shrink-0`}>
+        Click outputs to select (Ctrl / Shift for several) · drag a library speaker onto an output · drag a speaker's port to move that way to another output
+      </span>
+     </div>
+
+      <section
+        className={`flex min-w-0 flex-[2] flex-col gap-2 ${
+          compact ? "min-h-[260px]" : "min-h-0 border-l border-[var(--amp-color-default-border)] pl-4"
+        }`}
       >
-        <LibraryList
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">
+            Library <span className={MUTED}>{library.length}</span>
+          </h3>
+          <Button size="sm" variant="secondary" isDisabled={locked} onPress={() => setImportOpen(true)}>
+            <FileUp size={14} /> Import presets…
+          </Button>
+        </div>
+        <LibraryTable
           library={library}
           disabled={locked}
           onDragStart={setDragging}
@@ -264,9 +526,9 @@ export function SpeakersTab({
           }}
           onAction={(entry, action) => void handleLibraryAction(entry, action)}
         />
-      </Pane>
+      </section>
 
-      <AssignModal entry={assignTarget} rows={rows} onClose={() => setAssignTarget(null)} onAssign={(e, items) => void assign(e, items)} />
+      <LoadModal entry={loadTarget} rows={rows} states={states} onClose={() => setLoadTarget(null)} onAssign={(e, items) => void assign(e, items, true)} />
       <DetailsModal
         target={details}
         rows={rows}
@@ -280,6 +542,7 @@ export function SpeakersTab({
           const r = await commands.speakersSaveFromOutputs(project.id, assignment.id, channels, value);
           if (r.status !== "ok") return r.error.message;
           onProjectUpdate(r.data);
+          setSelected(new Set());
           return null;
         }}
       />
@@ -341,151 +604,26 @@ function FitDiff({ title, rows }: { title: string; rows: FitRow[] }) {
   );
 }
 
-function isSameSpeaker(prev: ChannelSpeakerState | undefined, cur: ChannelSpeakerState | undefined): boolean {
-  return !!prev && !!cur && prev.speaker.libraryId === cur.speaker.libraryId && cur.speaker.wayIndex === prev.speaker.wayIndex + 1;
-}
+/** grip, note, Brand, Model, Family, Application, Ways, menu. Way labels are
+ * left to the drag card and the Load dialog: the table sits in half the tab. */
+const LIBRARY_COLS =
+  "grid min-w-[480px] grid-cols-[20px_24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px] items-center gap-2 px-2";
 
-function Pane({ title, compact, actions, children }: { title: string; compact: boolean; actions?: ReactNode; children: ReactNode }) {
-  return (
-    <section className={`flex min-w-0 flex-1 flex-col gap-2 ${compact ? "" : "min-h-0"}`}>
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold">{title}</h3>
-        {actions}
-      </div>
-      <div className={`flex min-w-0 flex-col gap-1 ${compact ? "" : "min-h-0 flex-1 overflow-auto"}`}>{children}</div>
-    </section>
-  );
-}
-
-/** A ⋯ button with its menu — the standalone-overlay pattern of the preset
- * rows (`triggerRef` + `isOpen`), since `Dropdown.Menu` is a RAC collection
- * and its items must be direct children. */
-function RowMenu({ label, items, disabled, onAction }: {
-  label: string;
-  items: Array<{ id: string; label: string; danger?: boolean }>;
-  disabled?: boolean;
-  onAction: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  if (items.length === 0) return null;
-  return (
-    <>
-      <div ref={ref} className="flex">
-        <Button size="sm" variant="ghost" isIconOnly aria-label={label} isDisabled={disabled} onPress={() => setOpen((o) => !o)}>
-          <MoreHorizontal size={16} />
-        </Button>
-      </div>
-      <Dropdown.Popover triggerRef={ref} isOpen={open} onOpenChange={setOpen} placement="bottom end" className={`${DROPDOWN_SLOTS.popover()} min-w-[200px]`}>
-        <Dropdown.Menu
-          className={DROPDOWN_SLOTS.menu()}
-          onAction={(key) => {
-            setOpen(false);
-            onAction(String(key));
-          }}
-        >
-          {items.map((item) => (
-            <Dropdown.Item key={item.id} id={item.id} className={item.danger ? "text-danger" : undefined}>
-              {item.label}
-            </Dropdown.Item>
-          ))}
-        </Dropdown.Menu>
-      </Dropdown.Popover>
-    </>
-  );
-}
-
-export function StatusChip({ state }: { state: ChannelSpeakerState }) {
-  const s = state.status;
-  const fields = speakerFields(s);
-  const [text, color] =
-    s.kind === "match" ? ["Match", "success"] as const
-    : s.kind === "edited" ? ["Edited", "warning"] as const
-    : s.kind === "libraryUpdated" ? ["Library updated", "accent"] as const
-    : ["Detached", "default"] as const;
-  const title =
-    s.kind === "detached" ? "No longer in this machine's library — the output keeps its values."
-    : fields.length > 0 ? `Differs: ${fields.join(", ")}`
-    : s.kind === "match" ? "Matches the library." : undefined;
-  return (
-    <Hint text={title} className="shrink-0">
-      <Chip size="sm" color={color}>{text}</Chip>
-    </Hint>
-  );
-}
-
-function OutputSpeakerRow({
-  row,
-  state,
-  continues,
-  highlight,
-  disabled,
-  onDragOver,
-  onDrop,
-  onAction,
-}: {
-  row: OutputRow;
-  state: ChannelSpeakerState | undefined;
-  /** The previous output holds the previous way of the same speaker. */
-  continues: boolean;
-  highlight: "fits" | "overflow" | null;
-  disabled: boolean;
-  onDragOver: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
-  onAction: (action: string) => void;
-}) {
-  const status = state?.status.kind;
-  const items = [
-    ...(state && status !== "match" && status !== "detached" ? [{ id: "reapply", label: "Re-apply from library" }] : []),
-    ...(status === "edited" ? [{ id: "update", label: "Update library from this output…" }] : []),
-    ...(state ? [{ id: "why", label: "Why this status?" }] : []),
-    { id: "save", label: "Save as new speaker…" },
-    ...(state ? [{ id: "remove", label: "Remove speaker (keep values)" }] : []),
-  ];
-  const [name, way] = state ? splitLabel(state.speaker.label) : [null, null];
-  return (
-    <div
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      className="flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 transition-colors"
-      style={{
-        borderColor: highlight === "fits" ? "var(--accent)" : highlight === "overflow" ? "var(--amp-color-red)" : "var(--amp-color-gray-light)",
-        background: highlight === "fits" ? "var(--accent-soft)" : undefined,
-        marginTop: continues ? -2 : undefined,
-      }}
-    >
-      <span className="w-9 shrink-0 text-sm font-bold tabular-nums">{row.label}</span>
-      <Hint text={state?.speaker.label} className="min-w-0 flex-1">
-        <span className="block truncate text-sm">
-          {state ? (
-            <>
-              <span className={continues ? "text-[var(--amp-color-dimmed)]" : undefined}>{name}</span>
-              {way && <span className="text-[var(--amp-color-dimmed)]"> · {way}</span>}
-            </>
-          ) : (
-            <span className={`${MUTED} italic`}>No speaker — drop one here</span>
-          )}
-        </span>
-      </Hint>
-      {state && <StatusChip state={state} />}
-      <RowMenu label={`Speaker actions for output ${row.label}`} items={items} disabled={disabled} onAction={onAction} />
-    </div>
-  );
-}
-
-function splitLabel(label: string): [string, string | null] {
-  const i = label.lastIndexOf(" · ");
-  return i < 0 ? [label, null] : [label.slice(0, i), label.slice(i + 3)];
-}
-
-const WAY_FILTERS = [
-  { id: "all", label: "All" },
-  { id: "1", label: "1" },
-  { id: "2", label: "2" },
-  { id: "3", label: "3+" },
+const WAY_OPTIONS = [
+  { value: "1", label: "1" },
+  { value: "2", label: "2" },
+  { value: "3", label: "3+" },
 ];
 
-function LibraryList({
+const NO_FILTERS = { brand: "", family: "", model: "", application: "" };
+
+/** A library this long opens with its filter row showing. */
+const FILTERS_FROM = 9;
+
+/** The library as a table: a row is dragged onto an output, or double-clicked
+ * (Enter) to pick its outputs in the Load dialog. A filter per column sits
+ * behind the header's filter button. */
+function LibraryTable({
   library,
   disabled,
   onDragStart,
@@ -498,105 +636,167 @@ function LibraryList({
   onDragEnd: () => void;
   onAction: (entry: SpeakerLibraryEntry, action: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [ways, setWays] = useState("all");
-  const q = query.trim().toLowerCase();
-  const shown = library.filter((e) => {
-    const n = e.ways.length;
-    if (ways !== "all" && (ways === "3" ? n < 3 : n !== Number(ways))) return false;
-    if (!q) return true;
-    return [e.brand, e.family, e.model, e.application, ...e.ways.map((w) => w.label)].some((t) => t.toLowerCase().includes(q));
-  });
-  const brands = [...new Set(shown.map((e) => e.brand))].sort((a, b) => a.localeCompare(b));
+  const [filters, setFilters] = useState(NO_FILTERS);
+  const [ways, setWays] = useState<string | null>(null);
+  const [filtering, setFiltering] = useState(library.length >= FILTERS_FROM);
+  /** The row under the pointer when a press starts: its drag card has to be
+   * in the DOM before `dragstart` can hand it to `setDragImage`. */
+  const [armed, setArmed] = useState<SpeakerLibraryEntry | null>(null);
+  const card = useRef<HTMLDivElement>(null);
+
+  const has = (value: string, needle: string) => value.toLowerCase().includes(needle.trim().toLowerCase());
+  const shown = library
+    .filter((e) => {
+      const n = e.ways.length;
+      if (ways && (ways === "3" ? n < 3 : n !== Number(ways))) return false;
+      return has(e.brand, filters.brand) && has(e.family, filters.family) && has(e.model, filters.model) && has(e.application, filters.application);
+    })
+    .sort((a, b) => a.brand.localeCompare(b.brand) || a.model.localeCompare(b.model));
 
   if (library.length === 0) {
-    return <span className={MUTED}>No speakers yet. Import speaker preset files, or save an output as a speaker from its ⋯ menu.</span>;
+    return <span className={MUTED}>No speakers yet. Import speaker preset files, or select outputs and save them as a speaker.</span>;
   }
+  const filter = (key: keyof typeof NO_FILTERS, label: string) => (
+    <input
+      type="search"
+      aria-label={`Filter by ${label}`}
+      placeholder="Filter"
+      value={filters[key]}
+      className={FIELD_INPUT}
+      onChange={(e) => setFilters({ ...filters, [key]: e.currentTarget.value })}
+    />
+  );
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="search"
-          placeholder="Search brand, model, way…"
-          value={query}
-          className={`${FIELD_INPUT} min-w-0 flex-1`}
-          onChange={(e) => setQuery(e.currentTarget.value)}
-        />
-        <ButtonGroup size="sm" aria-label="Filter by number of ways">
-          {WAY_FILTERS.map((f) => (
-            <Button key={f.id} variant={ways === f.id ? "primary" : "ghost"} onPress={() => setWays(f.id)}>
-              {f.label}
+    <div className="min-h-0 min-w-0 flex-1 overflow-auto rounded-lg border border-[var(--amp-color-default-border)]">
+      <div className="sticky top-0 z-10 flex min-w-[480px] flex-col gap-1 border-b border-[var(--amp-color-default-border)] bg-background py-1.5">
+        <div className={`${LIBRARY_COLS} ${MUTED} font-semibold uppercase`}>
+          <span />
+          <span />
+          <span>Brand</span>
+          <span>Model</span>
+          <span>Family</span>
+          <span>Application</span>
+          <span>Ways</span>
+          <Hint text={filtering ? "Hide and clear the filters" : "Filter the library"} className="flex">
+            <Button
+              size="sm"
+              variant={filtering ? "secondary" : "ghost"}
+              isIconOnly
+              aria-label="Filter the library"
+              aria-pressed={filtering}
+              onPress={() => {
+                // Hidden filters must not keep filtering.
+                setFilters(NO_FILTERS);
+                setWays(null);
+                setFiltering(!filtering);
+              }}
+            >
+              <ListFilter size={14} />
             </Button>
-          ))}
-        </ButtonGroup>
-      </div>
-      {shown.length === 0 && <span className={MUTED}>No speaker matches.</span>}
-      {brands.map((brand) => (
-        <div key={brand} className="flex flex-col gap-0.5">
-          <span className={`${MUTED} mt-2 font-semibold uppercase`}>{brand}</span>
-          {shown
-            .filter((e) => e.brand === brand)
-            .sort((a, b) => a.model.localeCompare(b.model))
-            .map((entry) => (
-              <div
-                key={entry.id}
-                draggable={!disabled}
-                onDragStart={(e) => {
-                  e.dataTransfer.setData(DRAG_TYPE, entry.id);
-                  e.dataTransfer.effectAllowed = "copy";
-                  onDragStart(entry);
-                }}
-                onDragEnd={onDragEnd}
-                className={`flex min-w-0 items-center gap-2 rounded-md px-1 py-1 hover:bg-[var(--amp-color-gray-light)] ${disabled ? "" : "cursor-grab"}`}
-              >
-                <GripVertical size={14} className="shrink-0 text-[var(--amp-color-dimmed)]" />
-                <Hint text={entry.notes} className="min-w-0 flex-1">
-                  <span className="block truncate text-sm">
-                    {entry.model}
-                    {entry.family && <span className="text-[var(--amp-color-dimmed)]"> · {entry.family}</span>}
-                  </span>
-                </Hint>
-                <span className={`${MUTED} hidden truncate sm:inline`} style={{ maxWidth: 160 }}>
-                  {entry.ways.map((w) => w.label).join(" · ")}
-                </span>
-                <Chip size="sm" color="default" className="shrink-0">
-                  {entry.ways.length} way
-                </Chip>
-                <RowMenu
-                  label={`Actions for ${speakerName(entry)}`}
-                  disabled={disabled}
-                  items={[
-                    { id: "assign", label: "Assign to outputs…" },
-                    { id: "edit", label: "Edit details…" },
-                    { id: "delete", label: "Delete…", danger: true },
-                  ]}
-                  onAction={(action) => onAction(entry, action)}
-                />
-              </div>
-            ))}
+          </Hint>
         </div>
+        {filtering && (
+          <div className={LIBRARY_COLS}>
+            <span />
+            <span />
+            {filter("brand", "brand")}
+            {filter("model", "model")}
+            {filter("family", "family")}
+            {filter("application", "application")}
+            <SimpleSelect data={WAY_OPTIONS} value={ways} onChange={setWays} placeholder="Any" clearable />
+            <span />
+          </div>
+        )}
+      </div>
+      {shown.length === 0 && <div className={`${MUTED} p-2`}>No speaker matches.</div>}
+      {shown.map((entry) => (
+          <div
+            key={entry.id}
+            draggable={!disabled}
+            role="button"
+            tabIndex={0}
+            aria-label={`${speakerName(entry)}: load onto outputs`}
+            onPointerDown={() => setArmed(entry)}
+            onDragStart={(e) => {
+              e.dataTransfer.setData(DRAG_TYPE, entry.id);
+              e.dataTransfer.effectAllowed = "copy";
+              if (card.current) e.dataTransfer.setDragImage(card.current, 12, 12);
+              onDragStart(entry);
+            }}
+            onDragEnd={onDragEnd}
+            onDoubleClick={() => !disabled && onAction(entry, "assign")}
+            onKeyDown={(e) => {
+              if (!disabled && e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                onAction(entry, "assign");
+              }
+            }}
+            className={`${LIBRARY_COLS} py-1 text-sm hover:bg-[var(--amp-color-gray-light)] ${disabled ? "" : "cursor-grab"}`}
+          >
+            <GripVertical size={14} className="text-[var(--amp-color-dimmed)]" />
+            <Hint text={entry.notes} className="flex">
+              <Info size={14} className={entry.notes ? "" : "opacity-25"} />
+            </Hint>
+            <span className="truncate font-medium">{entry.brand}</span>
+            <span className="truncate">{entry.model}</span>
+            <span className="truncate">{entry.family || "–"}</span>
+            <span className="truncate">{entry.application || "–"}</span>
+            <span className="tabular-nums">{entry.ways.length}</span>
+            <RowMenu
+              label={`Actions for ${speakerName(entry)}`}
+              disabled={disabled}
+              items={[
+                { id: "assign", label: "Load to outputs…" },
+                { id: "edit", label: "Edit details…" },
+                { id: "delete", label: "Delete…", danger: true },
+              ]}
+              onAction={(action) => onAction(entry, action)}
+            />
+          </div>
       ))}
-    </>
+      {/* The drag image: off screen, but rendered, or the browser has nothing to snapshot. */}
+      {armed && (
+        <div
+          ref={card}
+          className="fixed top-0 -left-[9999px] flex w-64 flex-col gap-1.5 rounded-xl border border-[var(--accent)] bg-background p-3"
+        >
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold">{speakerName(armed)}</span>
+            <Chip size="sm" color="default">{armed.ways.length} way</Chip>
+          </div>
+          <span className={`${MUTED} truncate`}>{[armed.family, armed.application].filter(Boolean).join(" · ") || "Speaker preset"}</span>
+          <div className="flex flex-wrap gap-1">
+            {armed.ways.map((w, i) => (
+              <Chip key={i} size="sm" color="default">{w.label}</Chip>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
-/** The keyboard-reachable, precise alternative to dragging: pick a way per
- * output. Each output records the way it was given. */
-function AssignModal({
+/** The precise, keyboard-reachable alternative to dragging, under the
+ * speaker's details: a one-way speaker is toggled per output, a multi-way one
+ * gets a way picked per output. Each output records the way it was given. */
+function LoadModal({
   entry,
   rows,
+  states,
   onClose,
   onAssign,
 }: {
   entry: SpeakerLibraryEntry | null;
   rows: OutputRow[];
+  states: Map<number, ChannelSpeakerState>;
   onClose: () => void;
   onAssign: (entry: SpeakerLibraryEntry, items: Assignment[]) => void;
 }) {
+  const compact = useIsCompact();
   const [picks, setPicks] = useState<Record<number, string>>({});
   const options = [
     { value: "", label: "No change" },
-    ...(entry?.ways.map((w, i) => ({ value: String(i), label: entry.ways.length === 1 ? "Full range" : `Way ${i + 1}: ${w.label}` })) ?? []),
+    ...(entry?.ways.map((w, i) => ({ value: String(i), label: `Way ${i + 1}: ${w.label}` })) ?? []),
   ];
   const items = rows.flatMap((row) => (picks[row.leader] ? [{ row, wayIndex: Number(picks[row.leader]) }] : []));
   function close() {
@@ -605,25 +805,84 @@ function AssignModal({
   }
   return (
     <Modal.Backdrop isOpen={entry !== null} onOpenChange={(open) => !open && close()}>
-      <Modal.Container placement="center" size="md">
+      <Modal.Container placement="center" size={compact ? "full" : "lg"}>
         <Modal.Dialog>
           <Modal.Header>
-            <Modal.Heading>{entry ? `Assign ${speakerName(entry)}` : "Assign"}</Modal.Heading>
+            <Modal.Heading>{entry ? `Load ${speakerName(entry)}` : "Load"}</Modal.Heading>
             <Modal.CloseTrigger />
           </Modal.Header>
           <Modal.Body>
-            <div className="flex flex-col gap-2">
-              {rows.map((row) => (
-                <div key={row.leader} className="flex items-center gap-3">
-                  <span className="w-12 shrink-0 text-sm font-bold">Out {row.label}</span>
-                  <SimpleSelect
-                    data={options}
-                    value={picks[row.leader] ?? ""}
-                    onChange={(v) => setPicks((p) => ({ ...p, [row.leader]: v ?? "" }))}
-                  />
+            <div className="flex flex-col gap-4">
+              {entry && (
+                <div className="flex min-w-0 flex-col gap-1 rounded-xl border border-[var(--amp-color-default-border)] p-3">
+                  {(entry.family || entry.application) && (
+                    <span className={MUTED}>{[entry.family, entry.application].filter(Boolean).join(" · ")}</span>
+                  )}
+                  {entry.ways.map((w, i) => (
+                    <div key={i} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                      <span className="text-sm font-medium">{w.label}</span>
+                      <span className={MUTED}>{waySummary(w.processing)}</span>
+                    </div>
+                  ))}
+                  {entry.notes && <span className={`${MUTED} italic`}>{entry.notes}</span>}
                 </div>
-              ))}
-              <div className="flex justify-end gap-2 pt-2">
+              )}
+              {entry?.ways.length === 1 ? (
+                // One way: an output either gets the speaker or it doesn't.
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`${MUTED} font-semibold uppercase`}>Load onto</span>
+                    <div className="flex gap-1">
+                      <Button size="sm" variant="ghost" onPress={() => setPicks(Object.fromEntries(rows.map((r) => [r.leader, "0"])))}>All</Button>
+                      <Button size="sm" variant="ghost" onPress={() => setPicks({})}>None</Button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {rows.map((row) => {
+                      const on = !!picks[row.leader];
+                      const current = states.get(row.leader)?.speaker.label;
+                      return (
+                        <div key={row.leader} className="flex w-[104px] flex-col gap-1">
+                          <Button
+                            variant={on ? "primary" : "secondary"}
+                            aria-pressed={on}
+                            onPress={() => setPicks((p) => ({ ...p, [row.leader]: on ? "" : "0" }))}
+                          >
+                            {row.label}
+                          </Button>
+                          <Hint text={current} className="min-w-0">
+                            <span className={`${MUTED} block truncate text-center`}>{current ?? "free"}</span>
+                          </Hint>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)_200px] items-center gap-x-3 gap-y-2">
+                  <span className={`${MUTED} font-semibold uppercase`}>Out</span>
+                  <span className={`${MUTED} font-semibold uppercase`}>Current</span>
+                  <span className={`${MUTED} font-semibold uppercase`}>Way to load</span>
+                  {rows.map((row) => {
+                    const current = states.get(row.leader)?.speaker.label;
+                    return (
+                      <div key={row.leader} className="contents">
+                        <span className="text-sm font-bold">{row.label}</span>
+                        <Hint text={current} className="min-w-0">
+                          <span className={`block truncate text-sm ${current ? "" : "text-[var(--amp-color-dimmed)]"}`}>{current ?? "free"}</span>
+                        </Hint>
+                        <SimpleSelect
+                          className="whitespace-nowrap"
+                          data={options}
+                          value={picks[row.leader] ?? ""}
+                          onChange={(v) => setPicks((p) => ({ ...p, [row.leader]: v ?? "" }))}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
                 <Button variant="secondary" onPress={close}>Cancel</Button>
                 <Button
                   variant="primary"
@@ -633,7 +892,7 @@ function AssignModal({
                     close();
                   }}
                 >
-                  Assign
+                  {items.length ? `Load onto ${items.map((i) => i.row.label).join(", ")}` : "Load"}
                 </Button>
               </div>
             </div>
@@ -644,12 +903,12 @@ function AssignModal({
   );
 }
 
-type DetailsTarget = { kind: "edit"; entry: SpeakerLibraryEntry } | { kind: "save"; rowIndex: number };
+type DetailsTarget = { kind: "edit"; entry: SpeakerLibraryEntry } | { kind: "save"; rowIndex: number; ways: number };
 
 const EMPTY_DETAILS: SpeakerDetails = { brand: "", family: "", model: "", application: "", notes: "", wayLabels: [""] };
 
 /** Edit an entry's metadata, or save outputs as a new entry. Editing never
- * touches processing — "Update library from this output" does that. */
+ * touches processing — "Update library from these outputs" does that. */
 function DetailsModal({
   target,
   rows,
@@ -673,7 +932,7 @@ function DetailsModal({
       setDraft(
         target.kind === "edit"
           ? { ...target.entry, wayLabels: target.entry.ways.map((w) => w.label) }
-          : EMPTY_DETAILS,
+          : { ...EMPTY_DETAILS, wayLabels: Array.from({ length: target.ways }, () => "") },
       );
     }
   }

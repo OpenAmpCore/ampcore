@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { ListBox, Popover, popoverVariants } from "@heroui/react";
 import { FIELD_INPUT } from "./fieldClasses";
 
-export interface MultiSelectOption {
+interface MultiSelectOption {
   value: string;
   label: string;
 }

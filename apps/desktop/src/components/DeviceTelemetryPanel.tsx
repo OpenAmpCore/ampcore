@@ -5,7 +5,7 @@ import { ChannelStateBadge } from "./ChannelStateBadge";
 import { InputClipPill } from "./InputClipPill";
 import { CHANNEL_STATE_LABEL } from "../lib/channelState";
 
-export interface DeviceTelemetryPanelProps {
+interface DeviceTelemetryPanelProps {
   device: DiscoveredDevice;
   telemetry?: Telemetry;
   channelConfig?: ChannelConfigSnapshot;

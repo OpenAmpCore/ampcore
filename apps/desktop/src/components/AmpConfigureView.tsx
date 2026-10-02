@@ -102,7 +102,8 @@ import {
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
 import { Hint } from "./Hint";
-import { SpeakersTab, StatusChip } from "./SpeakersTab";
+import { SpeakersTab } from "./SpeakersTab";
+import { StatusChip } from "./SpeakerBench";
 import { useSpeakerLibrary, useSpeakerStates } from "../lib/speakers";
 import { usePreference } from "../lib/preferences";
 import { useElementWidth } from "../hooks/useElementWidth";
@@ -111,7 +112,7 @@ import { useElementWidth } from "../hooks/useElementWidth";
  * Configure screen instance targets — the single seam that lets the same
  * capability-driven tab UI serve both modes (see `configureActions.ts`/
  * `liveConfigureAdapter.ts`). */
-export type ConfigureSource =
+type ConfigureSource =
   | {
       kind: "project";
       project: Project;
@@ -1782,6 +1783,7 @@ function OutputTab({
               label={letterLabel(subChannel)}
               capability={capability}
               bypassed={subChannel.firBypassed ?? false}
+              stored={subChannel.fir}
               onBypassChange={(next) => actions.setChannelFirBypass(subChannel.channelIndex, next)}
               onImportData={
                 actions.setChannelFirData
@@ -3238,6 +3240,7 @@ export function AmpConfigureView({
               library={speakerLibrary}
               states={speakerStates}
               locked={locked}
+              actions={actions}
               onProjectUpdate={projectSource.onProjectUpdate}
             />
           );

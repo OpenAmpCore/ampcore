@@ -2,7 +2,7 @@ import { AlertDialog, Button } from "@heroui/react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import { resolveScheme, useAppearance } from "../lib/appearance";
 
-export interface ConfirmOptions {
+interface ConfirmOptions {
   title: string;
   description: ReactNode;
   confirmLabel?: string;

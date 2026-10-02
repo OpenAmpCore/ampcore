@@ -104,10 +104,6 @@ pub fn detect_firmware_family(version_string: &str) -> CvrFirmwareFamily {
     }
 }
 
-/// Only `data_flag`/`data_state` are read this pass; the rest document the
-/// full wire format for the fragmentation/reassembly work deferred to a
-/// future phase (see module doc).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct NetworkDataHeader {
     pub data_flag: u16,

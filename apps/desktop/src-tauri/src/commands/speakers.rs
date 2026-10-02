@@ -16,8 +16,9 @@ use ampcore_core::live::state::LiveDeviceState;
 use ampcore_core::data::project::{AmpAssignment, Project, SpeakerRef};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
-    speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing,
+    speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
 };
+use ampcore_core::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use ampcore_core::error::AppError;
 
 use super::amp_links::read_linked_amp;
@@ -221,6 +222,10 @@ struct FittedWay {
     channel_index: u32,
     processing: SpeakerProcessing,
     reference: SpeakerRef,
+    /// The way's label as the output's name, cut to the amp's 16-byte field.
+    /// `None` when it isn't ASCII — the amp can't store that, and a name is
+    /// no reason to refuse the speaker — so the output keeps its own.
+    output_name: Option<String>,
     issues: Vec<String>,
     rows: Vec<FitRow>,
 }
@@ -257,15 +262,24 @@ fn fit_rows(current: &SpeakerProcessing, preset: &SpeakerProcessing, written: &S
         .collect()
 }
 
-/// Each `(channel_index, way_index)` of one library entry fitted to the
-/// project amp's capability (`SpeakerProcessing::fit`). `Err` when the amp
-/// can't take a speaker at all.
+/// One output to set up: which way of which library entry goes onto it.
+/// Entries may differ between items, so any number of speakers is one apply
+/// — and one push.
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerItem {
+    pub channel_index: u32,
+    pub library_id: String,
+    pub way_index: u32,
+}
+
+/// Each item's way fitted to the project amp's capability
+/// (`SpeakerProcessing::fit`). `Err` when the amp can't take a speaker at all.
 fn fit_ways(
     state: &State<'_, ProjectDataState>,
     project_id: &str,
     assignment_id: &str,
-    library_id: &str,
-    items: &[(u32, u32)],
+    items: &[SpeakerItem],
 ) -> Result<Vec<FittedWay>, AppError> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     let inner = &mut *guard;
@@ -281,11 +295,14 @@ fn fit_ways(
         .and_then(|id| inner.amp_models.iter().find(|m| m.id == id))
         .ok_or_else(|| AppError::from("Assign an amp model first"))?;
     let cap = capability::resolve(model, assignment.firmware_version.as_deref());
-    let entry = find_entry(&mut inner.speakers, library_id)?;
     items
         .iter()
-        .map(|&(channel_index, way)| {
-            let processing = &entry.ways.get(way as usize).ok_or("No such way")?.processing;
+        .map(|item| {
+            let (channel_index, way) = (item.channel_index, item.way_index);
+            let entry = find_entry(&mut inner.speakers, &item.library_id)?;
+            let SpeakerWay { label, processing, .. } = entry.ways.get(way as usize).ok_or("No such way")?;
+            let output_name =
+                Some(label.trim()).filter(|l| !l.is_empty() && l.is_ascii()).map(|l| l[..l.len().min(CHANNEL_NAME_FIELD_LEN)].to_string());
             let channel = assignment
                 .channels
                 .iter()
@@ -293,7 +310,7 @@ fn fit_ways(
                 .ok_or_else(|| AppError::from(format!("channel {channel_index} not found")))?;
             let (fitted, issues) = processing.fit(channel, &cap)?;
             let rows = fit_rows(&SpeakerProcessing::from_channel(channel), processing, &fitted);
-            Ok(FittedWay { channel_index, processing: fitted, reference: entry.reference(way)?, issues, rows })
+            Ok(FittedWay { channel_index, processing: fitted, reference: entry.reference(way)?, output_name, issues, rows })
         })
         .collect()
 }
@@ -315,19 +332,17 @@ pub fn speakers_fit(
     state: State<'_, ProjectDataState>,
     project_id: String,
     assignment_id: String,
-    library_id: String,
-    items: Vec<(u32, u32)>,
+    items: Vec<SpeakerItem>,
 ) -> Result<Vec<OutputFit>, AppError> {
-    Ok(fit_ways(&state, &project_id, &assignment_id, &library_id, &items)?
+    Ok(fit_ways(&state, &project_id, &assignment_id, &items)?
         .into_iter()
         .map(|f| OutputFit { channel_index: f.channel_index, issues: f.issues, rows: f.rows })
         .collect())
 }
 
-/// Sets outputs up from one library entry: `items` are `(channel_index,
-/// way_index)` pairs, and each output gets its way's values (fitted to the
-/// amp) and reference. A way that doesn't fit as is is refused unless
-/// `accept_lossy`.
+/// Sets outputs up from the library: each item's output gets its way's values
+/// (fitted to the amp), reference and label as its name. A way that doesn't
+/// fit as is is refused unless `accept_lossy`.
 ///
 /// The change is made on a copy of the project amp. With the linked amp
 /// online (and not disengaged) that copy is pushed, and only becomes the
@@ -340,11 +355,10 @@ pub async fn speakers_apply(
     live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
-    library_id: String,
-    items: Vec<(u32, u32)>,
+    items: Vec<SpeakerItem>,
     accept_lossy: bool,
 ) -> Result<Project, AppError> {
-    let fitted = fit_ways(&state, &project_id, &assignment_id, &library_id, &items)?;
+    let fitted = fit_ways(&state, &project_id, &assignment_id, &items)?;
     if !accept_lossy && fitted.iter().any(|f| !f.issues.is_empty()) {
         return Err(AppError::from("The speaker doesn't fit this amp as is"));
     }
@@ -362,6 +376,9 @@ pub async fn speakers_apply(
             let channel = channel_mut(&mut candidate, f.channel_index)?;
             f.processing.apply_to(channel);
             channel.speaker = Some(f.reference);
+            if f.output_name.is_some() {
+                channel.output_name = f.output_name;
+            }
         }
         candidate
     };
@@ -384,7 +401,9 @@ pub async fn speakers_apply(
     let differing: Vec<String> =
         result.remaining.iter().filter(|r| r.differs).map(|r| format!("{} · {}", r.group, r.label)).collect();
     Err(AppError::from(match (result.failed_stage_label, result.error) {
-        (Some(stage), Some(error)) => format!("The amp didn't take {stage}: {error}"),
+        (Some(stage), Some(error)) => {
+            format!("The amp stopped answering while {stage} was written. Check its connection and apply again. ({error})")
+        }
         _ => format!("The amp doesn't hold the speaker after writing it. Still differing: {}", differing.join(", ")),
     }))
 }
@@ -420,5 +439,10 @@ pub fn speakers_channel_states(
         .find(|p| p.id == project_id)
         .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
         .ok_or_else(|| AppError::from("amp not found"))?;
-    Ok(speaker_states(assignment, &inner.speakers))
+    let cap = assignment
+        .amp_model_id
+        .as_deref()
+        .and_then(|id| inner.amp_models.iter().find(|m| m.id == id))
+        .map(|model| capability::resolve(model, assignment.firmware_version.as_deref()));
+    Ok(speaker_states(assignment, &inner.speakers, cap.as_ref()))
 }

@@ -22,7 +22,7 @@ use super::fingerprint::{
     FREQ_STEPS, GAIN_STEPS, OHM_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
 use super::project::{
-    AmpAssignment, AmpChannel, ChannelEq, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, Project,
+    AmpAssignment, AmpChannel, ChannelEq, ChannelFir, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, Project,
     RmsLimiter, SourceTrim, SourceTrims,
 };
 use crate::live::cvr::channel_config::ChannelConfig;
@@ -59,6 +59,14 @@ pub fn mirror_live_into_assignment(
             if let Some(config) = snapshot.channels.iter().find(|c| c.channel_index == channel.channel_index) {
                 mirror_channel(channel, config, matrix_input_count);
             }
+        }
+    }
+    // FIR comes from its own reads (FC=43), not from the snapshot. An output
+    // not read yet keeps the project's; the merge command refuses before
+    // mirroring in that case, as for any other unreadable input.
+    for channel in &mut candidate.channels {
+        if let Some(fir) = reading.fir.iter().find(|f| f.channel_index == channel.channel_index) {
+            channel.fir = ChannelFir { name: fir.name.clone().unwrap_or_default(), coefficients: fir.coefficients.clone() };
         }
     }
 
@@ -203,10 +211,14 @@ mod tests {
         // Padded, so the merge's trimming of the device name stays covered.
         let mut device = device();
         device.name = format!(" {DEVICE_NAME} ");
+        // A real filter on Out A, so the merge has a FIR to copy.
+        let mut fir = firs();
+        fir[0] = fir_snapshot(0, "top", &[0.5, 0.25]);
         LiveAmpReading {
             device,
             snapshot: Some(snapshot()),
             bridge: Some(DeviceBridgeSnapshot { bridged: vec![Some(true), Some(false)], received_at: 0.0 }),
+            fir,
         }
     }
 
@@ -217,7 +229,7 @@ mod tests {
         let assignment = assignment();
 
         let live =
-            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &models, &links);
+            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &reading.fir, &models, &links);
         assert!(live.missing.is_empty(), "{:?}", live.missing);
         assert!(live.amp_hash.is_some());
         assert_ne!(fingerprint_project_amp(&project, &assignment, &models).amp_hash, live.amp_hash);
@@ -226,6 +238,8 @@ mod tests {
         let merged = fingerprint_project_amp(&project, &candidate, &models);
         assert_eq!(merged.amp_hash, live.amp_hash);
         assert!(compare_fingerprints(&merged, &live).iter().all(|row| !row.differs));
+        assert_eq!(candidate.channels[0].fir.name, "top", "the amp's FIR came along");
+        assert!(candidate.channels[0].fir.same_taps(&[0.5, 0.25]));
     }
 
     #[test]
@@ -255,7 +269,7 @@ mod tests {
         let candidate = mirror_live_into_assignment(&assignment, &reading, 4);
         assert_eq!(candidate.channels[3].noise_gate_threshold_dbu, -37.0);
         let live =
-            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &models, &links);
+            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &reading.fir, &models, &links);
         assert_eq!(fingerprint_project_amp(&project, &candidate, &models).amp_hash, live.amp_hash);
     }
 

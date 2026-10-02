@@ -7,8 +7,6 @@ use crate::data::store::ProjectDataState;
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
 
-use super::live_control::live_control_fetch_channel_fir;
-
 /// Read-only: builds the fingerprint of one planned amp from the stored
 /// project. No save, no event — see `data/fingerprint.rs` for what is hashed.
 #[tauri::command]
@@ -49,9 +47,9 @@ pub fn fingerprint_project(state: State<ProjectDataState>, project_id: String) -
         .collect())
 }
 
-/// Read-only: fingerprint of a live device from its latest FC=27 snapshot
-/// (plus FC=50 bridge state). Fails when no snapshot has arrived yet — the
-/// device must be polled first.
+/// Read-only: fingerprint of a live device from its latest FC=27 snapshot,
+/// FC=50 bridge state and the FIR filters the driver has read (FC=43). Fails
+/// when no snapshot has arrived yet — the device must be polled first.
 #[tauri::command]
 #[specta::specta]
 pub fn fingerprint_live_device(
@@ -61,6 +59,7 @@ pub fn fingerprint_live_device(
 ) -> Result<AmpFingerprint, AppError> {
     let (models, links) = catalog_snapshot(&project_data)?;
     let inner = live.0.lock().map_err(|e| e.to_string())?;
+    let fir = inner.fir_of(&device_id);
     let device = inner
         .devices
         .get(&device_id)
@@ -69,53 +68,7 @@ pub fn fingerprint_live_device(
         .channel_config
         .get(&device_id)
         .ok_or_else(|| AppError::from(format!("no channel config received yet for {}", device_id)))?;
-    Ok(fp::fingerprint_live_device(device, snapshot, inner.bridge.get(&device_id), &models, &links))
-}
-
-/// `fingerprint_live_device` plus one FIR read (FC=43) per output channel.
-///
-/// A separate command rather than a flag on the synchronous one, because
-/// `projects_amp_edit_lock` rebuilds a live fingerprint on every FC=27 poll
-/// tick (see `useAmpEditLock`) — putting eight five-fragment FIR exchanges on
-/// that path would saturate the line several times a second. This is the
-/// opt-in variant, called only by the fingerprint inspector.
-///
-/// Reads are sequential, never concurrent: the per-IP reassembler cannot
-/// interleave two fragmented exchanges. Per-channel failures are swallowed —
-/// an unreadable (or pre-1.1.8, which `live_control_fetch_channel_fir` refuses
-/// before any I/O) channel simply keeps `fir: None` rather than failing the
-/// whole fingerprint, and nothing is added to `missing`, which would null
-/// `amp_hash` and flip the editor to `Unreadable`.
-#[tauri::command]
-#[specta::specta]
-pub async fn fingerprint_live_device_with_fir(
-    project_data: State<'_, ProjectDataState>,
-    live: State<'_, LiveDeviceState>,
-    device_id: String,
-) -> Result<AmpFingerprint, AppError> {
-    let mut fingerprint = {
-        let (models, links) = catalog_snapshot(&project_data)?;
-        let inner = live.0.lock().map_err(|e| e.to_string())?;
-        let device = inner
-            .devices
-            .get(&device_id)
-            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
-        let snapshot = inner
-            .channel_config
-            .get(&device_id)
-            .ok_or_else(|| AppError::from(format!("no channel config received yet for {}", device_id)))?;
-        fp::fingerprint_live_device(device, snapshot, inner.bridge.get(&device_id), &models, &links)
-    };
-
-    let indices: Vec<u32> = fingerprint.channels.iter().map(|c| c.channel_index).collect();
-    let mut snapshots = Vec::new();
-    for index in indices {
-        if let Ok(read) = live_control_fetch_channel_fir(live.clone(), device_id.clone(), index as u8).await {
-            snapshots.push(read.fir);
-        }
-    }
-    fp::attach_fir_stats(&mut fingerprint, &snapshots);
-    Ok(fingerprint)
+    Ok(fp::fingerprint_live_device(device, snapshot, inner.bridge.get(&device_id), &fir, &models, &links))
 }
 
 /// Every discovered device that has an FC=27 snapshot, ordered by device id.
@@ -134,7 +87,8 @@ pub fn fingerprint_live_devices(
         .into_iter()
         .filter_map(|device| {
             let snapshot = inner.channel_config.get(&device.id)?;
-            Some(fp::fingerprint_live_device(device, snapshot, inner.bridge.get(&device.id), &models, &links))
+            let fir = inner.fir_of(&device.id);
+            Some(fp::fingerprint_live_device(device, snapshot, inner.bridge.get(&device.id), &fir, &models, &links))
         })
         .collect())
 }

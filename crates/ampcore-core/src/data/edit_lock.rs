@@ -17,6 +17,7 @@ use super::fingerprint::{
 use super::project::{AmpAssignment, Project};
 use crate::live::cvr::bridge::DeviceBridgeSnapshot;
 use crate::live::cvr::channel_config::ChannelConfigSnapshot;
+use crate::live::cvr::fir::ChannelFirSnapshot;
 use crate::live::state::DiscoveredDevice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -72,6 +73,8 @@ pub struct LiveAmpReading {
     pub device: DiscoveredDevice,
     pub snapshot: Option<ChannelConfigSnapshot>,
     pub bridge: Option<DeviceBridgeSnapshot>,
+    /// The outputs' FIR filters the driver has read so far (FC=43).
+    pub fir: Vec<ChannelFirSnapshot>,
 }
 
 pub fn resolve_edit_lock(
@@ -141,7 +144,7 @@ fn resolve_engaged_lock(
         lock.project = Some(project_fp);
         return lock;
     };
-    let live_fp = fingerprint_live_device(&reading.device, snapshot, reading.bridge.as_ref(), models, links);
+    let live_fp = fingerprint_live_device(&reading.device, snapshot, reading.bridge.as_ref(), &reading.fir, models, links);
 
     lock.unreadable = project_fp
         .missing

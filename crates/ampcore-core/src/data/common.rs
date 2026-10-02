@@ -21,6 +21,12 @@ pub fn now_millis() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Seconds with milliseconds, wrapping every 1000 s — enough to line up
+/// console lines from different tasks (`[push]`, `[fir]`).
+pub fn log_clock() -> String {
+    format!("{:07.3}", now_millis() / 1000.0 % 1000.0)
+}
+
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

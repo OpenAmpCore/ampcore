@@ -14,7 +14,7 @@ use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_lis
 use commands::capability::{amp_capability_resolve, eq_response_curve};
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::fingerprint::{
-    fingerprint_live_device, fingerprint_live_device_with_fir, fingerprint_live_devices, fingerprint_project,
+    fingerprint_live_device, fingerprint_live_devices, fingerprint_project,
     fingerprint_project_amp,
 };
 use commands::live_control::{
@@ -34,7 +34,7 @@ use commands::live_control::{
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
     projects_remove_amp_assignment, projects_set_amp_device_name, projects_set_amp_model, projects_set_channel_delay_in,
-    projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_copy_channel_section,
+    projects_set_channel_fir, projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_copy_channel_section,
     projects_paste_channel_section, projects_set_channel_name,
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
@@ -80,6 +80,7 @@ pub fn run() {
             projects_set_channel_name,
             projects_set_channel_output_mute,
             projects_set_channel_fir_bypass,
+            projects_set_channel_fir,
             projects_set_output_bridge,
             projects_set_channel_power_mode,
             projects_set_channel_speaker,
@@ -140,7 +141,6 @@ pub fn run() {
             fingerprint_project_amp,
             fingerprint_project,
             fingerprint_live_device,
-            fingerprint_live_device_with_fir,
             fingerprint_live_devices,
             projects_validate_amp_link,
             projects_link_amp,
