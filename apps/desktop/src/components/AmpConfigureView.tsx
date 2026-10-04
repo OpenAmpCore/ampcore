@@ -1538,10 +1538,29 @@ function ChannelEditorModal({
       <Modal.Container placement="center" size={compact ? "full" : "cover"}>
         <Modal.Dialog>
           <Modal.Header>
-            <Modal.Heading>{target ? `${EDITOR_TITLES[target.kind]} · ${label(channel.channelIndex)}` : ""}</Modal.Heading>
+            {/* Title and channel switcher on one line: every row of height here
+                is a row the editor below doesn't get. */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+              <Modal.Heading>{target ? `${EDITOR_TITLES[target.kind]} · ${label(channel.channelIndex)}` : ""}</Modal.Heading>
+              {target && (
+                <ButtonGroup size="sm">
+                  {channels.map((c) => (
+                    <Button
+                      key={c.channelIndex}
+                      variant={c.channelIndex === channel.channelIndex ? "primary" : "ghost"}
+                      onPress={() => onTargetChange({ kind: target.kind, channelIndex: c.channelIndex })}
+                    >
+                      {label(c.channelIndex)}
+                    </Button>
+                  ))}
+                </ButtonGroup>
+              )}
+            </div>
             <Modal.CloseTrigger />
           </Modal.Header>
-          <Modal.Body>
+          {/* The body's own scrolling is switched off: the editor area below is
+              the one scroll area, and the EQ graph sizes itself to what's left. */}
+          <Modal.Body className="min-h-0 overflow-hidden!">
             {target && (
               // A dialog renders outside the tab's own locked fieldset.
               <fieldset
@@ -1549,20 +1568,7 @@ function ChannelEditorModal({
                 className="flex h-full min-h-0 min-w-0 flex-col gap-2"
                 style={{ border: 0, margin: 0, padding: 0 }}
               >
-                <div className="flex shrink-0 justify-center">
-                  <ButtonGroup size="sm">
-                    {channels.map((c) => (
-                      <Button
-                        key={c.channelIndex}
-                        variant={c.channelIndex === channel.channelIndex ? "primary" : "ghost"}
-                        onPress={() => onTargetChange({ kind: target.kind, channelIndex: c.channelIndex })}
-                      >
-                        {label(c.channelIndex)}
-                      </Button>
-                    ))}
-                  </ButtonGroup>
-                </div>
-                <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
                   {target.kind === "fir" ? (
                     <FirPanel
                       key={channel.channelIndex}

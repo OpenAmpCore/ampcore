@@ -133,6 +133,20 @@
   .modal__dialog--full {
     border-radius: 0;
   }
+  /* A dialog needs an edge of its own: HeroUI's dark one is a faint inner
+     glow and its light one a faint shadow, which left it blending into the
+     dimmed app behind it. */
+  .modal__dialog {
+    border: 1px solid var(--amp-color-default-border);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.25);
+  }
+  [data-theme="dark"] .modal__dialog {
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
+  .modal__dialog--full {
+    border: 0;
+    box-shadow: none;
+  }
 
   .chip,
   .badge,

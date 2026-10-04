@@ -15,20 +15,24 @@ export interface ResponsePoint {
  * stage-less isolation returns `null`. Async over IPC, so the last curve stays
  * drawn while the next is in flight, and a slower stale reply never overwrites
  * a newer one. */
-export function useResponseCurve(eq: ChannelEq | null, stage: EqStageRef | null = null): ResponsePoint[] | null {
-  const [points, setPoints] = useState<ResponsePoint[] | null>(null);
+export function useResponseCurve(
+  eq: ChannelEq | null,
+  stage: EqStageRef | null = null,
+  points: number | null = null,
+): ResponsePoint[] | null {
+  const [curve, setCurve] = useState<ResponsePoint[] | null>(null);
   const seq = useRef(0);
-  const key = eq ? JSON.stringify([eq, stage]) : null;
+  const key = eq ? JSON.stringify([eq, stage, points]) : null;
   useEffect(() => {
     const mine = ++seq.current;
-    if (!eq) return setPoints(null);
-    void commands.eqResponseCurve(eq, stage, null).then((pts) => {
-      if (mine === seq.current) setPoints(pts as ResponsePoint[]);
+    if (!eq) return setCurve(null);
+    void commands.eqResponseCurve(eq, stage, points).then((pts) => {
+      if (mine === seq.current) setCurve(pts as ResponsePoint[]);
     });
-    // `key` stands in for eq/stage: callers rebuild both objects every render.
+    // `key` stands in for eq/stage: callers rebuild these objects every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  return eq ? points : null;
+  return eq ? curve : null;
 }
 
 /** Samples `numPoints` log-spaced frequencies across 20Hz-20kHz — the same
