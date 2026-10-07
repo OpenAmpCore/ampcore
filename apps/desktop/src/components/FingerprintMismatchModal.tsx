@@ -7,7 +7,7 @@ import { AmpMergePanel, type MergeDirection } from "./AmpMergePanel";
 import { AmpPushSteps } from "./AmpPushSteps";
 import { CopyJsonButton } from "./FingerprintInspector";
 
-const STATE_BADGE: Record<AmpEditLockState, { color: "default" | "success" | "danger" | "warning"; label: string }> = {
+export const STATE_BADGE: Record<AmpEditLockState, { color: "default" | "success" | "danger" | "warning"; label: string }> = {
   unlinked: { color: "default", label: "Unlinked" },
   offline: { color: "default", label: "Offline" },
   checking: { color: "default", label: "Checking" },

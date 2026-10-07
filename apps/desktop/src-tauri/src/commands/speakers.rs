@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::live::state::LiveDeviceState;
 
-use ampcore_core::data::project::{AmpAssignment, Project, SpeakerRef};
+use ampcore_core::data::project::{AmpAssignment, CanvasPosition, Project, ProjectSpeaker, SpeakerRef};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
     speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
@@ -271,6 +271,11 @@ pub struct SpeakerItem {
     pub channel_index: u32,
     pub library_id: String,
     pub way_index: u32,
+    /// Links the output to this project speaker. Without one, an output that
+    /// is re-applied from the way it already holds keeps its link; any other
+    /// becomes a speaker set up on the amp.
+    #[serde(default)]
+    pub project_speaker_id: Option<String>,
 }
 
 /// Each item's way fitted to the project amp's capability
@@ -310,7 +315,12 @@ fn fit_ways(
                 .ok_or_else(|| AppError::from(format!("channel {channel_index} not found")))?;
             let (fitted, issues) = processing.fit(channel, &cap)?;
             let rows = fit_rows(&SpeakerProcessing::from_channel(channel), processing, &fitted);
-            Ok(FittedWay { channel_index, processing: fitted, reference: entry.reference(way)?, output_name, issues, rows })
+            let mut reference = entry.reference(way)?;
+            reference.project_speaker_id = item.project_speaker_id.clone().or_else(|| {
+                let held = channel.speaker.as_ref().filter(|s| s.library_id == item.library_id && s.way_index == way)?;
+                held.project_speaker_id.clone()
+            });
+            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, issues, rows })
         })
         .collect()
 }
@@ -422,6 +432,127 @@ pub fn projects_set_channel_speaker(
     edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
         channel_mut(assignment, channel_index)?.speaker = None;
         Ok(false)
+    })
+}
+
+/// Unlinks an output from its project speaker. Its values and library
+/// reference stay, as a speaker set up on the amp — as `Project::remove_speaker`
+/// leaves them.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_unlink_output(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+) -> Result<Project, AppError> {
+    edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
+        if let Some(speaker) = &mut channel_mut(assignment, channel_index)?.speaker {
+            speaker.project_speaker_id = None;
+        }
+        Ok(false)
+    })
+}
+
+/// The project-level counterpart of `edit_with_library`, for project speakers.
+fn edit_project(
+    app: &AppHandle,
+    state: &State<ProjectDataState>,
+    project_id: &str,
+    edit: impl FnOnce(&[SpeakerLibraryEntry], &mut Project) -> Result<(), AppError>,
+) -> Result<Project, AppError> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {project_id} not found")))?;
+    edit(&inner.speakers, project)?;
+    project.touch();
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Places a library speaker in the project, linked to nothing yet. Its ways
+/// are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_add_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    library_id: String,
+    name: String,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |library, project| {
+        let entry = library
+            .iter()
+            .find(|e| e.id == library_id)
+            .ok_or_else(|| AppError::from("That speaker is no longer in the library"))?;
+        let label = format!("{} {}", entry.brand, entry.model);
+        let name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or(&label).to_string();
+        project.speakers.push(ProjectSpeaker::new(name, library_id, label));
+        Ok(())
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn projects_rename_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+    name: String,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::from("A speaker needs a name"));
+        }
+        let speaker =
+            project.speakers.iter_mut().find(|s| s.id == speaker_id).ok_or_else(|| AppError::from("speaker not found"))?;
+        speaker.name = name.to_string();
+        Ok(())
+    })
+}
+
+/// Where the speaker sits on the Workspace canvas.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_speaker_position(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+    x: f64,
+    y: f64,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        let speaker =
+            project.speakers.iter_mut().find(|s| s.id == speaker_id).ok_or_else(|| AppError::from("speaker not found"))?;
+        speaker.position = Some(CanvasPosition { x, y });
+        Ok(())
+    })
+}
+
+/// Removes a project speaker; see `Project::remove_speaker` for what its
+/// outputs keep.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_remove_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        project.remove_speaker(&speaker_id);
+        Ok(())
     })
 }
 

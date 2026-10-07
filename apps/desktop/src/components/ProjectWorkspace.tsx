@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
@@ -41,10 +41,15 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
     });
   }, []);
 
-  function openDevice(assignment: AmpAssignment) {
-    setOpenDeviceIds((prev) => (prev.includes(assignment.id) ? prev : [...prev, assignment.id]));
-    onActiveTabChange(deviceTabValue(assignment.id));
-  }
+  // Stable, so the memoised Workspace isn't re-rendered along with this
+  // component every time a meter reading arrives.
+  const openDevice = useCallback(
+    (assignment: AmpAssignment) => {
+      setOpenDeviceIds((prev) => (prev.includes(assignment.id) ? prev : [...prev, assignment.id]));
+      onActiveTabChange(deviceTabValue(assignment.id));
+    },
+    [onActiveTabChange],
+  );
 
   function closeDevice(assignmentId: string) {
     setOpenDeviceIds((prev) => prev.filter((id) => id !== assignmentId));
@@ -71,7 +76,17 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
   const { devices } = useLiveDevices();
   const linkedDevice = activeDevice ? linkedDeviceFor(activeDevice, devices) : undefined;
   const linkedOnline = linkedDevice?.online ?? false;
-  useLivePolling(linkedDevice && linkedOnline ? [linkedDevice.id] : []);
+  // Every other linked amp is polled too, for as long as the project is open:
+  // the Workspace shows each amp's sync state and links speakers to amps whose
+  // editor is closed. A disengaged amp is left alone unless it is the one open.
+  // ponytail: a subscription also runs the 50 ms heartbeat, so this is meter
+  // rate per amp; split settings from meters in the driver for big projects.
+  useLivePolling(
+    project.ampAssignments.flatMap((a) => {
+      const device = linkedDeviceFor(a, devices);
+      return device?.online && (!a.liveDisengaged || a.id === activeDevice?.id) ? [device.id] : [];
+    }),
+  );
   // Primes FC=50 bridge state for this amp (see `useLiveBridge`): the edit
   // lock can't fingerprint the online amp until every pair is reported, so
   // without this the editor opens locked until the bridge tick catches up.

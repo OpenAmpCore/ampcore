@@ -269,3 +269,16 @@ html,
 body {
   background: var(--background);
 }
+
+/* React Flow (the Workspace canvas) on the app's own tokens. Its stylesheet
+   reads `--xy-*` before its built-in light/dark defaults, so setting them here
+   follows the theme and the accent without its `colorMode`. */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-controls-button-background-color: var(--background);
+  --xy-controls-button-background-color-hover: var(--amp-color-gray-light);
+  --xy-controls-button-color: currentColor;
+  --xy-controls-button-color-hover: currentColor;
+  --xy-controls-button-border-color: var(--amp-color-default-border);
+  --xy-controls-box-shadow: none;
+}

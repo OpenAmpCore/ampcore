@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Button, Chip, Dropdown, dropdownVariants } from "@heroui/react";
 import { MoreHorizontal } from "lucide-react";
-import type { AmpAssignment, ChannelSpeakerState, SpeakerLibraryEntry } from "../lib/bindings";
+import type { AmpAssignment, ChannelSpeakerState, ProjectSpeaker, SpeakerLibraryEntry } from "../lib/bindings";
 import { speakerFields, speakerName } from "../lib/speakers";
 import { Hint } from "./Hint";
 
@@ -59,17 +59,22 @@ export interface Cabinet {
   /** A join waiting for its speaker: `joinLeaders` are its outputs. */
   pending: boolean;
   joinLeaders?: number[];
+  /** Set when the cabinet is a project speaker's ways on this amp. */
+  projectSpeakerId?: string;
   ports: CabinetPort[];
 }
 
 /** Outputs in order: one joins the open cabinet of its library entry unless
  * that cabinet already holds its way — then it is a second speaker of the
- * same model. `joins` are groups of output leaders joined without a speaker. */
+ * same model. An output linked to a project speaker joins that speaker's
+ * cabinet instead, which shows only the ways this amp drives. `joins` are
+ * groups of output leaders joined without a speaker. */
 export function buildCabinets(
   rows: OutputRow[],
   states: Map<number, ChannelSpeakerState>,
   library: SpeakerLibraryEntry[],
   joins: number[][],
+  projectSpeakers: ProjectSpeaker[],
 ): Cabinet[] {
   const cabinets: Cabinet[] = [];
   const open = new Map<string, Cabinet>();
@@ -77,18 +82,23 @@ export function buildCabinets(
     const state = states.get(row.leader);
     if (!state) return;
     const { libraryId, wayIndex, label } = state.speaker;
-    let cabinet = open.get(libraryId);
+    const projectSpeaker = projectSpeakers.find((s) => s.id === state.speaker.projectSpeakerId);
+    const openKey = projectSpeaker?.id ?? libraryId;
+    let cabinet = open.get(openKey);
     if (!cabinet || cabinet.ports.some((p) => p.wayIndex === wayIndex && p.rowIndex !== null)) {
       const entry = library.find((e) => e.id === libraryId);
       cabinet = {
         key: `${libraryId}:${row.leader}`,
         entry,
-        title: entry ? speakerName(entry) : splitLabel(label)[0],
-        subtitle: entry ? [entry.family, entry.application].filter(Boolean).join(" · ") : "Not in this library",
+        title: projectSpeaker?.name ?? (entry ? speakerName(entry) : splitLabel(label)[0]),
+        subtitle: !entry ? "Not in this library"
+          : projectSpeaker ? speakerName(entry)
+          : [entry.family, entry.application].filter(Boolean).join(" · "),
         pending: false,
+        projectSpeakerId: projectSpeaker?.id,
         ports: entry?.ways.map((w, i) => ({ label: w.label, wayIndex: i, rowIndex: null })) ?? [],
       };
-      open.set(libraryId, cabinet);
+      open.set(openKey, cabinet);
       cabinets.push(cabinet);
     }
     let port = cabinet.ports.find((p) => p.wayIndex === wayIndex);

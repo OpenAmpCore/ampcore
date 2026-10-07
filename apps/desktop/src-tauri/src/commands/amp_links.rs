@@ -4,7 +4,8 @@ use ampcore_core::data::amp_link::{normalize_mac, validate_amp_link, AmpLinkVali
 use ampcore_core::data::amp_merge::{mirror_live_into_assignment, AmpMergeResult};
 use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, LiveAmpReading};
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp};
-use ampcore_core::data::project::Project;
+use ampcore_core::data::device_link::resolve_device_model;
+use ampcore_core::data::project::{AmpAssignment, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::{DiscoveredDevice, LiveDeviceState};
@@ -342,6 +343,58 @@ pub fn projects_unlink_amp(
     // nothing, and leaving it set would make a later re-link start silently
     // disengaged.
     assignment.live_disengaged = false;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Adds a discovered amp to the project as what it reports itself to be —
+/// its detected model, its firmware family, its name — already linked by MAC.
+/// The one-step form of add-from-the-catalogue, then link: nothing is left
+/// half done when a check fails. Its settings are not copied here; the caller
+/// pulls them (`projects_merge_amp_from_live`) once the amp has been read.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_add_live_amp(
+    app: AppHandle,
+    project_data: State<ProjectDataState>,
+    live: State<LiveDeviceState>,
+    project_id: String,
+    device_id: String,
+) -> Result<Project, AppError> {
+    let device = live_device(&live, &device_id)?;
+    if !device.online {
+        return Err(AppError::from("The amp is offline".to_string()));
+    }
+    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+
+    let model = resolve_device_model(&inner.amp_models, &inner.device_model_links, &device)
+        .cloned()
+        .ok_or_else(|| AppError::from("Model could not be detected — assign one in Live Control".to_string()))?;
+    let firmware = device
+        .firmware_family
+        .clone()
+        .ok_or_else(|| AppError::from(format!("Firmware \"{}\" is not recognized", device.firmware_version)))?;
+
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let mac = normalize_mac(&device.mac);
+    if project.amp_assignments.iter().any(|a| a.mac.as_deref().map(normalize_mac).as_deref() == Some(mac.as_str())) {
+        return Err(AppError::from("This amp is already linked in this project".to_string()));
+    }
+
+    let name = Some(device.name.trim().to_string()).filter(|n| !n.is_empty());
+    let mut assignment =
+        AmpAssignment::new(Some(device.mac), name, model.channel_count, Some(model.id.clone()), Some(firmware));
+    assignment.reconcile_matrix_size(model.topology.matrix_input_count);
+    assignment.reconcile_eq_bands(model.topology.eq_bands_per_channel);
+    project.amp_assignments.push(assignment);
     project.touch();
 
     let project = project.clone();

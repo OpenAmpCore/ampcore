@@ -7,7 +7,6 @@ import {
   type AmpAssignment,
   type ChannelSpeakerState,
   type Project,
-  type FitRow,
   type ProfileImportResult,
   type SpeakerDetails,
   type SpeakerLibraryEntry,
@@ -32,10 +31,12 @@ import {
   type RowHighlight,
 } from "./SpeakerBench";
 import { FIELD_INPUT } from "./fieldClasses";
+import { confirmFit } from "./speakerApply";
 
 const DRAG_TYPE = "application/x-ampcore-speaker-id";
 
-type Assignment = { row: OutputRow; wayIndex: number };
+/** `projectSpeakerId` links the output to a project speaker (`SpeakerItem`). */
+type Assignment = { row: OutputRow; wayIndex: number; projectSpeakerId?: string };
 /** One output to set up; entries may differ between the items of one apply. */
 type ApplyItem = Assignment & { entry: SpeakerLibraryEntry };
 /** Joined output groups (leaders) waiting for their speaker, per project amp.
@@ -135,7 +136,7 @@ export function SpeakersTab({
   const inJoin = (leader: number) => liveJoins.find((j) => j.includes(leader));
 
   const off = locked || busy;
-  const cabinets = buildCabinets(rows, states, library, liveJoins);
+  const cabinets = buildCabinets(rows, states, library, liveJoins, project.speakers ?? []);
   const selectedRows = rows.flatMap((row, i) => (selected.has(row.leader) ? [i] : []));
   const adjacent = selectedRows.every((r, i) => i === 0 || r === selectedRows[i - 1] + 1);
 
@@ -163,53 +164,15 @@ export function SpeakersTab({
   ): Promise<boolean> {
     if (off || items.length === 0) return false;
     const outputs = items.map((i) => i.row.label).join(", ");
-    const pairs = items.map(({ row, entry, wayIndex }) => ({ channelIndex: row.leader, libraryId: entry.id, wayIndex }));
-    // What this amp can't take as stored is shown first; the user decides.
-    const fit = await commands.speakersFit(project.id, assignment.id, pairs);
-    if (fit.status !== "ok") {
-      toast.danger(`Speaker can't be applied to ${outputs}`, { description: fit.error.message });
-      return false;
-    }
-    const issues = fit.data.flatMap((f) => {
-      const label = items.find((i) => i.row.leader === f.channelIndex)?.row.label;
-      return f.issues.map((issue) => `${label}: ${issue}`);
+    const pairs = await confirmFit({
+      projectId: project.id,
+      assignmentId: assignment.id,
+      items: items.map(({ row, ...item }) => ({ ...item, channelIndex: row.leader, outputLabel: row.label })),
+      confirm,
+      showComparator,
+      ui,
     });
-    const issueList = issues.length > 0 && (
-      <ul className="max-h-48 list-disc overflow-auto pl-5">
-        {issues.map((issue) => (
-          <li key={issue}>{issue}</li>
-        ))}
-      </ul>
-    );
-    if (!ui.preconfirmed || issues.length > 0 || showComparator) {
-      const ok = await confirm({
-        title: ui.title,
-        description: showComparator ? (
-          <div className="flex max-h-[60vh] flex-col gap-3 overflow-auto">
-            {issueList}
-            {fit.data.map((f) => {
-              const item = items.find((i) => i.row.leader === f.channelIndex);
-              const way = item?.entry.ways[item.wayIndex];
-              return (
-                <FitDiff
-                  key={f.channelIndex}
-                  title={`Out ${item?.row.label}${way && item && item.entry.ways.length > 1 ? ` · ${way.label}` : ""}`}
-                  rows={f.rows}
-                />
-              );
-            })}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {ui.intro}
-            {issueList && <span>This amp can't take everything exactly as stored. Applying writes these adjusted values:</span>}
-            {issueList}
-          </div>
-        ),
-        confirmLabel: issues.length ? "Apply anyway" : ui.confirmLabel,
-      });
-      if (!ok) return false;
-    }
+    if (!pairs) return false;
     setBusy(true);
     const r = await commands.speakersApply(project.id, assignment.id, pairs, true);
     setBusy(false);
@@ -274,7 +237,7 @@ export function SpeakersTab({
     if (!cabinet.entry) return;
     const from = cabinet.ports.find((p) => p.wayIndex === wayIndex)?.rowIndex ?? null;
     const oldLeader = from !== null ? rows[from].leader : null;
-    if (!(await assign(cabinet.entry, [{ row: rows[rowIndex], wayIndex }]))) return;
+    if (!(await assign(cabinet.entry, [{ row: rows[rowIndex], wayIndex, projectSpeakerId: cabinet.projectSpeakerId }]))) return;
     if (oldLeader !== null) await release([oldLeader]);
   }
 
@@ -605,58 +568,6 @@ export function SpeakersTab({
       />
       <ImportModal open={importOpen} onClose={() => setImportOpen(false)} />
       {dialog}
-    </div>
-  );
-}
-
-const DIFF_CELL = "px-2 py-0.5 font-mono text-xs whitespace-nowrap";
-
-/** Debug comparator: every compared value of one output, GitHub-diff style.
- * Red − what the output loses, green + what it gets, orange where `fit`
- * changed the preset's value to suit this amp. */
-function FitDiff({ title, rows }: { title: string; rows: FitRow[] }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <span className="text-sm font-semibold">{title}</span>
-      <div className="overflow-x-auto rounded-md border border-[var(--amp-color-default-border)]">
-        <table className="w-full border-collapse">
-          <thead>
-            <tr className={`${MUTED} text-left`}>
-              <th className={DIFF_CELL}>Field</th>
-              <th className={DIFF_CELL}>Amp now</th>
-              <th className={DIFF_CELL}>Preset</th>
-              <th className={DIFF_CELL}>Will write</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => {
-              const changes = r.current !== r.written;
-              const adjusted = r.preset !== r.written;
-              return (
-                <tr key={r.label} style={{ opacity: changes || adjusted ? 1 : 0.5 }}>
-                  <td className={DIFF_CELL}>{r.label}</td>
-                  <td className={DIFF_CELL} style={changes ? { background: "var(--amp-color-red-light)" } : undefined}>
-                    {changes && "− "}{r.current}
-                  </td>
-                  <td className={DIFF_CELL}>{r.preset}</td>
-                  <td
-                    className={DIFF_CELL}
-                    style={
-                      adjusted
-                        ? { background: "var(--amp-color-orange-light)" }
-                        : changes
-                          ? { background: "var(--amp-color-green-light)" }
-                          : undefined
-                    }
-                  >
-                    {changes && "+ "}{r.written}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

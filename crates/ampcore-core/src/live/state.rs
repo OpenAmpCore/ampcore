@@ -142,7 +142,10 @@ impl LiveDeviceState {
     /// Starts the driver; a no-op when it is already running. `sink` must wrap
     /// this same state.
     pub fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> Result<(), AppError> {
-        if self.lock()?.driver.is_some() {
+        // A driver whose task has ended (its socket couldn't be bound — another
+        // AmpCore holds the port) dropped its stop receiver; that one is dead
+        // and is replaced, or discovery would stay off for the whole session.
+        if self.lock()?.driver.as_ref().is_some_and(|d| !d.stop_tx.is_closed()) {
             return Ok(());
         }
         // Lock released before `start()`: the driver locks this same mutex

@@ -27,7 +27,9 @@ export function useLiveMap<E extends { deviceId: string }, V>(
       });
       const initial = await fetchAll();
       if (!cancelled && initial.status === "ok") {
-        setById(Object.fromEntries(initial.data.map((d) => [d.deviceId, pick(d)])));
+        // Under what the events already delivered: those are newer than this answer.
+        const seed = Object.fromEntries(initial.data.map((d) => [d.deviceId, pick(d)]));
+        setById((prev) => ({ ...seed, ...prev }));
       }
     })();
 

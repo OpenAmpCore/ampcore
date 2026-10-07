@@ -1508,6 +1508,16 @@ const EDITOR_TITLES: Record<EditorTarget["kind"], string> = {
   limiter: "Limiter",
 };
 
+/** How wide the dialog may get per editor; its height follows the content. The
+ * EQ's is its ten strips at a comfortable width, the FIR's keeps its two
+ * stacked graphs short enough to fit, the limiter's is its own content cap. */
+const EDITOR_MAX_WIDTH: Record<EditorTarget["kind"], string> = {
+  inputEq: "max-w-[1180px]",
+  outputEq: "max-w-[1180px]",
+  fir: "max-w-[900px]",
+  limiter: "max-w-[720px]",
+};
+
 /** The EQ, FIR and limiter editors, opened from a channel row's tile as in the
  * old app. The channel switcher at the top keeps each axis's convention —
  * inputs numbered, outputs lettered — and leaves out a bridged follower. */
@@ -1535,8 +1545,8 @@ function ChannelEditorModal({
       );
   return (
     <Modal.Backdrop isOpen={target !== null} onOpenChange={(open) => !open && onTargetChange(null)}>
-      <Modal.Container placement="center" size={compact ? "full" : "cover"}>
-        <Modal.Dialog>
+      <Modal.Container placement="center" size={compact ? "full" : "lg"}>
+        <Modal.Dialog className={!compact && target ? EDITOR_MAX_WIDTH[target.kind] : undefined}>
           <Modal.Header>
             {/* Title and channel switcher on one line: every row of height here
                 is a row the editor below doesn't get. */}
@@ -1558,17 +1568,11 @@ function ChannelEditorModal({
             </div>
             <Modal.CloseTrigger />
           </Modal.Header>
-          {/* The body's own scrolling is switched off: the editor area below is
-              the one scroll area, and the EQ graph sizes itself to what's left. */}
-          <Modal.Body className="min-h-0 overflow-hidden!">
+          <Modal.Body>
             {target && (
               // A dialog renders outside the tab's own locked fieldset.
-              <fieldset
-                disabled={locked}
-                className="flex h-full min-h-0 min-w-0 flex-col gap-2"
-                style={{ border: 0, margin: 0, padding: 0 }}
-              >
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
+              <fieldset disabled={locked} className="min-w-0" style={{ border: 0, margin: 0, padding: 0 }}>
+                <div className="flex min-w-0 flex-col">
                   {target.kind === "fir" ? (
                     <FirPanel
                       key={channel.channelIndex}

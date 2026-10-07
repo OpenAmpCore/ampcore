@@ -13,11 +13,12 @@ import {
   useYAxisScale,
   XAxis,
   YAxis,
+  ZIndexLayer,
 } from "recharts";
 import { ClipboardButtons } from "./ClipboardButtons";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { SimpleSelect } from "./SimpleSelect";
-import { useResponseCurve, type EqStageRef } from "../lib/filterResponse";
+import { useResponseCurves, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
 import {
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
@@ -101,10 +102,6 @@ const CROSSOVER_FILTER_OPTIONS = (Object.keys(CROSSOVER_FILTER_LABELS) as Crosso
   label: CROSSOVER_FILTER_LABELS[value],
 }));
 
-/** Shared cap so the graph and the band strip below it line up edge to
- * edge, rather than the graph (self-limited by its own aspect ratio) ending
- * up narrower than the full-width strip on large windows. */
-const EDITOR_MAX_WIDTH = 1500;
 const DROPDOWN_SLOTS = dropdownVariants();
 /** Narrowest a band/crossover column can get before its inputs stop being
  * readable — the strip scrolls horizontally rather than going below it. */
@@ -235,8 +232,6 @@ function clampToRange(value: number, range: { min: number | null; max: number | 
   return v;
 }
 
-type ParamRange = { min: number | null; max: number | null };
-
 type DragMode = "xy" | "x" | "y" | "qLeft" | "qRight";
 
 type DragState = {
@@ -315,28 +310,25 @@ function StageHandles({
   eq,
   capsByType,
   selectedRef,
+  stageCurve,
   interactive,
   onSelectStage,
   onPreview,
   onCommit,
   onDraggingChange,
   onStageMenu,
-  freqRange,
-  gainRange,
-  qRange,
 }: {
   eq: ChannelEq;
   capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
   selectedRef: EqStageRef | null;
+  /** The selected stage's own curve — where its Q handles sit. */
+  stageCurve: ResponsePoint[] | null;
   interactive: boolean;
   onSelectStage: (ref: EqStageRef | null) => void;
   onPreview: (ref: EqStageRef, patch: PreviewPatch) => void;
   onCommit: (ref: EqStageRef, patch: PreviewPatch) => void;
   onDraggingChange: (dragging: boolean) => void;
   onStageMenu: (ref: EqStageRef, clientX: number, clientY: number) => void;
-  freqRange: ParamRange;
-  gainRange: ParamRange;
-  qRange: ParamRange;
 }) {
   const xScale = useXAxisScale();
   const yScale = useYAxisScale();
@@ -382,6 +374,14 @@ function StageHandles({
     const qDirection = drag.mode === "qLeft" ? 1 : -1;
     return { q: drag.startQ + qDirection * (clientX - drag.startClientX) * Q_DRAG_SENSITIVITY };
   }
+
+  /** Height of the selected stage's own curve at `hz` (both curves share core's
+   * log grid), or `fallback` until that curve has arrived. */
+  const stageY = (hz: number, fallback: number) => {
+    if (!stageCurve?.length) return fallback;
+    const t = (Math.log10(hz) - Math.log10(GRAPH_MIN_HZ)) / LOG_HZ_SPAN;
+    return toY(stageCurve[Math.round(t * (stageCurve.length - 1))].db);
+  };
 
   function beginDrag(event: React.PointerEvent<SVGElement>, ref: EqStageRef, mode: DragMode) {
     if (!interactive) return;
@@ -450,137 +450,147 @@ function StageHandles({
     pendingRef.current = null;
     onDraggingChange(false);
 
-    const info = stageInfo(eq, drag.ref, capsByType);
-    const proposed = patchFor(drag, toViewBoxPoint(svg, event.clientX, event.clientY), event.clientX);
-    const patch: PreviewPatch = {};
-    if (proposed.freqHz !== undefined) patch.freqHz = roundFreq(clampToRange(proposed.freqHz, freqRange));
-    if (proposed.gainDb !== undefined && info.supportsGain) patch.gainDb = roundGain(clampToRange(proposed.gainDb, gainRange));
-    if (proposed.q !== undefined && info.supportsQ) patch.q = roundQ(clampToRange(proposed.q, qRange));
-
+    // `patchFor` only proposes what the stage supports; `onCommit` rounds and clamps.
+    const patch = patchFor(drag, toViewBoxPoint(svg, event.clientX, event.clientY), event.clientX);
     if (Object.keys(patch).length > 0) onCommit(drag.ref, patch);
     onSelectStage(drag.ref);
   }
 
   return (
-    <g onPointerMove={handlePointerMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
-      {stages.map((ref) => {
-        const info = stageInfo(eq, ref, capsByType);
-        if (!info.active) return null;
-        const cx = toX(info.freqHz);
-        const cy = toY(info.gainDb);
-        const selected = sameStage(selectedRef, ref);
-        const label = ref.kind === "hp" ? "HP" : ref.kind === "lp" ? "LP" : String(ref.bandIndex + 1);
-        const axisOffset = 14;
-        const qFreqLeft = info.freqHz / Math.pow(2, 1 / Math.max(info.q, 0.1));
-        const qFreqRight = info.freqHz * Math.pow(2, 1 / Math.max(info.q, 0.1));
-        const qLeftX = toX(qFreqLeft);
-        const qRightX = toX(qFreqRight);
-        const mainCursor = interactive ? "grab" : "pointer";
-        const axisCursor = interactive ? "ew-resize" : "default";
-        const gainCursor = interactive ? "ns-resize" : "default";
+    // Above the curves, the hover cursor and its dot, which Recharts lifts
+    // into z layers of their own.
+    <ZIndexLayer zIndex={1500}>
+      <g onPointerMove={handlePointerMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
+        {stages.map((ref) => {
+          const info = stageInfo(eq, ref, capsByType);
+          if (!info.active) return null;
+          const cx = toX(info.freqHz);
+          const cy = toY(info.gainDb);
+          const selected = sameStage(selectedRef, ref);
+          const label = ref.kind === "hp" ? "HP" : ref.kind === "lp" ? "LP" : String(ref.bandIndex + 1);
+          const octaves = 1 / Math.max(info.q, 0.1);
+          const qFreqs = [info.freqHz / 2 ** octaves, info.freqHz * 2 ** octaves].map((hz) =>
+            Math.min(GRAPH_MAX_HZ, Math.max(GRAPH_MIN_HZ, hz)),
+          );
 
-        return (
-          <g key={stageKey(ref)} data-eq-handle>
-            <circle
-              cx={cx}
-              cy={cy}
-              r={16}
-              fill="transparent"
-              style={{ cursor: mainCursor }}
-              onPointerDown={(e) => beginDragIfActivated(e, ref, "xy")}
-              onContextMenu={(e) => {
-                if (!interactive) return;
-                e.preventDefault();
-                e.stopPropagation();
-                onStageMenu(ref, e.clientX, e.clientY);
-              }}
-            />
-            <circle
-              cx={cx}
-              cy={cy}
-              r={5}
-              fill={selected ? "var(--accent-soft)" : "var(--amp-color-body)"}
-              stroke={selected ? "var(--accent)" : "var(--amp-color-text)"}
-              strokeWidth={1.5}
-              pointerEvents="none"
-            />
-            {!selected && (
-              <text x={cx} y={cy + 18} fontSize={11} textAnchor="middle" fill="var(--amp-color-text)" pointerEvents="none">
-                {label}
-              </text>
-            )}
-            {selected && interactive && (
-              <g>
-                <circle
-                  cx={cx - axisOffset}
-                  cy={cy}
-                  r={8}
-                  fill="transparent"
-                  style={{ cursor: axisCursor }}
-                  onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
-                />
-                <circle
-                  cx={cx + axisOffset}
-                  cy={cy}
-                  r={8}
-                  fill="transparent"
-                  style={{ cursor: axisCursor }}
-                  onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
-                />
-                <circle cx={cx - axisOffset} cy={cy} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
-                <circle cx={cx + axisOffset} cy={cy} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
-
-                {info.supportsGain && (
-                  <>
-                    <circle
+          return (
+            <g key={stageKey(ref)} data-eq-handle>
+              <circle
+                cx={cx}
+                cy={cy}
+                r={16}
+                fill="transparent"
+                style={{ cursor: interactive ? "grab" : "pointer" }}
+                onPointerDown={(e) => beginDragIfActivated(e, ref, "xy")}
+                onContextMenu={(e) => {
+                  if (!interactive) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onStageMenu(ref, e.clientX, e.clientY);
+                }}
+              />
+              <circle
+                cx={cx}
+                cy={cy}
+                r={5}
+                fill={selected ? "var(--accent-soft)" : "var(--amp-color-body)"}
+                stroke={selected ? "var(--accent)" : "var(--amp-color-text)"}
+                strokeWidth={1.5}
+                pointerEvents="none"
+              />
+              {!selected && (
+                <text x={cx} y={cy + 18} fontSize={11} textAnchor="middle" fill="var(--amp-color-text)" pointerEvents="none">
+                  {label}
+                </text>
+              )}
+              {selected && interactive && (
+                <g>
+                  {[180, 0].map((angle) => (
+                    <ArrowHandle
+                      key={angle}
                       cx={cx}
-                      cy={cy - axisOffset}
-                      r={8}
-                      fill="transparent"
-                      style={{ cursor: gainCursor }}
-                      onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
+                      cy={cy}
+                      angle={angle}
+                      cursor="ew-resize"
+                      onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
                     />
-                    <circle
-                      cx={cx}
-                      cy={cy + axisOffset}
-                      r={8}
-                      fill="transparent"
-                      style={{ cursor: gainCursor }}
-                      onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
-                    />
-                    <circle cx={cx} cy={cy - axisOffset} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
-                    <circle cx={cx} cy={cy + axisOffset} r={3} fill="var(--amp-color-body)" stroke="var(--accent)" strokeWidth={1} pointerEvents="none" />
-                  </>
-                )}
+                  ))}
+                  {info.supportsGain &&
+                    [-90, 90].map((angle) => (
+                      <ArrowHandle
+                        key={angle}
+                        cx={cx}
+                        cy={cy}
+                        angle={angle}
+                        cursor="ns-resize"
+                        onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
+                      />
+                    ))}
+                  {info.supportsQ &&
+                    (["qLeft", "qRight"] as const).map((mode, i) => {
+                      const qx = toX(qFreqs[i]);
+                      const qy = stageY(qFreqs[i], cy);
+                      return (
+                        <g
+                          key={mode}
+                          className="group"
+                          style={{ cursor: "ew-resize" }}
+                          onPointerDown={(e) => beginDragIfActivated(e, ref, mode)}
+                        >
+                          <circle cx={qx} cy={qy} r={10} fill="transparent" />
+                          <circle
+                            cx={qx}
+                            cy={qy}
+                            r={4}
+                            fill="var(--amp-graph-stage)"
+                            stroke="var(--amp-color-body)"
+                            strokeWidth={1.5}
+                            className="origin-center transition-transform [transform-box:fill-box] group-hover:scale-125"
+                          />
+                        </g>
+                      );
+                    })}
+                </g>
+              )}
+            </g>
+          );
+        })}
+      </g>
+    </ZIndexLayer>
+  );
+}
 
-                {info.supportsQ && (
-                  <>
-                    <line x1={qLeftX} y1={cy} x2={qRightX} y2={cy} stroke="var(--amp-color-blue-5)" strokeWidth={1} opacity={0.5} />
-                    <circle
-                      cx={qLeftX}
-                      cy={cy}
-                      r={8}
-                      fill="transparent"
-                      style={{ cursor: axisCursor }}
-                      onPointerDown={(e) => beginDragIfActivated(e, ref, "qLeft")}
-                    />
-                    <circle
-                      cx={qRightX}
-                      cy={cy}
-                      r={8}
-                      fill="transparent"
-                      style={{ cursor: axisCursor }}
-                      onPointerDown={(e) => beginDragIfActivated(e, ref, "qRight")}
-                    />
-                    <circle cx={qLeftX} cy={cy} r={2.6} fill="var(--amp-color-blue-5)" pointerEvents="none" />
-                    <circle cx={qRightX} cy={cy} r={2.6} fill="var(--amp-color-blue-5)" pointerEvents="none" />
-                  </>
-                )}
-              </g>
-            )}
-          </g>
-        );
-      })}
+/** How far a drag arrow sits from its point's centre. */
+const ARROW_OFFSET = 17;
+
+/** One drag arrow beside a selected point: a small triangle pointing away from
+ * it (`angle` in degrees, 0 = right), inside a finger-sized hit area. */
+function ArrowHandle({
+  cx,
+  cy,
+  angle,
+  cursor,
+  onPointerDown,
+}: {
+  cx: number;
+  cy: number;
+  angle: number;
+  cursor: string;
+  onPointerDown: (event: React.PointerEvent<SVGElement>) => void;
+}) {
+  return (
+    <g
+      className="group"
+      transform={`translate(${cx} ${cy}) rotate(${angle})`}
+      style={{ cursor }}
+      onPointerDown={onPointerDown}
+    >
+      <circle cx={ARROW_OFFSET} cy={0} r={10} fill="transparent" />
+      <path
+        d={`M${ARROW_OFFSET - 4},-5 L${ARROW_OFFSET + 5},0 L${ARROW_OFFSET - 4},5 Z`}
+        fill="var(--accent)"
+        className="opacity-70 group-hover:opacity-100"
+      />
     </g>
   );
 }
@@ -588,9 +598,12 @@ function StageHandles({
 /** Frequency-response graph, drawn entirely by Recharts: log-Hz x-axis, dB
  * y-axis, the whole chain's response (from core, see `filterResponse.ts`), the
  * selected stage on its own, and a hover readout. `StageHandles` sits inside
- * the chart for the interaction. The graph fills the height its dialog leaves;
- * `ResponsiveContainer` follows the box. */
-function ResponseGraph({
+ * the chart for the interaction. The graph has a height of its own (a share of
+ * the window, within limits); `ResponsiveContainer` follows the box.
+ *
+ * Memoised, and every prop is stable while nothing about the EQ changes: its
+ * dialog re-renders at meter rate, and the chart must not. */
+const ResponseGraph = memo(function ResponseGraph({
   eq,
   capsByType,
   selectedRef,
@@ -600,9 +613,6 @@ function ResponseGraph({
   onCommit,
   onToggleActive,
   onResetGain,
-  freqRange,
-  gainRange,
-  qRange,
 }: {
   eq: ChannelEq;
   capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
@@ -613,9 +623,6 @@ function ResponseGraph({
   onCommit: (ref: EqStageRef, patch: PreviewPatch) => void;
   onToggleActive: (ref: EqStageRef) => void;
   onResetGain: (ref: EqStageRef) => void;
-  freqRange: ParamRange;
-  gainRange: ParamRange;
-  qRange: ParamRange;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -623,23 +630,28 @@ function ResponseGraph({
   const contextMenuAnchorRef = useRef<HTMLDivElement>(null);
 
   const selectedActive = selectedRef !== null && stageInfo(eq, selectedRef, capsByType).active;
-  const curvePoints = dragging ? DRAG_CURVE_POINTS : REST_CURVE_POINTS;
-  const total = useResponseCurve(eq, null, curvePoints);
-  // The isolated stage is left out while a handle moves: half the work per frame.
-  const isolated = useResponseCurve(selectedActive && !dragging ? eq : null, selectedRef, curvePoints);
+  const curves = useResponseCurves(
+    eq,
+    selectedActive ? selectedRef : null,
+    dragging ? DRAG_CURVE_POINTS : REST_CURVE_POINTS,
+  );
+  // The handles are drawn from the chain the curves were computed for, not the
+  // newer one in `eq`, so a dragged point and its curve move in the same frame.
+  const drawnEq = curves?.eq ?? eq;
+  // The isolated curve of a stage selected a moment ago is not this stage's.
+  const isolated = curves && sameStage(curves.stage, selectedRef) ? curves.isolated : null;
   // One row per frequency; both curves come from core on the same grid.
   const data = useMemo(
-    () => (total ?? []).map((p, i) => ({ f: p.freqHz, total: p.db, stage: isolated?.[i]?.db ?? null })),
-    [total, isolated],
+    () => (curves?.total ?? []).map((p, i) => ({ f: p.freqHz, total: p.db, stage: isolated?.[i]?.db ?? null })),
+    [curves, isolated],
   );
   const stageLabel =
     selectedRef === null ? null : selectedRef.kind === "band" ? `Band ${selectedRef.bandIndex + 1}` : selectedRef.kind.toUpperCase();
 
   return (
-    // Fills the height the dialog leaves (the strip below keeps its own).
     <div
       ref={containerRef}
-      className="min-h-[190px] flex-1 overflow-hidden rounded-xl border border-[var(--amp-color-default-border)]"
+      className="h-[clamp(220px,42vh,440px)] shrink-0 overflow-hidden rounded-xl border border-[var(--amp-color-default-border)]"
       style={{ position: "relative", backgroundColor: "var(--amp-graph-bg)" }}
       onPointerDown={(event) => {
         // A press on the plot itself (not on a handle) clears the selection.
@@ -735,9 +747,10 @@ function ResponseGraph({
               isAnimationActive={false}
             />
             <StageHandles
-              eq={eq}
+              eq={drawnEq}
               capsByType={capsByType}
               selectedRef={selectedRef}
+              stageCurve={isolated}
               interactive={interactive}
               onSelectStage={onSelectStage}
               onPreview={onPreview}
@@ -747,9 +760,6 @@ function ResponseGraph({
                 const rect = containerRef.current?.getBoundingClientRect();
                 setContextMenu({ ref, x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) });
               }}
-              freqRange={freqRange}
-              gainRange={gainRange}
-              qRange={qRange}
             />
             <ChartTooltip
               content={<GraphTooltip stageLabel={stageLabel} />}
@@ -802,7 +812,7 @@ function ResponseGraph({
       </Dropdown.Popover>
     </div>
   );
-}
+});
 
 interface EqEditorProps {
   assignment: AmpAssignment;
@@ -826,12 +836,16 @@ interface EqEditorProps {
  * silently no-ops rather than sent anywhere. */
 export function EqEditor({ assignment, channelIndex, direction, capability, actions }: EqEditorProps) {
   const channel = assignment.channels.find((c) => c.channelIndex === channelIndex) ?? assignment.channels[0];
-  const eq = (direction === "input" ? channel.inputEq : channel.outputEq) ?? FALLBACK_CHANNEL_EQ;
+  const currentEq = (direction === "input" ? channel.inputEq : channel.outputEq) ?? FALLBACK_CHANNEL_EQ;
+  // Held by value: a live amp's assignment is a new object on every poll, and
+  // a new `eq` would re-render the graph and all ten strips each time.
+  const eqKey = JSON.stringify(currentEq);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const eq = useMemo(() => currentEq, [eqKey]);
 
-  const eqCapsByType = useMemo(
-    () => indexEqFilterCapabilities(capability.eqFilterCapabilities),
-    [capability.eqFilterCapabilities],
-  );
+  const capsKey = JSON.stringify(capability.eqFilterCapabilities);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const eqCapsByType = useMemo(() => indexEqFilterCapabilities(capability.eqFilterCapabilities), [capsKey]);
 
   const [selectedStage, setSelectedStage] = useState<EqStageRef | null>(null);
   const [preview, setPreview] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
@@ -878,21 +892,12 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     });
   }
 
-  // Always call the latest handlers (they close over the current actions and
-  // lock state) through callbacks whose identity never changes.
-  const latest = useRef({ band: handleBandChange, crossover: handleCrossoverChange });
-  latest.current = { band: handleBandChange, crossover: handleCrossoverChange };
-  const onBandChange = useCallback((bandIndex: number, patch: BandPatch) => latest.current.band(bandIndex, patch), []);
-  const onCrossoverChange = useCallback(
-    (slot: CrossoverSlotKind, patch: CrossoverPatch) => latest.current.crossover(slot, patch),
-    [],
-  );
-
-  function handlePreview(ref: EqStageRef, patch: PreviewPatch) {
-    setPreview({ ref, patch });
-  }
-
-  async function handleCommit(ref: EqStageRef, patch: PreviewPatch) {
+  /** A finished drag: rounded and clamped to what the amp accepts, written once. */
+  async function handleCommit(ref: EqStageRef, proposed: PreviewPatch) {
+    const patch: PreviewPatch = {};
+    if (proposed.freqHz !== undefined) patch.freqHz = roundFreq(clampToRange(proposed.freqHz, freqRange));
+    if (proposed.gainDb !== undefined) patch.gainDb = roundGain(clampToRange(proposed.gainDb, gainRange));
+    if (proposed.q !== undefined) patch.q = roundQ(clampToRange(proposed.q, qRange));
     if (ref.kind === "band") {
       await handleBandChange(ref.bandIndex, patch);
     } else {
@@ -912,15 +917,29 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     void handleBandChange(ref.bandIndex, { gainDb: 0 });
   }
 
+  // Always call the latest handlers (they close over the current actions and
+  // lock state) through callbacks whose identity never changes.
+  const handlers = {
+    band: handleBandChange,
+    crossover: handleCrossoverChange,
+    commit: handleCommit,
+    toggleActive: handleToggleActive,
+    resetGain: handleResetGain,
+  };
+  const latest = useRef(handlers);
+  latest.current = handlers;
+  const onBandChange = useCallback((bandIndex: number, patch: BandPatch) => latest.current.band(bandIndex, patch), []);
+  const onCrossoverChange = useCallback(
+    (slot: CrossoverSlotKind, patch: CrossoverPatch) => latest.current.crossover(slot, patch),
+    [],
+  );
+  const onPreview = useCallback((ref: EqStageRef, patch: PreviewPatch) => setPreview({ ref, patch }), []);
+  const onCommit = useCallback((ref: EqStageRef, patch: PreviewPatch) => void latest.current.commit(ref, patch), []);
+  const onToggleActive = useCallback((ref: EqStageRef) => latest.current.toggleActive(ref), []);
+  const onResetGain = useCallback((ref: EqStageRef) => latest.current.resetGain(ref), []);
+
   return (
-    <div
-      className="relative flex min-w-0 flex-1 flex-col gap-3 px-1"
-      style={{
-        width: "100%",
-        maxWidth: EDITOR_MAX_WIDTH,
-        margin: "0 auto",
-      }}
-    >
+    <div className="relative flex w-full min-w-0 flex-col gap-3">
       {!interactive && (
         <span
           style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}
@@ -946,13 +965,10 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
         selectedRef={selectedStage}
         interactive={interactive}
         onSelectStage={setSelectedStage}
-        onPreview={handlePreview}
-        onCommit={handleCommit}
-        onToggleActive={handleToggleActive}
-        onResetGain={handleResetGain}
-        freqRange={freqRange}
-        gainRange={gainRange}
-        qRange={qRange}
+        onPreview={onPreview}
+        onCommit={onCommit}
+        onToggleActive={onToggleActive}
+        onResetGain={onResetGain}
       />
       {/* One column per band plus HP/LP. Equal `1fr` columns alone collapse
        * to unusable slivers on a narrow window (a 10-band EQ would give each

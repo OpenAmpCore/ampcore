@@ -236,7 +236,7 @@ export function FirPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col gap-2 p-4">
+    <div className="flex min-w-0 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <span style={{ fontWeight: 600, fontSize: "var(--amp-font-size-sm)" }}>Out{label} FIR</span>
         {fir && (
@@ -368,7 +368,7 @@ export function FirPanel({
            than the pane, and per CLAUDE.md a grid with an irreducible width
            scrolls inside itself rather than pushing the window sideways. */
         <pre
-          className="min-h-0 min-w-0 flex-1 overflow-auto rounded-md bg-[var(--amp-color-default)] p-2 font-mono"
+          className="max-h-[60vh] min-w-0 overflow-auto rounded-md bg-[var(--amp-color-default)] p-2 font-mono"
           style={{ whiteSpace: "pre", fontSize: 11 }}
         >
           {JSON.stringify(fir, null, 2)}

@@ -11,11 +11,17 @@ export function useLiveDevices() {
     let cancelled = false;
 
     (async () => {
+      let heard = false;
       unlisten = await listen<DiscoveredDevice[]>("live_device:updated", (event) => {
+        heard = true;
         setDevices(event.payload);
       });
       const initial = await commands.liveControlListDevices();
-      if (!cancelled && initial.status === "ok") setDevices(initial.data);
+      // The list is only the seed. When the driver has just started, its first
+      // discovery event can land before this answer does — and the answer is
+      // then the older (empty) list. The driver only emits on a change, so
+      // overwriting with it would leave this hook without devices for good.
+      if (!cancelled && initial.status === "ok" && !heard) setDevices(initial.data);
       if (!cancelled) setReady(true);
     })();
 

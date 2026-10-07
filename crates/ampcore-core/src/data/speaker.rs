@@ -482,6 +482,7 @@ impl SpeakerLibraryEntry {
             way_index,
             revision: self.revision,
             label: if self.ways.len() == 1 { name } else { format!("{name} · {}", way.label) },
+            project_speaker_id: None,
         })
     }
 }

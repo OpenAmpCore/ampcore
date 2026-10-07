@@ -10,29 +10,42 @@ export interface ResponsePoint {
   db: number;
 }
 
+/** What `useResponseCurves` hands back: both curves and the exact chain and
+ * stage they were computed for, so a caller can draw everything else (the
+ * graph's handles) from the same snapshot and never be a frame ahead of it. */
+export interface ResponseCurves {
+  eq: ChannelEq;
+  stage: EqStageRef | null;
+  total: ResponsePoint[];
+  /** `stage` on its own; `null` without a stage. */
+  isolated: ResponsePoint[] | null;
+}
+
 /** EQ chain response from core's `filter_response` (shared with mobile) —
- * the whole chain, or one stage isolated when `stage` is given; `null` eq or
- * stage-less isolation returns `null`. Async over IPC, so the last curve stays
- * drawn while the next is in flight, and a slower stale reply never overwrites
- * a newer one. */
-export function useResponseCurve(
-  eq: ChannelEq | null,
-  stage: EqStageRef | null = null,
-  points: number | null = null,
-): ResponsePoint[] | null {
-  const [curve, setCurve] = useState<ResponsePoint[] | null>(null);
+ * the whole chain and, when `stage` is given, that stage isolated. Both arrive
+ * in one state update. Async over IPC, so the last curves stay drawn while the
+ * next are in flight, and a slower stale reply never overwrites a newer one. */
+export function useResponseCurves(eq: ChannelEq, stage: EqStageRef | null, points: number): ResponseCurves | null {
+  const [curves, setCurves] = useState<ResponseCurves | null>(null);
   const seq = useRef(0);
-  const key = eq ? JSON.stringify([eq, stage, points]) : null;
+  const applied = useRef(0);
+  const key = JSON.stringify([eq, stage, points]);
   useEffect(() => {
     const mine = ++seq.current;
-    if (!eq) return setCurve(null);
-    void commands.eqResponseCurve(eq, stage, points).then((pts) => {
-      if (mine === seq.current) setCurve(pts as ResponsePoint[]);
+    void Promise.all([
+      commands.eqResponseCurve(eq, null, points),
+      stage ? commands.eqResponseCurve(eq, stage, points) : null,
+    ]).then(([total, isolated]) => {
+      // Newer than what's drawn, not "the very latest": during a fast drag
+      // every reply is already superseded by the time it lands.
+      if (mine < applied.current) return;
+      applied.current = mine;
+      setCurves({ eq, stage, total: total as ResponsePoint[], isolated: isolated as ResponsePoint[] | null });
     });
     // `key` stands in for eq/stage: callers rebuild these objects every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  return eq ? curve : null;
+  return curves;
 }
 
 /** Samples `numPoints` log-spaced frequencies across 20Hz-20kHz — the same

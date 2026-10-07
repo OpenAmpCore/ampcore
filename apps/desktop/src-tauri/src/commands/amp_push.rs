@@ -383,6 +383,10 @@ pub async fn projects_push_amp_to_live(
 /// reaches the amp and the project as one step, without the project ever
 /// claiming something the amp doesn't hold. A candidate that didn't land is
 /// dropped; the project is left as it was.
+///
+/// The push verifies itself against readings taken after its writes, and the
+/// driver only reads amps something is subscribed to — so it subscribes its
+/// own amp for as long as it runs, whatever the caller has open.
 pub(crate) async fn push_assignment(
     app: &AppHandle,
     project_data: &State<'_, ProjectDataState>,
@@ -391,7 +395,23 @@ pub(crate) async fn push_assignment(
     assignment_id: String,
     candidate: Option<AmpAssignment>,
 ) -> Result<AmpPushResult, AppError> {
-    let mut context = push_context(project_data, live, &project_id, &assignment_id)?;
+    let context = push_context(project_data, live, &project_id, &assignment_id)?;
+    let token = format!("push:{assignment_id}");
+    live.set_poll_subscription(token.clone(), vec![context.device_id.clone()])?;
+    let result = push_polled(app, project_data, live, project_id, assignment_id, candidate, context).await;
+    live.set_poll_subscription(token, Vec::new()).ok();
+    result
+}
+
+async fn push_polled(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+    candidate: Option<AmpAssignment>,
+    mut context: PushContext,
+) -> Result<AmpPushResult, AppError> {
     let mut plan = build_plan(&context, project_data, &project_id, &assignment_id, candidate.as_ref())?;
 
     let (firmware_family, ip, write_tx) = resolve_write_target(live, &context.device_id)?;

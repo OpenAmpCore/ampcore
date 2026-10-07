@@ -13,6 +13,7 @@ export const commands = {
 	createdAt: number | null,
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
+	speakers?: ProjectSpeaker[],
 } | null, AppError>(__TAURI_INVOKE("projects_get", { id })),
 	projectsCreate: (name: string, description: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_create", { name, description })),
 	/**
@@ -160,6 +161,25 @@ export const commands = {
 	 *  `speakers_apply` is what sets a speaker up.
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
+	/**
+	 *  Places a library speaker in the project, linked to nothing yet. Its ways
+	 *  are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
+	 */
+	projectsAddSpeaker: (projectId: string, libraryId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_speaker", { projectId, libraryId, name })),
+	projectsRenameSpeaker: (projectId: string, speakerId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_rename_speaker", { projectId, speakerId, name })),
+	/**
+	 *  Removes a project speaker; see `Project::remove_speaker` for what its
+	 *  outputs keep.
+	 */
+	projectsRemoveSpeaker: (projectId: string, speakerId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_speaker", { projectId, speakerId })),
+	/**  Where the speaker sits on the Workspace canvas. */
+	projectsSetSpeakerPosition: (projectId: string, speakerId: string, x: number | null, y: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_speaker_position", { projectId, speakerId, x, y })),
+	/**
+	 *  Unlinks an output from its project speaker. Its values and library
+	 *  reference stay, as a speaker set up on the amp — as `Project::remove_speaker`
+	 *  leaves them.
+	 */
+	projectsUnlinkOutput: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_output", { projectId, assignmentId, channelIndex })),
 	/**
 	 *  Sets outputs up from the library: each item's output gets its way's values
 	 *  (fitted to the amp), reference and label as its name. A way that doesn't
@@ -561,6 +581,14 @@ export const commands = {
 	 *  offline and online settings happens in the editor.
 	 */
 	projectsLinkAmp: (projectId: string, assignmentId: string, deviceId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_link_amp", { projectId, assignmentId, deviceId })),
+	/**
+	 *  Adds a discovered amp to the project as what it reports itself to be —
+	 *  its detected model, its firmware family, its name — already linked by MAC.
+	 *  The one-step form of add-from-the-catalogue, then link: nothing is left
+	 *  half done when a check fails. Its settings are not copied here; the caller
+	 *  pulls them (`projects_merge_amp_from_live`) once the amp has been read.
+	 */
+	projectsAddLiveAmp: (projectId: string, deviceId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_live_amp", { projectId, deviceId })),
 	/**  Clears a project amp's linked MAC. Planned config is left untouched. */
 	projectsUnlinkAmp: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_amp", { projectId, assignmentId })),
 	/**
@@ -1210,6 +1238,11 @@ export type BackupPriorityPatch = {
 	first: number | null,
 	second: number | null,
 	thresholdDb: number | null,
+};
+
+export type CanvasPosition = {
+	x: number | null,
+	y: number | null,
 };
 
 /**  The per-channel fields `ampHash` covers beyond the speaker hash. */
@@ -1893,6 +1926,29 @@ export type Project = {
 	createdAt: number | null,
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
+	speakers?: ProjectSpeaker[],
+};
+
+/**
+ *  A speaker placed in the project, before or after its ways are patched to
+ *  amp outputs. It stores no links: its linked ways are the outputs — of any
+ *  amp — whose `SpeakerRef.project_speaker_id` is its id, so removing an amp
+ *  or shrinking it can't leave a link behind.
+ */
+export type ProjectSpeaker = {
+	id: string,
+	name: string,
+	libraryId: string,
+	/**
+	 *  "Brand Model" at add time, so a speaker whose entry was deleted from
+	 *  this machine's library still reads as something.
+	 */
+	label: string,
+	/**
+	 *  Where the user put it on the Workspace canvas; `None` until it has
+	 *  been dragged, and the canvas picks a free spot.
+	 */
+	position?: CanvasPosition | null,
 };
 
 /**
@@ -2025,6 +2081,12 @@ export type SpeakerItem = {
 	channelIndex: number,
 	libraryId: string,
 	wayIndex: number,
+	/**
+	 *  Links the output to this project speaker. Without one, an output that
+	 *  is re-applied from the way it already holds keeps its link; any other
+	 *  becomes a speaker set up on the amp.
+	 */
+	projectSpeakerId?: string | null,
 };
 
 export type SpeakerLibraryEntry = {
@@ -2071,6 +2133,12 @@ export type SpeakerRef = {
 	 *  deleted from this machine's library still reads as something.
 	 */
 	label: string,
+	/**
+	 *  The `ProjectSpeaker` this output is a way of. `None` for a speaker set
+	 *  up on the amp itself, which is not a project speaker. An id no project
+	 *  speaker has reads the same.
+	 */
+	projectSpeakerId?: string | null,
 };
 
 export type SpeakerStatus = 
