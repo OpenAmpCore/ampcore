@@ -1,20 +1,24 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Button, Input, Label, Modal, Spinner, TextField } from "@heroui/react";
-import { ChevronDown, ChevronRight, Server } from "lucide-react";
+import { Button, ButtonGroup, Input, Label, Modal, Spinner, TextField } from "@heroui/react";
+import { Box, ChevronDown, ChevronRight, Radio, Server } from "lucide-react";
 import {
   commands,
   type AmpModelCatalogEntry,
+  type DiscoveredDevice,
   type Project,
 } from "../lib/bindings";
 import { getAmpSpecSheet } from "../lib/ampSpecSheets";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { useIsCompact } from "../lib/breakpoints";
+import { AmpLivePicker, unlinkedDevices } from "./AmpLivePicker";
 import { SimpleSelect } from "./SimpleSelect";
 
 interface AmpCatalogueModalProps {
   opened: boolean;
   onClose: () => void;
-  projectId: string;
+  /** The project amps are added to; `devices` is what discovery sees. */
+  project: Project;
+  devices: DiscoveredDevice[];
   ampModels: AmpModelCatalogEntry[];
   onProjectUpdate: (project: Project) => void;
 }
@@ -121,11 +125,16 @@ function ThemeIcon({ size, className, children }: { size: number; className?: st
 export function AmpCatalogueModal({
   opened,
   onClose,
-  projectId,
+  project,
+  devices,
   ampModels,
   onProjectUpdate,
 }: AmpCatalogueModalProps) {
   const compact = useIsCompact();
+  const projectId = project.id;
+  /** Live: an amp found on the network, added linked and with its settings.
+   * Simulated: a model from the catalogue, linked later or never. */
+  const [source, setSource] = useState<"live" | "simulated">("simulated");
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [specsExpanded, setSpecsExpanded] = useState(false);
   const [deviceName, setDeviceName] = useState("");
@@ -246,6 +255,8 @@ export function AmpCatalogueModal({
 
   useEffect(() => {
     if (opened) {
+      // Live when there is something to add from the network.
+      setSource(unlinkedDevices(project, devices).length > 0 ? "live" : "simulated");
       setSelectedModelId(null);
       setSpecsExpanded(false);
       setDeviceName("");
@@ -390,6 +401,18 @@ export function AmpCatalogueModal({
             {/* Model tree beside the detail pane on a roomy window; on a small one
              * the modal goes full-screen and the two stack, since a 260px tree
              * plus a spec sheet can't share a narrow dialog. */}
+            <div className="flex min-w-0 flex-col gap-4">
+            <ButtonGroup size="sm" className="self-start">
+              <Button variant={source === "live" ? "primary" : "ghost"} aria-pressed={source === "live"} onPress={() => setSource("live")}>
+                <Radio size={14} /> Live
+              </Button>
+              <Button variant={source === "simulated" ? "primary" : "ghost"} aria-pressed={source === "simulated"} onPress={() => setSource("simulated")}>
+                <Box size={14} /> Simulated
+              </Button>
+            </ButtonGroup>
+            {source === "live" ? (
+              <AmpLivePicker project={project} devices={devices} onProjectUpdate={onProjectUpdate} onDone={onClose} />
+            ) : (
             <div
               className={`flex items-stretch gap-4 ${compact ? "min-h-0 flex-wrap" : "min-h-[420px] flex-nowrap"}`}
             >
@@ -543,6 +566,8 @@ export function AmpCatalogueModal({
                   </div>
                 )}
               </div>
+            </div>
+            )}
             </div>
           </Modal.Body>
         </Modal.Dialog>

@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::live::state::LiveDeviceState;
 
-use ampcore_core::data::project::{AmpAssignment, Project, SpeakerRef};
+use ampcore_core::data::project::{AmpAssignment, CanvasPosition, Project, ProjectSpeaker, SpeakerRef, MAX_PARALLEL};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
     speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
@@ -271,6 +271,11 @@ pub struct SpeakerItem {
     pub channel_index: u32,
     pub library_id: String,
     pub way_index: u32,
+    /// Links the output to this project speaker. Without one, an output that
+    /// is re-applied from the way it already holds keeps its link; any other
+    /// becomes a speaker set up on the amp.
+    #[serde(default)]
+    pub project_speaker_id: Option<String>,
 }
 
 /// Each item's way fitted to the project amp's capability
@@ -310,7 +315,12 @@ fn fit_ways(
                 .ok_or_else(|| AppError::from(format!("channel {channel_index} not found")))?;
             let (fitted, issues) = processing.fit(channel, &cap)?;
             let rows = fit_rows(&SpeakerProcessing::from_channel(channel), processing, &fitted);
-            Ok(FittedWay { channel_index, processing: fitted, reference: entry.reference(way)?, output_name, issues, rows })
+            let mut reference = entry.reference(way)?;
+            reference.project_speaker_id = item.project_speaker_id.clone().or_else(|| {
+                let held = channel.speaker.as_ref().filter(|s| s.library_id == item.library_id && s.way_index == way)?;
+                held.project_speaker_id.clone()
+            });
+            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, issues, rows })
         })
         .collect()
 }
@@ -363,38 +373,55 @@ pub async fn speakers_apply(
         return Err(AppError::from("The speaker doesn't fit this amp as is"));
     }
 
-    let candidate = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
-        let mut candidate = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
-            .ok_or_else(|| AppError::from("amp not found"))?
-            .clone();
-        for f in fitted {
-            let channel = channel_mut(&mut candidate, f.channel_index)?;
-            f.processing.apply_to(channel);
-            channel.speaker = Some(f.reference);
-            if f.output_name.is_some() {
-                channel.output_name = f.output_name;
-            }
+    let mut candidate = candidate_of(&state, &project_id, &assignment_id)?;
+    for f in fitted {
+        let channel = channel_mut(&mut candidate, f.channel_index)?;
+        f.processing.apply_to(channel);
+        channel.speaker = Some(f.reference);
+        if f.output_name.is_some() {
+            channel.output_name = f.output_name;
         }
-        candidate
-    };
+    }
+    save_or_push(&app, &state, &live, project_id, assignment_id, candidate, "the speaker").await
+}
 
+/// A copy of the project amp to edit and hand to `save_or_push`.
+pub(crate) fn candidate_of(state: &State<'_, ProjectDataState>, project_id: &str, assignment_id: &str) -> Result<AmpAssignment, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    inner
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
+        .cloned()
+        .ok_or_else(|| AppError::from("amp not found"))
+}
+
+/// Makes `candidate` (an edited copy of the project amp) the project's. With
+/// the linked amp online and engaged it is pushed and only stored once the
+/// amp holds it; otherwise it is saved as the plan. `what` names the change
+/// in the failure text ("the speaker").
+pub(crate) async fn save_or_push(
+    app: &AppHandle,
+    state: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+    candidate: AmpAssignment,
+    what: &str,
+) -> Result<Project, AppError> {
     let online = match candidate.mac.as_deref().filter(|_| !candidate.live_disengaged) {
-        Some(mac) => read_linked_amp(&live, mac)?.is_some_and(|r| r.device.online),
+        Some(mac) => read_linked_amp(live, mac)?.is_some_and(|r| r.device.online),
         None => false,
     };
     if !online {
-        return edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
+        return edit_with_library(app, state, &project_id, &assignment_id, |_, assignment| {
             *assignment = candidate;
             Ok(false)
         });
     }
 
-    let result = push_assignment(&app, &state, &live, project_id, assignment_id, Some(candidate)).await?;
+    let result = push_assignment(app, state, live, project_id, assignment_id, Some(candidate)).await?;
     if result.pushed {
         return result.project.ok_or_else(|| AppError::from("the push returned no project"));
     }
@@ -404,7 +431,7 @@ pub async fn speakers_apply(
         (Some(stage), Some(error)) => {
             format!("The amp stopped answering while {stage} was written. Check its connection and apply again. ({error})")
         }
-        _ => format!("The amp doesn't hold the speaker after writing it. Still differing: {}", differing.join(", ")),
+        _ => format!("The amp doesn't hold {what} after writing it. Still differing: {}", differing.join(", ")),
     }))
 }
 
@@ -422,6 +449,112 @@ pub fn projects_set_channel_speaker(
     edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
         channel_mut(assignment, channel_index)?.speaker = None;
         Ok(false)
+    })
+}
+
+/// The project-level counterpart of `edit_with_library`, for project speakers.
+fn edit_project(
+    app: &AppHandle,
+    state: &State<ProjectDataState>,
+    project_id: &str,
+    edit: impl FnOnce(&[SpeakerLibraryEntry], &mut Project) -> Result<(), AppError>,
+) -> Result<Project, AppError> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {project_id} not found")))?;
+    edit(&inner.speakers, project)?;
+    project.touch();
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Places a library speaker in the project, linked to nothing yet — a group
+/// of `parallel` identical cabinets on the same outputs (1 = one cabinet).
+/// Its ways are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_add_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    library_id: String,
+    name: String,
+    parallel: u32,
+) -> Result<Project, AppError> {
+    if !(1..=MAX_PARALLEL).contains(&parallel) {
+        return Err(AppError::from(format!("A parallel group holds 1 to {MAX_PARALLEL} cabinets")));
+    }
+    edit_project(&app, &state, &project_id, |library, project| {
+        let entry = library
+            .iter()
+            .find(|e| e.id == library_id)
+            .ok_or_else(|| AppError::from("That speaker is no longer in the library"))?;
+        let label = format!("{} {}", entry.brand, entry.model);
+        let name = Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or(&entry.model).to_string();
+        project.speakers.push(ProjectSpeaker::new(name, library_id, label, parallel));
+        Ok(())
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn projects_rename_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+    name: String,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::from("A speaker needs a name"));
+        }
+        let speaker =
+            project.speakers.iter_mut().find(|s| s.id == speaker_id).ok_or_else(|| AppError::from("speaker not found"))?;
+        speaker.name = name.to_string();
+        Ok(())
+    })
+}
+
+/// Where the speaker sits on the Workspace canvas.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_speaker_position(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+    x: f64,
+    y: f64,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        let speaker =
+            project.speakers.iter_mut().find(|s| s.id == speaker_id).ok_or_else(|| AppError::from("speaker not found"))?;
+        speaker.position = Some(CanvasPosition { x, y });
+        Ok(())
+    })
+}
+
+/// Removes a project speaker; see `Project::remove_speaker` for what its
+/// outputs keep.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_remove_speaker(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    speaker_id: String,
+) -> Result<Project, AppError> {
+    edit_project(&app, &state, &project_id, |_, project| {
+        project.remove_speaker(&speaker_id);
+        Ok(())
     })
 }
 

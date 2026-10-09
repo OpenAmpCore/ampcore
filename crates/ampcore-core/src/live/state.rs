@@ -142,7 +142,10 @@ impl LiveDeviceState {
     /// Starts the driver; a no-op when it is already running. `sink` must wrap
     /// this same state.
     pub fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> Result<(), AppError> {
-        if self.lock()?.driver.is_some() {
+        // A driver whose task has ended (its socket couldn't be bound — another
+        // AmpCore holds the port) dropped its stop receiver; that one is dead
+        // and is replaced, or discovery would stay off for the whole session.
+        if self.lock()?.driver.as_ref().is_some_and(|d| !d.stop_tx.is_closed()) {
             return Ok(());
         }
         // Lock released before `start()`: the driver locks this same mutex
@@ -187,6 +190,20 @@ impl LiveDeviceState {
         if let Some(channels) = self.lock()?.fir.get_mut(device_id) {
             channels.remove(&channel_index);
         }
+        Ok(())
+    }
+
+    /// Drops every cached reading FC=27 doesn't carry — all outputs' FIR and
+    /// both bridge pairs — after something replaced the amp's whole state (a
+    /// preset recall). The driver re-reads unknown ones at its prime rate
+    /// (`FIR_PRIME_INTERVAL`, `BRIDGE_PRIME_INTERVAL`) instead of its slow
+    /// steady rotation, and until it has, a fingerprint of the amp is "not
+    /// read yet" rather than stale — so a following project isn't pulled to
+    /// the old values once per late re-read.
+    pub fn forget_uncarried(&self, device_id: &str) -> Result<(), AppError> {
+        let mut inner = self.lock()?;
+        inner.fir.remove(device_id);
+        inner.bridge.remove(device_id);
         Ok(())
     }
 

@@ -370,10 +370,13 @@ async fn fetch_presets(
 
 #[tauri::command]
 async fn recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<LiveWriteAck, String> {
-    send_write(&state, &device_id, |fw| write_helpers::presets_supported(fw).then(|| preset::build_recall_packet(slot_index)))
-        .await
-        .map(ack)
-        .map_err(|e| e.message)
+    let outcome =
+        send_write(&state, &device_id, |fw| write_helpers::presets_supported(fw).then(|| preset::build_recall_packet(slot_index)))
+            .await
+            .map_err(|e| e.message)?;
+    // The recall replaced FIR and bridge too, which FC=27 doesn't carry: re-read them now.
+    state.forget_uncarried(&device_id).map_err(|e| e.message)?;
+    Ok(ack(outcome))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

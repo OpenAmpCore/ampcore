@@ -31,6 +31,7 @@ use ampcore_core::live::cvr::write;
 use ampcore_core::live::state::LiveDeviceState;
 
 use super::amp_links::read_linked_amp;
+use super::live_control::reread_bridge_pair;
 use ampcore_core::live::write_helpers::{resolve_write_target, unknown_firmware_error, WriteTally};
 
 /// How long to wait for an FC=27 poll that postdates the last write before
@@ -383,6 +384,10 @@ pub async fn projects_push_amp_to_live(
 /// reaches the amp and the project as one step, without the project ever
 /// claiming something the amp doesn't hold. A candidate that didn't land is
 /// dropped; the project is left as it was.
+///
+/// The push verifies itself against readings taken after its writes, and the
+/// driver only reads amps something is subscribed to — so it subscribes its
+/// own amp for as long as it runs, whatever the caller has open.
 pub(crate) async fn push_assignment(
     app: &AppHandle,
     project_data: &State<'_, ProjectDataState>,
@@ -391,7 +396,23 @@ pub(crate) async fn push_assignment(
     assignment_id: String,
     candidate: Option<AmpAssignment>,
 ) -> Result<AmpPushResult, AppError> {
-    let mut context = push_context(project_data, live, &project_id, &assignment_id)?;
+    let context = push_context(project_data, live, &project_id, &assignment_id)?;
+    let token = format!("push:{assignment_id}");
+    live.set_poll_subscription(token.clone(), vec![context.device_id.clone()])?;
+    let result = push_polled(app, project_data, live, project_id, assignment_id, candidate, context).await;
+    live.set_poll_subscription(token, Vec::new()).ok();
+    result
+}
+
+async fn push_polled(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+    candidate: Option<AmpAssignment>,
+    mut context: PushContext,
+) -> Result<AmpPushResult, AppError> {
     let mut plan = build_plan(&context, project_data, &project_id, &assignment_id, candidate.as_ref())?;
 
     let (firmware_family, ip, write_tx) = resolve_write_target(live, &context.device_id)?;
@@ -507,6 +528,15 @@ pub(crate) async fn push_assignment(
             live.forget_fir(&context.device_id, *channel)?;
         }
         drop(hold);
+        // Bridge state isn't in FC=27 but in the driver's FC=50 cache, which
+        // its own tick refreshes only slowly. Re-read every written pair now,
+        // or the verify below (and the next round's plan) sees the old bridge
+        // and reports a bridge the amp does hold as not written.
+        for action in plan.stages.iter().flat_map(|s| &s.actions) {
+            if let PushAction::Bridge { pair_index, .. } = action {
+                reread_bridge_pair(app, live, &context.device_id, &ip.to_string(), *pair_index).await;
+            }
+        }
 
         // Whether or not every write landed, the amp's state has moved and
         // the three device facts are read from it — so the project is

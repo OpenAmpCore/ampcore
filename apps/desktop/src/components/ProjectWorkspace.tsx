@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
@@ -10,6 +10,7 @@ import { useLiveBridge } from "../hooks/useLiveBridge";
 import { useLiveDevices } from "../hooks/useLiveDevices";
 import { useLiveDriver } from "../hooks/useLiveDriver";
 import { useLivePolling } from "../hooks/useLivePolling";
+import { useProjectLocks } from "../hooks/useProjectLocks";
 import { useLiveChannelConfig, useLiveTelemetry } from "../hooks/useLiveMap";
 import { linkedDeviceFor } from "../lib/ampLinkStatus";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
@@ -41,10 +42,15 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
     });
   }, []);
 
-  function openDevice(assignment: AmpAssignment) {
-    setOpenDeviceIds((prev) => (prev.includes(assignment.id) ? prev : [...prev, assignment.id]));
-    onActiveTabChange(deviceTabValue(assignment.id));
-  }
+  // Stable, so the memoised Workspace isn't re-rendered along with this
+  // component every time a meter reading arrives.
+  const openDevice = useCallback(
+    (assignment: AmpAssignment) => {
+      setOpenDeviceIds((prev) => (prev.includes(assignment.id) ? prev : [...prev, assignment.id]));
+      onActiveTabChange(deviceTabValue(assignment.id));
+    },
+    [onActiveTabChange],
+  );
 
   function closeDevice(assignmentId: string) {
     setOpenDeviceIds((prev) => prev.filter((id) => id !== assignmentId));
@@ -71,26 +77,49 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
   const { devices } = useLiveDevices();
   const linkedDevice = activeDevice ? linkedDeviceFor(activeDevice, devices) : undefined;
   const linkedOnline = linkedDevice?.online ?? false;
-  useLivePolling(linkedDevice && linkedOnline ? [linkedDevice.id] : []);
+  // Every other linked amp is polled too, for as long as the project is open:
+  // the Workspace shows each amp's sync state and links speakers to amps whose
+  // editor is closed. A disengaged amp is left alone unless it is the one open.
+  // ponytail: a subscription also runs the 50 ms heartbeat, so this is meter
+  // rate per amp; split settings from meters in the driver for big projects.
+  useLivePolling(
+    project.ampAssignments.flatMap((a) => {
+      const device = linkedDeviceFor(a, devices);
+      return device?.online && (!a.liveDisengaged || a.id === activeDevice?.id) ? [device.id] : [];
+    }),
+  );
   // Primes FC=50 bridge state for this amp (see `useLiveBridge`): the edit
   // lock can't fingerprint the online amp until every pair is reported, so
   // without this the editor opens locked until the bridge tick catches up.
   useLiveBridge(linkedDevice && linkedOnline ? linkedDevice.id : undefined);
   const editLock = useAmpEditLock(project.id, activeDevice?.id, linkedDevice?.id, linkedOnline);
 
+  // Every amp's lock, for the Workspace's cards and for following. The open
+  // amp's own lock is resolved on every reading rather than once a second, so
+  // it replaces that amp's entry.
+  const projectLocks = useProjectLocks(project);
+  const locks = useMemo(() => {
+    if (!activeDevice || !editLock) return projectLocks;
+    return new Map(projectLocks).set(activeDevice.id, editLock);
+  }, [projectLocks, activeDevice?.id, editLock]);
+
   // Once the two fingerprints match, the amp takes over as the source of
   // truth: the editor writes to it directly and this project follows it.
+  // For every linked amp, whichever view is open — leaving an editor while a
+  // preset recall is still arriving must not end that amp's session.
   const channelConfigById = useLiveChannelConfig();
   const telemetryById = useLiveTelemetry();
-  const { following } = useLinkedSync({
+  const following = useLinkedSync({
     projectId: project.id,
-    assignmentId: activeDevice?.id,
-    lock: editLock,
-    deviceName: linkedDevice?.name,
+    locks,
+    nameOf: (id) => {
+      const assignment = project.ampAssignments.find((a) => a.id === id);
+      return assignment ? (linkedDeviceFor(assignment, devices)?.name ?? assignment.deviceName ?? undefined) : undefined;
+    },
     onProjectUpdate,
   });
   const liveThrough =
-    following && linkedDevice && linkedOnline
+    activeDevice && following.has(activeDevice.id) && linkedDevice && linkedOnline
       ? {
           device: linkedDevice,
           channelConfig: channelConfigById[linkedDevice.id],
@@ -165,6 +194,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
               onProjectUpdate={onProjectUpdate}
               ampModels={ampModels}
               onOpenDevice={openDevice}
+              locks={locks}
             />
           )}
           {activeTab === "operator" && <OperatorView />}

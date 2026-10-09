@@ -6,12 +6,12 @@ import {
   type AmpAssignment,
   type AmpLinkCheckKind,
   type AmpLinkValidation,
-  type AmpModelCatalogEntry,
   type DiscoveredDevice,
   type Project,
 } from "../lib/bindings";
 import { AMP_LINK_STATUS_META, ampLinkStatus, linkedDeviceFor } from "../lib/ampLinkStatus";
 import { useIsCompact, useIsTight } from "../lib/breakpoints";
+import { useDetectedModels } from "./AmpLivePicker";
 
 interface AmpLinkModalProps {
   project: Project;
@@ -70,33 +70,6 @@ function Field({ label, value, mono }: { label: string; value: ReactNode; mono?:
       </div>
     </div>
   );
-}
-
-/** Catalog model per discovered device id, resolved exactly like Live Control's
- * model select (`deviceModelLinkAutoMatch`: a manual pick wins, otherwise the
- * firmware-string match). Only resolves while `enabled`, and only for device
- * ids it hasn't resolved yet. */
-function useDetectedModels(devices: DiscoveredDevice[], enabled: boolean) {
-  const [models, setModels] = useState<Record<string, AmpModelCatalogEntry | null>>({});
-  const pendingKey = devices
-    .filter((d) => !(d.id in models))
-    .map((d) => d.id)
-    .join(",");
-
-  useEffect(() => {
-    if (!enabled || !pendingKey) return;
-    for (const device of devices.filter((d) => !(d.id in models))) {
-      commands
-        .deviceModelLinkAutoMatch(device.mac, device.firmwareVersion, device.digitalInputChannels, device.outputChannels)
-        .then((result) => {
-          setModels((prev) => ({ ...prev, [device.id]: result.status === "ok" ? result.data : null }));
-        });
-    }
-    // `pendingKey` stands in for `devices`, whose identity changes on every discovery tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, pendingKey]);
-
-  return models;
 }
 
 type StripState = "idle" | "validating" | "compatible" | "incompatible";

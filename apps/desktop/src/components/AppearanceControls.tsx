@@ -2,12 +2,14 @@ import { Button, ButtonGroup, ColorSlider } from "@heroui/react";
 import { parseColor } from "react-aria-components";
 import { ACCENT_LIGHTNESS, ACCENT_SATURATION, RADII, useAppearance, type ColorScheme } from "../lib/appearance";
 
-/** One label + control row, matching `SettingsModal`'s row shape so these
- * read identically whether they appear in the title-bar menu or the modal. */
+/** A label over its control, the control taking the full width — side by
+ * side, a narrow menu wrapped some rows and pushed others past its edge. */
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <span style={{ fontSize: "var(--amp-font-size-sm)" }}>{label}</span>
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[var(--amp-color-dimmed)]" style={{ fontSize: "var(--amp-font-size-sm)" }}>
+        {label}
+      </span>
       {children}
     </div>
   );
@@ -19,20 +21,18 @@ const MODES: { id: ColorScheme; label: string }[] = [
   { id: "auto", label: "System" },
 ];
 
-/** The app's three appearance knobs. Shared by `SettingsModal` and the title
- * bar's appearance menu rather than duplicated, since both surface the same
- * store (`src/lib/appearance.ts`) and must stay in step when one is changed
- * while the other is open. */
+/** The app's three appearance knobs (`src/lib/appearance.ts`), in the title bar's appearance menu. */
 export function AppearanceControls() {
   const { colorScheme, accentHue, radiusId, setColorScheme, setAccent, setRadius } = useAppearance();
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <Row label="Color mode">
-        <ButtonGroup size="sm">
+        <ButtonGroup size="sm" className="w-full">
           {MODES.map(({ id, label }) => (
             <Button
               key={id}
+              className="flex-1"
               variant={colorScheme === id ? "primary" : "ghost"}
               onPress={() => setColorScheme(id)}
             >
@@ -50,7 +50,7 @@ export function AppearanceControls() {
           aria-label="Accent color"
           channel="hue"
           colorSpace="hsl"
-          className="w-36"
+          className="w-full"
           value={parseColor(`hsl(${accentHue}, ${ACCENT_SATURATION}%, ${ACCENT_LIGHTNESS}%)`)}
           onChange={(color) => setAccent(color.getChannelValue("hue"))}
         >
@@ -61,10 +61,11 @@ export function AppearanceControls() {
       </Row>
 
       <Row label="Corner radius">
-        <ButtonGroup size="sm">
+        <ButtonGroup size="sm" className="w-full">
           {RADII.map((radius) => (
             <Button
               key={radius.id}
+              className="flex-1"
               variant={radiusId === radius.id ? "primary" : "ghost"}
               onPress={() => setRadius(radius.id)}
             >

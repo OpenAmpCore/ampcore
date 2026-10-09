@@ -10,6 +10,8 @@ use ampcore_core::data::project::{
 use ampcore_core::live::cvr::fir::FIR_MAX_TAPS;
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
+use ampcore_core::live::state::LiveDeviceState;
+use super::speakers::{candidate_of, save_or_push};
 
 fn find_amp_model<'a>(models: &'a [AmpModelCatalogEntry], id: &str) -> Option<&'a AmpModelCatalogEntry> {
     models.iter().find(|m| m.id == id)
@@ -796,42 +798,47 @@ pub fn projects_set_channel_fir(
 /// must be even and have a following odd-indexed partner in the same
 /// assignment; the flag itself lives only on the leader (see
 /// `AmpChannel.output_bridged`'s doc comment).
+///
+/// With the linked amp online and engaged the change is pushed to it and
+/// stored once the amp holds it (`save_or_push`), so the two stay in step —
+/// bridging from the Workspace or the Speakers tab no longer leaves a mismatch.
+/// Otherwise it is a plain project edit.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_output_bridge(
+pub async fn projects_set_output_bridge(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     pair_leader_channel_index: u32,
     bridged: bool,
 ) -> Result<Project, AppError> {
-    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment| {
-        if pair_leader_channel_index % 2 != 0 {
-            return Err(AppError::from(format!(
-                "channel {} is not a pair leader (must be even-indexed)",
-                pair_leader_channel_index
-            )));
-        }
-        let has_partner = assignment
-            .channels
-            .iter()
-            .any(|c| c.channel_index == pair_leader_channel_index + 1);
-        if !has_partner {
-            return Err(AppError::from(format!(
-                "channel {} has no partner channel {} to bridge with",
-                pair_leader_channel_index,
-                pair_leader_channel_index + 1
-            )));
-        }
+    let mut assignment = candidate_of(&state, &project_id, &assignment_id)?;
+    if pair_leader_channel_index % 2 != 0 {
+        return Err(AppError::from(format!(
+            "channel {} is not a pair leader (must be even-indexed)",
+            pair_leader_channel_index
+        )));
+    }
+    let has_partner = assignment
+        .channels
+        .iter()
+        .any(|c| c.channel_index == pair_leader_channel_index + 1);
+    if !has_partner {
+        return Err(AppError::from(format!(
+            "channel {} has no partner channel {} to bridge with",
+            pair_leader_channel_index,
+            pair_leader_channel_index + 1
+        )));
+    }
 
-        let channel = assignment
-            .channels
-            .iter_mut()
-            .find(|c| c.channel_index == pair_leader_channel_index)
-            .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == pair_leader_channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
 
-        channel.output_bridged = bridged;
-        Ok(())
-    })
+    channel.output_bridged = bridged;
+    save_or_push(&app, &state, &live, project_id, assignment_id, assignment, "the bridge").await
 }

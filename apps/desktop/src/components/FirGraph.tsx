@@ -5,16 +5,16 @@ import type { ResponsePoint } from "../lib/filterResponse";
 /** The two FIR plots — magnitude response and impulse response — over the
  * coefficient array `FirPanel` reads with FC=43.
  *
- * Sizing follows `EqEditor`'s `ResponseGraph`: a fixed `viewBox` drawn at
- * `width:100%; height:auto` with a `minHeight` floor, so the chart scales with
- * its container without ever measuring it. Nothing here needs a ResizeObserver
- * or a bounded-height parent. */
+ * Sizing: a fixed `viewBox` drawn at `width:100%; height:auto` with a
+ * `minHeight` floor, so the chart scales with its container without ever
+ * measuring it — its dialog caps the width, which is what keeps both plots
+ * short enough to fit. */
 
 const GRAPH_WIDTH = 1000;
 const GRAPH_HEIGHT = 420;
 /** Below this the fixed aspect ratio leaves a plot too short to read. The
  * viewBox letterboxes (default `xMidYMid meet`) rather than stretching, so the
- * curve keeps its true shape — same floor and reasoning as the EQ graph. */
+ * curve keeps its true shape. */
 const GRAPH_MIN_HEIGHT = 190;
 const MID_Y = GRAPH_HEIGHT / 2;
 

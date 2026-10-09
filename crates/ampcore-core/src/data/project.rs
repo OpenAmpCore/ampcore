@@ -363,6 +363,55 @@ pub struct SpeakerRef {
     /// "Brand Model · Way" at assign time, so a reference whose entry was
     /// deleted from this machine's library still reads as something.
     pub label: String,
+    /// The `ProjectSpeaker` this output is a way of. `None` for a speaker set
+    /// up on the amp itself, which is not a project speaker. An id no project
+    /// speaker has reads the same.
+    #[serde(default)]
+    pub project_speaker_id: Option<String>,
+}
+
+/// A speaker placed in the project, before or after its ways are patched to
+/// amp outputs. It stores no links: its linked ways are the outputs — of any
+/// amp — whose `SpeakerRef.project_speaker_id` is its id, so removing an amp
+/// or shrinking it can't leave a link behind.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSpeaker {
+    pub id: String,
+    pub name: String,
+    pub library_id: String,
+    /// "Brand Model" at add time, so a speaker whose entry was deleted from
+    /// this machine's library still reads as something.
+    pub label: String,
+    /// Where the user put it on the Workspace canvas; `None` until it has
+    /// been dragged, and the canvas picks a free spot.
+    #[serde(default)]
+    pub position: Option<CanvasPosition>,
+    /// Identical cabinets wired in parallel on the same outputs, as
+    /// ArmoníaPlus's Parallel mode: the group is one speaker, linked once —
+    /// each way drives `parallel` boxes. 1 = a single cabinet; at most
+    /// `MAX_PARALLEL`. Descriptive only: nothing is written per cabinet.
+    #[serde(default = "one_cabinet")]
+    pub parallel: u32,
+}
+
+/// The largest parallel group a project speaker can be.
+pub const MAX_PARALLEL: u32 = 8;
+
+fn one_cabinet() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+pub struct CanvasPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl ProjectSpeaker {
+    pub fn new(name: String, library_id: String, label: String, parallel: u32) -> Self {
+        Self { id: new_id(), name, library_id, label, position: None, parallel }
+    }
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -411,6 +460,8 @@ pub struct Project {
     pub created_at: f64,
     pub updated_at: f64,
     pub amp_assignments: Vec<AmpAssignment>,
+    #[serde(default)]
+    pub speakers: Vec<ProjectSpeaker>,
 }
 
 /// A version stamp only — nothing reads it to gate behavior. There are no
@@ -423,7 +474,15 @@ pub struct Project {
 ///
 /// 3: `AmpChannel.fir` — absent in older files, which backfills to a unit
 /// impulse (no filter loaded).
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 3;
+///
+/// 4: `Project.speakers` and `SpeakerRef.project_speaker_id` — absent in
+/// older files, which backfills to no project speakers: every output's
+/// speaker stays one set up on its amp. `ProjectSpeaker.position` backfills
+/// to unplaced.
+///
+/// 5: `ProjectSpeaker.parallel` — absent in older files, which backfills to 1
+/// (a single cabinet).
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 5;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -436,11 +495,25 @@ impl Project {
             created_at: now,
             updated_at: now,
             amp_assignments: Vec::new(),
+            speakers: Vec::new(),
         }
     }
 
     pub fn touch(&mut self) {
         self.updated_at = now_millis();
+    }
+
+    /// Removes a project speaker. The outputs it was linked to keep their
+    /// values and their library reference, as speakers set up on the amp.
+    pub fn remove_speaker(&mut self, speaker_id: &str) {
+        self.speakers.retain(|s| s.id != speaker_id);
+        for channel in self.amp_assignments.iter_mut().flat_map(|a| &mut a.channels) {
+            if let Some(speaker) = &mut channel.speaker {
+                if speaker.project_speaker_id.as_deref() == Some(speaker_id) {
+                    speaker.project_speaker_id = None;
+                }
+            }
+        }
     }
 }
 
@@ -606,5 +679,41 @@ fn default_channel_eq() -> ChannelEq {
         hp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth12, freq_hz: 20.0, active: false },
         bands: (0..8).map(default_eq_band).collect(),
         lp: CrossoverSlot { filter_type: CrossoverFilterType::Butterworth12, freq_hz: 20000.0, active: false },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_a_project_speaker_leaves_its_outputs_as_amp_level_speakers() {
+        let mut project = Project::new("p".into(), String::new());
+        let speaker = ProjectSpeaker::new("Main L".into(), "lib".into(), "Brand Model".into(), 1);
+        let other = ProjectSpeaker::new("Main R".into(), "lib".into(), "Brand Model".into(), 1);
+        // One way on each of two amps, plus the other speaker's way.
+        for (way_index, owner) in [(0, &speaker), (1, &speaker)] {
+            let mut amp = AmpAssignment::new(None, None, 2, None, None);
+            let reference = |way_index, id: &str| SpeakerRef {
+                library_id: "lib".into(),
+                way_index,
+                revision: 1,
+                label: "Brand Model".into(),
+                project_speaker_id: Some(id.into()),
+            };
+            amp.channels[0].speaker = Some(reference(way_index, &owner.id));
+            amp.channels[1].speaker = Some(reference(0, &other.id));
+            project.amp_assignments.push(amp);
+        }
+        project.speakers = vec![speaker.clone(), other.clone()];
+
+        project.remove_speaker(&speaker.id);
+
+        assert_eq!(project.speakers.len(), 1);
+        for amp in &project.amp_assignments {
+            let kept = amp.channels[0].speaker.as_ref().expect("the library reference stays");
+            assert_eq!(kept.project_speaker_id, None);
+            assert_eq!(amp.channels[1].speaker.as_ref().unwrap().project_speaker_id.as_deref(), Some(other.id.as_str()));
+        }
     }
 }

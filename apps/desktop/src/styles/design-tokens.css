@@ -64,10 +64,27 @@
      rendering opaque for a given viewer — belt-and-suspenders, not a
      statement that the original value is wrong. */
   --overlay: var(--amp-color-body);
+  /* Fields and the `--default` fill (switch track, secondary buttons) on a
+     white dialog: HeroUI's light values have no field border and a near-white
+     fill, so they vanished. The dark block does the same job. */
+  --field-background: var(--amp-color-gray-1);
+  --field-border-width: 1px;
+  --field-border: var(--amp-color-gray-4);
+  --default: var(--amp-color-gray-2);
+  /* Recessed panels inside a dialog (the EQ graph and its strip). */
+  --amp-graph-bg: var(--amp-color-gray-1);
+  /* The EQ graph's own look: dashed minor and solid major grid lines, the
+     selected stage's curve, and the hover readout. */
+  --amp-graph-grid-minor: rgba(0, 0, 0, 0.14);
+  --amp-graph-grid-major: var(--amp-color-gray-5);
+  --amp-graph-stage: #b58900;
+  --amp-graph-tip-bg: rgba(255, 255, 255, 0.97);
+  --amp-graph-tip-border: rgba(0, 0, 0, 0.18);
   --amp-color-default: var(--amp-color-white);
   --amp-color-default-hover: var(--amp-color-gray-0);
   --amp-color-default-border: var(--amp-color-gray-4);
-  --amp-color-dimmed: var(--amp-color-gray-6);
+  /* #6c737b on white is ~4.7:1; the palette's gray-6 was ~3.4:1. */
+  --amp-color-dimmed: #6c737b;
   --amp-color-gray-filled: var(--amp-color-gray-6);
   --amp-color-gray-light: var(--amp-color-gray-1);
   --amp-color-red-filled: var(--amp-color-red-6);
@@ -94,10 +111,19 @@
   --field-border-width: 1px;
   --field-border: var(--amp-color-dark-4);
   --default: var(--amp-color-dark-5);
+  /* Recessed panels inside a dialog (the EQ graph and its strip). */
+  --amp-graph-bg: #121314;
+  /* See the light block. */
+  --amp-graph-grid-minor: rgba(216, 216, 216, 0.2);
+  --amp-graph-grid-major: #6f7572;
+  --amp-graph-stage: #efea80;
+  --amp-graph-tip-bg: rgba(28, 30, 32, 0.97);
+  --amp-graph-tip-border: rgba(243, 246, 241, 0.24);
   --amp-color-default: var(--amp-color-dark-6);
   --amp-color-default-hover: var(--amp-color-dark-5);
   --amp-color-default-border: var(--amp-color-dark-4);
-  --amp-color-dimmed: var(--amp-color-dark-2);
+  /* #9b9b9b on the #242424 dialog is ~5:1; the palette's dark-2 was ~3.3:1. */
+  --amp-color-dimmed: #9b9b9b;
   --amp-color-gray-filled: var(--amp-color-gray-5);
   --amp-color-gray-light: rgba(17, 19, 21, 1);
   --amp-color-red-filled: var(--amp-color-red-5);

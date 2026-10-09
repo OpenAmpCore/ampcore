@@ -103,7 +103,7 @@ export function TitleBar({
             <Palette size={16} />
           </Button>
           <Popover.Content placement="bottom end">
-            <Popover.Dialog className="w-[280px]">
+            <Popover.Dialog className="w-[320px]">
               <AppearanceControls />
             </Popover.Dialog>
           </Popover.Content>

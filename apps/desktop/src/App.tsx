@@ -5,6 +5,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Button, ButtonGroup } from "@heroui/react";
 import { AppModeSelector } from "./components/AppModeSelector";
+import { ContextMenuProvider } from "./components/ContextMenu";
 import { LiveControlView } from "./components/LiveControlView";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
@@ -85,6 +86,7 @@ function App() {
   }, [windowTitle]);
 
   return (
+    <ContextMenuProvider>
     <div className="flex h-screen min-w-0 flex-col overflow-hidden">
       <TitleBar
         title={windowTitle}
@@ -140,6 +142,7 @@ function App() {
         onDisable={handleDisableUpdateChecks}
       />
     </div>
+    </ContextMenuProvider>
   );
 }
 

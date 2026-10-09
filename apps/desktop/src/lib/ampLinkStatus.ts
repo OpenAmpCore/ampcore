@@ -11,7 +11,7 @@ export const AMP_LINK_STATUS_META: Record<AmpLinkStatus, { color: string; label:
 };
 
 /** "AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff" and "aabbccddeeff" all compare equal. */
-function normalizeMac(mac: string): string {
+export function normalizeMac(mac: string): string {
   return mac.replace(/[^0-9a-f]/gi, "").toLowerCase();
 }
 
