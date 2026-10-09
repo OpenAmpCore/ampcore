@@ -9,6 +9,9 @@ use ampcore_core::data::project::{AmpAssignment, Project};
 use crate::data::store::{save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::{DiscoveredDevice, LiveDeviceState};
+use ampcore_core::live::cvr::write_v118::DEVICE_NAME_FIELD_LEN;
+use ampcore_core::live::write_helpers::validate_name;
+use super::speakers::{candidate_of, save_or_push};
 
 /// Clones the device out of the live store and releases that lock before the
 /// project lock is taken — the two are never held together (same rule as
@@ -401,4 +404,35 @@ pub fn projects_add_live_amp(
     save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
     app.emit("project:updated", &project).ok();
     Ok(project)
+}
+
+/// Renames a project amp and sets the firmware it is planned for — the
+/// Workspace's Edit Amp. The device name is part of the amp's fingerprint,
+/// so for a linked, online, engaged amp the change is pushed to the amp and
+/// only stored once it holds it (`save_or_push`); otherwise it is saved.
+/// A linked amp's firmware is its own (adopted on every push and pull), so it
+/// can't be changed here, and it keeps a name, as the amp always has one.
+#[tauri::command]
+#[specta::specta]
+pub async fn projects_edit_amp(
+    app: AppHandle,
+    project_data: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+    device_name: Option<String>,
+    firmware_version: Option<String>,
+) -> Result<Project, AppError> {
+    let mut candidate = candidate_of(&project_data, &project_id, &assignment_id)?;
+    let name = validate_name("Device name", device_name.as_deref().unwrap_or(""), DEVICE_NAME_FIELD_LEN)?;
+    let linked = candidate.mac.is_some();
+    if linked && name.is_empty() {
+        return Err(AppError::from("A linked amp needs a name — the amp always has one"));
+    }
+    if linked && firmware_version != candidate.firmware_version {
+        return Err(AppError::from("The firmware comes from the linked amp"));
+    }
+    candidate.device_name = Some(name.to_string()).filter(|n| !n.is_empty());
+    candidate.firmware_version = firmware_version;
+    save_or_push(&app, &project_data, &live, project_id, assignment_id, candidate, "the name").await
 }

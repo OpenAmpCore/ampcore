@@ -31,6 +31,7 @@ use ampcore_core::live::cvr::write;
 use ampcore_core::live::state::LiveDeviceState;
 
 use super::amp_links::read_linked_amp;
+use super::live_control::reread_bridge_pair;
 use ampcore_core::live::write_helpers::{resolve_write_target, unknown_firmware_error, WriteTally};
 
 /// How long to wait for an FC=27 poll that postdates the last write before
@@ -527,6 +528,15 @@ async fn push_polled(
             live.forget_fir(&context.device_id, *channel)?;
         }
         drop(hold);
+        // Bridge state isn't in FC=27 but in the driver's FC=50 cache, which
+        // its own tick refreshes only slowly. Re-read every written pair now,
+        // or the verify below (and the next round's plan) sees the old bridge
+        // and reports a bridge the amp does hold as not written.
+        for action in plan.stages.iter().flat_map(|s| &s.actions) {
+            if let PushAction::Bridge { pair_index, .. } = action {
+                reread_bridge_pair(app, live, &context.device_id, &ip.to_string(), *pair_index).await;
+            }
+        }
 
         // Whether or not every write landed, the amp's state has moved and
         // the three device facts are read from it — so the project is

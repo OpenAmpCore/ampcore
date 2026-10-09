@@ -31,7 +31,7 @@ import {
   type RowHighlight,
 } from "./SpeakerBench";
 import { FIELD_INPUT } from "./fieldClasses";
-import { confirmFit } from "./speakerApply";
+import { bridgeConfirm, confirmFit } from "./speakerApply";
 
 const DRAG_TYPE = "application/x-ampcore-speaker-id";
 
@@ -255,23 +255,7 @@ export function SpeakersTab({
   async function toggleBridge() {
     if (!bridgeTarget || bridgeBlocked || !actions?.setOutputBridge) return;
     const { leader, bridged } = bridgeTarget;
-    const [a, b] = [String.fromCharCode(65 + leader), String.fromCharCode(66 + leader)];
-    // The Output tab's own wording (`handleBridgeToggle`).
-    const ok = await confirm(
-      bridged
-        ? {
-            title: `Bridge outputs ${a} and ${b}?`,
-            description: `${b} will follow ${a} at combined power. Make sure it's wired for bridge mode first.`,
-            image: { light: "/bridged_graphic_b.png", dark: "/bridged_graphic_w.png" },
-            confirmLabel: "Bridge",
-          }
-        : {
-            title: `Unbridge outputs ${a} and ${b}?`,
-            description: `${a} and ${b} go back to driving separate speakers. Rewire them first.`,
-            confirmLabel: "Unbridge",
-          },
-    );
-    if (!ok) return;
+    if (!(await confirm(bridgeConfirm(leader, bridged)))) return;
     setBusy(true);
     const r = await actions.setOutputBridge(leader, bridged);
     setBusy(false);

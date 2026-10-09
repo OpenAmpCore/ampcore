@@ -387,6 +387,19 @@ pub struct ProjectSpeaker {
     /// been dragged, and the canvas picks a free spot.
     #[serde(default)]
     pub position: Option<CanvasPosition>,
+    /// Identical cabinets wired in parallel on the same outputs, as
+    /// ArmoníaPlus's Parallel mode: the group is one speaker, linked once —
+    /// each way drives `parallel` boxes. 1 = a single cabinet; at most
+    /// `MAX_PARALLEL`. Descriptive only: nothing is written per cabinet.
+    #[serde(default = "one_cabinet")]
+    pub parallel: u32,
+}
+
+/// The largest parallel group a project speaker can be.
+pub const MAX_PARALLEL: u32 = 8;
+
+fn one_cabinet() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
@@ -396,8 +409,8 @@ pub struct CanvasPosition {
 }
 
 impl ProjectSpeaker {
-    pub fn new(name: String, library_id: String, label: String) -> Self {
-        Self { id: new_id(), name, library_id, label, position: None }
+    pub fn new(name: String, library_id: String, label: String, parallel: u32) -> Self {
+        Self { id: new_id(), name, library_id, label, position: None, parallel }
     }
 }
 
@@ -466,7 +479,10 @@ pub struct Project {
 /// older files, which backfills to no project speakers: every output's
 /// speaker stays one set up on its amp. `ProjectSpeaker.position` backfills
 /// to unplaced.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 4;
+///
+/// 5: `ProjectSpeaker.parallel` — absent in older files, which backfills to 1
+/// (a single cabinet).
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 5;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -673,8 +689,8 @@ mod tests {
     #[test]
     fn removing_a_project_speaker_leaves_its_outputs_as_amp_level_speakers() {
         let mut project = Project::new("p".into(), String::new());
-        let speaker = ProjectSpeaker::new("Main L".into(), "lib".into(), "Brand Model".into());
-        let other = ProjectSpeaker::new("Main R".into(), "lib".into(), "Brand Model".into());
+        let speaker = ProjectSpeaker::new("Main L".into(), "lib".into(), "Brand Model".into(), 1);
+        let other = ProjectSpeaker::new("Main R".into(), "lib".into(), "Brand Model".into(), 1);
         // One way on each of two amps, plus the other speaker's way.
         for (way_index, owner) in [(0, &speaker), (1, &speaker)] {
             let mut amp = AmpAssignment::new(None, None, 2, None, None);

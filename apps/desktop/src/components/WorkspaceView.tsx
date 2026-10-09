@@ -16,7 +16,7 @@ import {
   Group,
   Rows3,
 } from "lucide-react";
-import { GitCompare, Link, Link2, Link2Off, MousePointer2, Pencil, Plus, RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
+import { GitCompare, Link, Link2, Link2Off, MousePointer2, Pencil, Plus, RotateCcw, SlidersHorizontal, SplitSquareVertical, Trash2 } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { AmpLinkModal } from "./AmpLinkModal";
 import { FingerprintMismatchModal, STATE_BADGE } from "./FingerprintMismatchModal";
@@ -28,6 +28,7 @@ import {
   AmpTile,
   NODE_TYPES,
   SpeakerCanvasContext,
+  GROUP_TILE_W,
   TILE_W,
   type Armed,
   type OutputBox,
@@ -36,18 +37,16 @@ import {
   type Tool,
 } from "./WorkspaceNodes";
 import { useProjectSpeakers, type ProjectOutput } from "./useProjectSpeakers";
-import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
+import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { useIsCompact } from "../lib/breakpoints";
 import { arrange, type Arrangement, type Rect } from "../lib/arrange";
 import { NO_GUIDES, snapToGuides, type Guides } from "../lib/helperLines";
-import { speakerName } from "../lib/speakers";
 import { useLiveDevices } from "../hooks/useLiveDevices";
-import { useProjectLocks } from "../hooks/useProjectLocks";
 
 const PANE_HEADING = { fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" } as const;
 const SPEAKER_GAP = 16;
-// Wide enough for three tiles and for the amp bar's one row: Add, Live and five icons.
+// Wide enough for an amp card with four outputs and for the amp bar's one row: Add, Live and five icons.
 const AMP_PANE_W = 380;
 
 /** The Workspace's third dimension, after amps and speakers: what is being
@@ -75,6 +74,8 @@ interface WorkspaceViewProps {
   onProjectUpdate: (project: Project) => void;
   ampModels: AmpModelCatalogEntry[] | null;
   onOpenDevice: (assignment: AmpAssignment) => void;
+  /** Every amp's edit lock (`ProjectWorkspace`, which also follows the amps with it). */
+  locks: Map<string, AmpEditLock>;
 }
 
 /** The project's two halves as tiles, a picture and a name each: the amp list
@@ -86,7 +87,7 @@ interface WorkspaceViewProps {
  *
  * Memoised: its parent re-renders at meter rate for the amp editor's sake,
  * and nothing here shows a meter. */
-export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice }: WorkspaceViewProps) {
+export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice, locks }: WorkspaceViewProps) {
   const compact = useIsCompact();
   const [catalogueOpen, setCatalogueOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
@@ -124,13 +125,14 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   const speakers = useProjectSpeakers({ project, onProjectUpdate, nameFor });
 
   // Every linked amp is polled while the project is open (`ProjectWorkspace`),
-  // so each tile can say how its amp stands against the project.
-  const locks = useProjectLocks(project);
+  // so each tile can say how its amp stands against the project (`locks`).
   const [compareId, setCompareId] = useState<string | null>(null);
   const linked = assignments.filter((a) => a.mac);
   const live = linked.length > 0 && linked.every((a) => !a.liveDisengaged);
   const [switching, setSwitching] = useState(false);
-  const badgeOf = (a: AmpAssignment) => STATE_BADGE[locks.get(a.id)?.state ?? (a.mac ? "checking" : "unlinked")];
+  /** Out of step with the project: its dot blinks orange, asking to be compared. */
+  const mismatched = (a: AmpAssignment) => locks.get(a.id)?.state === "mismatch";
+  const badgeOf = (a: AmpAssignment) =>STATE_BADGE[locks.get(a.id)?.state ?? (a.mac ? "checking" : "unlinked")];
   const summary = Object.entries(
     linked.reduce<Record<string, number>>((counts, a) => {
       const state = locks.get(a.id)?.state ?? "checking";
@@ -167,23 +169,55 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   const [armed, setArmed] = useState<Armed | null>(null);
   const armedSpeaker = speakers.speakers.find((s) => s.id === armed?.speakerId);
   const armedLinks = speakers.outputs.filter((o) => !!armed && o.speaker?.projectSpeakerId === armed.speakerId && armed.ways.includes(o.speaker.wayIndex));
-  /** The output square under the pointer (or focused). */
+  /** The output under the pointer (or focused). */
   const [hoverBox, setHoverBox] = useState<string | null>(null);
+  /** Link tool, nothing armed: outputs of one amp selected for Bridge / Unbridge. */
+  const [picked, setPicked] = useState<string[]>([]);
 
   function pickTool(next: Tool) {
     setTool(next);
     if (next === "link") clearSpeakerSelection();
     setArmed(null);
+    setPicked([]);
     setRenaming(null);
   }
 
-  // Esc backs out one step: what is armed first, then the Link tool itself.
+  // Esc backs out one step: what is armed or selected first, then the Link tool itself.
   useEffect(() => {
     if (tool !== "link") return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && (armed ? setArmed(null) : pickTool("select"));
+    const onKey = (e: KeyboardEvent) =>
+      e.key === "Escape" && (armed ? setArmed(null) : picked.length ? setPicked([]) : pickTool("select"));
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tool, armed]);
+  }, [tool, armed, picked]);
+
+  /** In outputs order, so the first is the pair's leader. */
+  const pickedOutputs = speakers.outputs.filter((o) => picked.includes(o.key));
+  // One bridged output unbridges; the two outputs of a pair (A and B) bridge.
+  const [p1, p2] = pickedOutputs;
+  const bridgeTarget =
+    pickedOutputs.length === 1 && p1.row.bridged ? { amp: p1.amp, leader: p1.row.leader, bridged: false }
+    : pickedOutputs.length === 2 && p1.row.leader % 2 === 0 && !p1.row.bridged && p2.row.leader === p1.row.leader + 1
+      ? { amp: p1.amp, leader: p1.row.leader, bridged: true }
+      : null;
+  // Two outputs that hold a speaker are not merged into one behind the user's back.
+  const bridgeBlocked = !!bridgeTarget?.bridged && pickedOutputs.some((o) => o.speaker);
+
+  /** A click on an output with nothing armed: select it (Ctrl/Shift adds,
+   * within one amp). */
+  function select(key: string, additive: boolean) {
+    const amp = speakers.outputs.find((o) => o.key === key)?.amp.id;
+    setPicked((prev) => {
+      const sameAmp = prev.length > 0 && speakers.outputs.find((o) => o.key === prev[0])?.amp.id === amp;
+      if (additive && sameAmp) return prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      return prev.length === 1 && prev[0] === key ? [] : [key];
+    });
+  }
+
+  async function toggleBridge() {
+    if (!bridgeTarget || bridgeBlocked) return;
+    if (await speakers.bridge(bridgeTarget.amp, bridgeTarget.leader, bridgeTarget.bridged)) setPicked([]);
+  }
 
   /** The outputs a pick on `key` fills: that one for a single way, else one
    * per armed way on adjacent outputs of the same amp. `null` when they
@@ -204,9 +238,13 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     if (done) setArmed(null);
   }
 
-  async function unlinkArmed() {
-    for (const output of armedLinks) await speakers.unlink(output);
+  /** What Unlink acts on: the armed speaker's linked ways, else the selected
+   * outputs that hold any speaker — a project speaker's way or one set up on the amp. */
+  const unlinkTargets = armed ? armedLinks : speakers.outputs.filter((o) => picked.includes(o.key) && o.speaker);
+  async function unlink() {
+    for (const output of unlinkTargets) await speakers.unlink(output);
     setArmed(null);
+    setPicked([]);
   }
 
   const preview = new Set((hoverBox ? spanFrom(hoverBox) : null)?.map((o) => o.key));
@@ -215,20 +253,26 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   /** What an output holds, as the user reads it; `null` when free. */
   function heldBy(o: ProjectOutput): string | null {
     const owner = speakers.speakers.find((s) => s.id === o.speaker?.projectSpeakerId);
-    const way = owner && entryOf(owner.libraryId)?.ways[o.speaker!.wayIndex]?.label;
+    // A one-way speaker's way says nothing its name doesn't.
+    const ways = owner ? (entryOf(owner.libraryId)?.ways ?? []) : [];
+    const way = ways.length > 1 ? ways[o.speaker!.wayIndex]?.label : undefined;
     return owner ? [owner.name, way].filter(Boolean).join(" · ") : (o.speaker?.label ?? null);
   }
 
+  const outputsOf = (assignment: AmpAssignment) => speakers.outputs.filter((o) => o.amp.id === assignment.id);
+
   function boxesFor(assignment: AmpAssignment): OutputBox[] {
-    return speakers.outputs
-      .filter((o) => o.amp.id === assignment.id)
-      .map((o) => ({
-        key: o.key,
-        label: o.row.label,
-        text: heldBy(o),
-        mode: !armed ? "idle" : spanFrom(o.key) && !speakers.busy ? "target" : "blocked",
-        lit: preview.has(o.key),
-      }));
+    return outputsOf(assignment).map((o) => ({
+      key: o.key,
+      label: o.row.label,
+      text: heldBy(o),
+      mode: !armed ? "idle" : spanFrom(o.key) && !speakers.busy ? "target" : "blocked",
+      lit: preview.has(o.key),
+      bridged: o.row.bridged,
+      linked: !!o.speaker?.projectSpeakerId,
+      picked: picked.includes(o.key),
+      pending: speakers.pending.outputs.includes(o.key),
+    }));
   }
 
   function ampTooltip(assignment: AmpAssignment): Array<[string, ReactNode]> {
@@ -237,9 +281,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       ["Model", modelNameFor(assignment) ?? "No model"],
       ["Firmware", assignment.firmwareVersion ?? "–"],
       ["Status", badgeOf(assignment).label],
-      ...speakers.outputs
-        .filter((o) => o.amp.id === assignment.id)
-        .map((o): [string, ReactNode] => [`Output ${o.row.label}`, heldBy(o) ?? "free"]),
+      ...outputsOf(assignment).map((o): [string, ReactNode] => [`Output ${o.row.label}`, heldBy(o) ?? "free"]),
     ];
   }
 
@@ -260,16 +302,21 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
         : { x: SPEAKER_GAP, y: SPEAKER_GAP + index * 40 };
       const data: SpeakerNodeData = {
         speaker,
-        model: entry ? speakerName(entry) : speaker.label,
-        application: entry ? [entry.family, entry.application].filter(Boolean).join(" · ") : "",
+        brand: entry?.brand ?? "",
+        family: entry?.family ?? "",
+        model: entry?.model ?? speaker.label,
+        application: entry?.application ?? "",
         linkable: !!entry,
-        busy: speakers.busy === speaker.id || speakers.busy === "*",
+        busy: speakers.busy,
+        pending: speakers.pending.speakers.includes(speaker.id),
         ways,
       };
-      return { id: speaker.id, type: "speaker", position, width: TILE_W, deletable: false, data };
+      // A parallel group is one tile, wider for its row of cabinets.
+      const width = (speaker.parallel ?? 1) > 1 ? GROUP_TILE_W : TILE_W;
+      return { id: speaker.id, type: "speaker", position, width, deletable: false, data };
     });
     // `speakers.outputs` follows `project`; `nameFor` follows `modelsById`.
-  }, [project, modelsById, speakers.library, speakers.states, speakers.busy]);
+  }, [project, modelsById, speakers.library, speakers.states, speakers.busy, speakers.pending]);
 
   // React Flow keeps what it measured (and what is being dragged) on the node
   // objects, so a rebuild is merged into them, not swapped in.
@@ -383,7 +430,10 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     renaming,
     highlighted: armed ? null : hoveredBoxSpeaker,
     // Arming what is already armed disarms it.
-    arm: (next) => setArmed((prev) => (prev?.speakerId === next.speakerId && prev.ways.join() === next.ways.join() ? null : next)),
+    arm: (next) => {
+      setPicked([]);
+      setArmed((prev) => (prev?.speakerId === next.speakerId && prev.ways.join() === next.ways.join() ? null : next));
+    },
     rename: (speaker, name) => {
       setRenaming(null);
       void speakers.rename(speaker, name);
@@ -412,14 +462,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     if (!editTarget) return;
     setDeviceNameError(null);
     setSavingDeviceName(true);
-    const result = await commands.projectsUpdate({
-      ...project,
-      ampAssignments: project.ampAssignments.map((a) =>
-        a.id === editTarget.id
-          ? { ...a, deviceName: editDeviceName.trim() || null, firmwareVersion: editFirmwareVersion }
-          : a,
-      ),
-    });
+    // Through the sync push for a linked, online amp: the name is part of its fingerprint.
+    const result = await commands.projectsEditAmp(project.id, editTarget.id, editDeviceName.trim() || null, editFirmwareVersion);
     setSavingDeviceName(false);
     if (result.status === "ok") {
       onProjectUpdate(result.data);
@@ -470,11 +514,12 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
      >
       {/* Amplifiers pane: its bar, then its tiles */}
       <div className={`flex min-w-0 shrink-0 flex-col ${compact ? "" : "min-h-0"}`} style={{ width: compact ? "100%" : AMP_PANE_W }}>
-        {/* One row, the same height as the speaker pane's bar. The selected amp's
-            actions take the summary's place; the selected tile itself says which amp. */}
+        {/* One row, the same height as the speaker pane's bar, owned by the tool: Add, Live
+            and the selected amp's actions in Select (the selected tile itself says
+            which amp), only Bridge and Unlink in Link. */}
         <div className={`flex h-12 shrink-0 items-center gap-2 border-b px-3 ${BAR_EDGE}`}>
-          {action("Amp", <Plus size={14} />, () => setCatalogueOpen(true))}
-          {linked.length > 0 && (
+          {selecting && action("Amp", <Plus size={14} />, () => setCatalogueOpen(true))}
+          {selecting && linked.length > 0 && (
             <Hint text={summary} className="flex shrink-0">
               <Switch isSelected={live} isDisabled={switching} onChange={(on) => void setLive(on)}>
                 <Switch.Content>
@@ -494,8 +539,31 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
               {locks.get(selectedAmp.id)?.live && iconAction("Compare with the network amp", <GitCompare size={14} />, () => setCompareId(selectedAmp.id))}
               {iconAction("Remove amp", <Trash2 size={14} />, () => setDeleteTarget(selectedAmp), true)}
             </div>
-          ) : (
+          ) : selecting ? (
             <span className="min-w-0 flex-1 truncate text-right" style={PANE_HEADING}>{linked.length > 0 ? summary : ""}</span>
+          ) : (
+            // Link: always both, disabled with a hint saying why when they can't act.
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <Hint
+                text={
+                  bridgeBlocked ? "Remove the speakers from both outputs first."
+                  : bridgeTarget ? undefined
+                  : "Select both outputs of a pair (A and B) to bridge them, or a bridged output to unbridge it."
+                }
+                className="flex"
+              >
+                {action(
+                  bridgeTarget && !bridgeTarget.bridged ? "Unbridge" : "Bridge",
+                  <SplitSquareVertical size={14} />,
+                  () => void toggleBridge(),
+                  "secondary",
+                  !bridgeTarget || bridgeBlocked || speakers.busy,
+                )}
+              </Hint>
+              <Hint text={unlinkTargets.length > 0 ? undefined : "Select outputs that hold a speaker, or arm a linked speaker, to unlink it."} className="flex">
+                {action("Unlink", <Link2Off size={14} />, () => void unlink(), "secondary", unlinkTargets.length === 0 || speakers.busy)}
+              </Hint>
+            </div>
           )}
         </div>
         <div className={`flex min-w-0 flex-1 flex-col p-3 ${compact ? "" : "min-h-0 overflow-y-auto"}`} onClick={(e) => e.target === e.currentTarget && setSelectedAmpId(null)}>
@@ -506,23 +574,25 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
               </span>
             </div>
           ) : (
-            <div className="grid content-start gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, ${TILE_W}px)` }}>
+            <div className="flex flex-col gap-2">
               {assignments.map((assignment) => (
                 <AmpTile
                   key={assignment.id}
                   name={nameFor(assignment)}
                   isCvr={(assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined)?.brand === "CVR"}
-                  dot={DOT_COLOR[badgeOf(assignment).color]}
+                  dot={mismatched(assignment) ? DOT_COLOR.warning : DOT_COLOR[badgeOf(assignment).color]}
+                  blink={mismatched(assignment)}
                   tooltip={ampTooltip(assignment)}
                   selected={selecting && selectedAmp?.id === assignment.id}
-                  boxes={tool === "link" ? boxesFor(assignment) : null}
+                  linking={tool === "link"}
+                  boxes={boxesFor(assignment)}
                   onSelect={() => {
                     if (!selecting) return;
                     setSelectedAmpId(assignment.id);
                     clearSpeakerSelection();
                   }}
                   onOpen={() => onOpenDevice(assignment)}
-                  onPick={(key) => void pick(key)}
+                  onPick={(key, additive) => (armed ? void pick(key) : select(key, additive))}
                   onBoxHover={setHoverBox}
                 />
               ))}
@@ -542,9 +612,9 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       {/* Speakers pane: its bar, then the canvas */}
       <div className={`flex min-w-0 flex-1 flex-col ${compact ? "" : "min-h-0"}`}>
         <div className={`flex h-12 shrink-0 items-center gap-2 border-b px-3 ${BAR_EDGE}`}>
-          {action("Speaker", <Plus size={14} />, speakers.openAdd)}
+          {selecting && action("Speaker", <Plus size={14} />, speakers.openAdd)}
           {speakers.staleSpeakers.length > 0 &&
-            action("Re-apply all", <RotateCcw size={14} />, () => void speakers.reapply(speakers.staleSpeakers), "secondary", speakers.busy !== null)}
+            action("Re-apply all", <RotateCcw size={14} />, () => void speakers.reapply(speakers.staleSpeakers), "secondary", speakers.busy)}
           {selecting && selectedNodes.length > 1 && (
             <>
               {divider}
@@ -558,8 +628,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
               <span className="min-w-0 truncate text-sm font-semibold">{selectedSpeaker.name}</span>
               {action("Rename", <Pencil size={14} />, () => setRenaming(selectedSpeaker.id))}
               {speakers.staleSpeakers.includes(selectedSpeaker) &&
-                action("Re-apply", <RotateCcw size={14} />, () => void speakers.reapply([selectedSpeaker]), "secondary", speakers.busy !== null)}
-              {action("Remove", <Trash2 size={14} />, () => void speakers.remove(selectedSpeaker), "danger", speakers.busy !== null)}
+                action("Re-apply", <RotateCcw size={14} />, () => void speakers.reapply([selectedSpeaker]), "secondary", speakers.busy)}
+              {action("Remove", <Trash2 size={14} />, () => void speakers.remove(selectedSpeaker), "danger", speakers.busy)}
             </>
           )}
         </div>
@@ -587,6 +657,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
             onPaneClick={() => {
               setSelectedAmpId(null);
               setArmed(null);
+              setPicked([]);
             }}
             nodesConnectable={false}
             // The top-left corner is the origin and a wall: no panning past it,
@@ -635,9 +706,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
             <span className="min-w-0 truncate text-sm" style={{ color: armedSpeaker ? undefined : "var(--amp-color-dimmed)" }}>
               {armedSpeaker
                 ? `${armedSpeaker.name}${armedWay ? ` · ${armedWay}` : ""}: pick ${armed!.ways.length > 1 ? "the first output" : "an output"} on an amp`
-                : "Click a speaker, or one of its ways, then an output on an amp"}
+                : "Click a speaker, or one of its ways, then an output on an amp — or select two outputs of an amp to bridge them"}
             </span>
-            {armedLinks.length > 0 && action("Unlink", <Link2Off size={14} />, () => void unlinkArmed(), "secondary", speakers.busy !== null)}
             {action("Done", null, () => pickTool("select"))}
           </>
         )}
@@ -694,10 +764,15 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
                 {editFirmwareOptions.length > 0 && (
                   <SimpleSelect
                     label="Firmware Version"
-                    description="Which parameter ranges/units to plan around — not detected, since there's no live device yet."
+                    description={
+                      editTarget?.mac
+                        ? "Taken from the linked amp."
+                        : "Which parameter ranges/units to plan around — not detected, since there's no live device yet."
+                    }
                     data={editFirmwareOptions.map((v) => ({ value: v, label: v }))}
                     value={editFirmwareVersion}
                     onChange={setEditFirmwareVersion}
+                    disabled={!!editTarget?.mac}
                   />
                 )}
                 {deviceNameError && (

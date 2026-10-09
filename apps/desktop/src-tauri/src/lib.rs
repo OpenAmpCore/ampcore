@@ -7,7 +7,7 @@ use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
 use commands::amp_links::{
-    projects_add_live_amp, projects_amp_edit_lock, projects_link_amp, projects_merge_amp_from_live,
+    projects_add_live_amp, projects_amp_edit_lock, projects_edit_amp, projects_link_amp, projects_merge_amp_from_live,
     projects_set_amp_live_disengaged, projects_unlink_amp, projects_validate_amp_link,
 };
 use commands::amp_push::{projects_plan_amp_push, projects_push_amp_to_live};
@@ -44,7 +44,7 @@ use commands::projects::{
     projects_set_source_trim, projects_set_backup_priority,
 };
 use commands::speakers::{
-    projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_speaker_position, projects_set_channel_speaker, projects_unlink_output, speakers_apply, speakers_channel_states, speakers_delete, speakers_fit, speakers_import_profiles, speakers_list,
+    projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_speaker_position, projects_set_channel_speaker, speakers_apply, speakers_channel_states, speakers_delete, speakers_fit, speakers_import_profiles, speakers_list,
     speakers_save_from_outputs, speakers_update_details, speakers_update_from_output,
 };
 use ampcore_core::live::state::LiveDeviceState;
@@ -90,7 +90,6 @@ pub fn run() {
             projects_rename_speaker,
             projects_remove_speaker,
             projects_set_speaker_position,
-            projects_unlink_output,
             speakers_apply,
             speakers_list,
             speakers_import_profiles,
@@ -152,6 +151,7 @@ pub fn run() {
             projects_validate_amp_link,
             projects_link_amp,
             projects_add_live_amp,
+            projects_edit_amp,
             projects_unlink_amp,
             projects_set_amp_live_disengaged,
             projects_amp_edit_lock,

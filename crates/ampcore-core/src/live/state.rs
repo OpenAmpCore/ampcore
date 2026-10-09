@@ -193,6 +193,20 @@ impl LiveDeviceState {
         Ok(())
     }
 
+    /// Drops every cached reading FC=27 doesn't carry — all outputs' FIR and
+    /// both bridge pairs — after something replaced the amp's whole state (a
+    /// preset recall). The driver re-reads unknown ones at its prime rate
+    /// (`FIR_PRIME_INTERVAL`, `BRIDGE_PRIME_INTERVAL`) instead of its slow
+    /// steady rotation, and until it has, a fingerprint of the amp is "not
+    /// read yet" rather than stale — so a following project isn't pulled to
+    /// the old values once per late re-read.
+    pub fn forget_uncarried(&self, device_id: &str) -> Result<(), AppError> {
+        let mut inner = self.lock()?;
+        inner.fir.remove(device_id);
+        inner.bridge.remove(device_id);
+        Ok(())
+    }
+
     /// `LiveDeviceInner::fir_of`, for a caller that doesn't hold the lock.
     pub fn fir_of(&self, device_id: &str) -> Result<Vec<ChannelFirSnapshot>, AppError> {
         Ok(self.lock()?.fir_of(device_id))

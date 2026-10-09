@@ -152,6 +152,11 @@ export const commands = {
 	 *  must be even and have a following odd-indexed partner in the same
 	 *  assignment; the flag itself lives only on the leader (see
 	 *  `AmpChannel.output_bridged`'s doc comment).
+	 * 
+	 *  With the linked amp online and engaged the change is pushed to it and
+	 *  stored once the amp holds it (`save_or_push`), so the two stay in step —
+	 *  bridging from the Workspace or the Speakers tab no longer leaves a mismatch.
+	 *  Otherwise it is a plain project edit.
 	 */
 	projectsSetOutputBridge: (projectId: string, assignmentId: string, pairLeaderChannelIndex: number, bridged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_bridge", { projectId, assignmentId, pairLeaderChannelIndex, bridged })),
 	/**  Sets a channel's output power/impedance mode — Output tab. */
@@ -162,10 +167,11 @@ export const commands = {
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
 	/**
-	 *  Places a library speaker in the project, linked to nothing yet. Its ways
-	 *  are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
+	 *  Places a library speaker in the project, linked to nothing yet — a group
+	 *  of `parallel` identical cabinets on the same outputs (1 = one cabinet).
+	 *  Its ways are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
 	 */
-	projectsAddSpeaker: (projectId: string, libraryId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_speaker", { projectId, libraryId, name })),
+	projectsAddSpeaker: (projectId: string, libraryId: string, name: string, parallel: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_speaker", { projectId, libraryId, name, parallel })),
 	projectsRenameSpeaker: (projectId: string, speakerId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_rename_speaker", { projectId, speakerId, name })),
 	/**
 	 *  Removes a project speaker; see `Project::remove_speaker` for what its
@@ -174,12 +180,6 @@ export const commands = {
 	projectsRemoveSpeaker: (projectId: string, speakerId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_speaker", { projectId, speakerId })),
 	/**  Where the speaker sits on the Workspace canvas. */
 	projectsSetSpeakerPosition: (projectId: string, speakerId: string, x: number | null, y: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_speaker_position", { projectId, speakerId, x, y })),
-	/**
-	 *  Unlinks an output from its project speaker. Its values and library
-	 *  reference stay, as a speaker set up on the amp — as `Project::remove_speaker`
-	 *  leaves them.
-	 */
-	projectsUnlinkOutput: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_output", { projectId, assignmentId, channelIndex })),
 	/**
 	 *  Sets outputs up from the library: each item's output gets its way's values
 	 *  (fitted to the amp), reference and label as its name. A way that doesn't
@@ -289,6 +289,10 @@ export const commands = {
 	 *  packet, which confirms delivery only. The device's new active preset
 	 *  still shows up on the next manual `live_control_fetch_presets` call, not
 	 *  pushed automatically here.
+	 * 
+	 *  A recall replaces the whole amp, FIR and bridge included, which FC=27
+	 *  doesn't carry: their caches are dropped (`forget_uncarried`) so the driver
+	 *  re-reads them at once, and a following project syncs in one pull.
 	 */
 	liveControlRecallPreset: (deviceId: string, slotIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_recall_preset", { deviceId, slotIndex })),
 	/**
@@ -589,6 +593,15 @@ export const commands = {
 	 *  pulls them (`projects_merge_amp_from_live`) once the amp has been read.
 	 */
 	projectsAddLiveAmp: (projectId: string, deviceId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_live_amp", { projectId, deviceId })),
+	/**
+	 *  Renames a project amp and sets the firmware it is planned for — the
+	 *  Workspace's Edit Amp. The device name is part of the amp's fingerprint,
+	 *  so for a linked, online, engaged amp the change is pushed to the amp and
+	 *  only stored once it holds it (`save_or_push`); otherwise it is saved.
+	 *  A linked amp's firmware is its own (adopted on every push and pull), so it
+	 *  can't be changed here, and it keeps a name, as the amp always has one.
+	 */
+	projectsEditAmp: (projectId: string, assignmentId: string, deviceName: string | null, firmwareVersion: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_edit_amp", { projectId, assignmentId, deviceName, firmwareVersion })),
 	/**  Clears a project amp's linked MAC. Planned config is left untouched. */
 	projectsUnlinkAmp: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_amp", { projectId, assignmentId })),
 	/**
@@ -1949,6 +1962,13 @@ export type ProjectSpeaker = {
 	 *  been dragged, and the canvas picks a free spot.
 	 */
 	position?: CanvasPosition | null,
+	/**
+	 *  Identical cabinets wired in parallel on the same outputs, as
+	 *  ArmoníaPlus's Parallel mode: the group is one speaker, linked once —
+	 *  each way drives `parallel` boxes. 1 = a single cabinet; at most
+	 *  `MAX_PARALLEL`. Descriptive only: nothing is written per cabinet.
+	 */
+	parallel?: number,
 };
 
 /**

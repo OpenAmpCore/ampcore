@@ -225,12 +225,19 @@ pub fn live_control_get_presets(state: State<LiveDeviceState>) -> Result<Vec<Dev
 /// packet, which confirms delivery only. The device's new active preset
 /// still shows up on the next manual `live_control_fetch_presets` call, not
 /// pushed automatically here.
+///
+/// A recall replaces the whole amp, FIR and bridge included, which FC=27
+/// doesn't carry: their caches are dropped (`forget_uncarried`) so the driver
+/// re-reads them at once, and a following project syncs in one pull.
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<LiveWriteAck, AppError> {
     let (firmware_family, _, _) = resolve_write_target(&state, &device_id)?;
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
-    send_writes(&state, &device_id, |_| Some(vec![ampcore_core::live::cvr::preset::build_recall_packet(slot_index)])).await
+    let ack =
+        send_writes(&state, &device_id, |_| Some(vec![ampcore_core::live::cvr::preset::build_recall_packet(slot_index)])).await?;
+    state.forget_uncarried(&device_id)?;
+    Ok(ack)
 }
 
 /// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
@@ -443,42 +450,38 @@ pub async fn live_control_set_output_bridge(
         write::build_set_output_bridge(firmware_family.as_deref(), pair_index, bridged).ok_or_else(|| unknown_firmware_error(&device_id))?;
     let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    reread_bridge_pair(&app, &state, &device_id, &ip.to_string(), pair_index).await;
+    Ok(tally.finish())
+}
 
-    // Re-read this pair the moment the device ACKs, instead of waiting for
-    // the driver's own bridge tick — that tick alternates pairs and skips
-    // whenever another request is in flight, so a toggled pair could take
-    // seconds to come back, long enough that the control reads as broken.
-    //
-    // This deliberately does NOT use `ResultSink::Internal`. The driver
-    // rejects a request that would clash with one already in flight for the
-    // same IP, and that rejection is only reported back through an
-    // `External` sink — an `Internal` one is dropped in silence. So it goes
-    // out as `External` and retries on `Busy`, then stores the result
-    // through the same `LiveEventSink` the driver would have used.
-    //
-    // Failure here is still non-fatal: the write itself is already
-    // confirmed, so the worst case falls back to the next scheduled poll.
-    let request_tx = { state.0.lock().map_err(|e| e.to_string())?.request_tx.clone() };
-    if let Some(request_tx) = request_tx {
-        let frame = send_request_with_retry(
-            &request_tx,
-            &ip.to_string(),
-            ampcore_core::live::cvr::bridge::FC_BRIDGE,
-            pair_index,
-            Vec::new(),
-            false,
-            0,
-        )
-        .await;
-        if let Ok(frame) = frame {
-            if let Some((pair, is_bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
-                let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
-                sink.set_bridge_pair(device_id, pair, is_bridged);
-            }
+/// Re-reads one bridge pair (FC=50) right after it was written, instead of
+/// waiting for the driver's own bridge tick — that tick alternates pairs and
+/// skips whenever another request is in flight (or polls are held, as during
+/// a push), so a toggled pair could take seconds to come back: long enough
+/// that the control reads as broken, and that a push verifies against the
+/// old state.
+///
+/// This deliberately does NOT use `ResultSink::Internal`. The driver rejects
+/// a request that would clash with one already in flight for the same IP,
+/// and that rejection is only reported back through an `External` sink — an
+/// `Internal` one is dropped in silence. So it goes out as `External` and
+/// retries on `Busy`, then stores the result through the same `LiveEventSink`
+/// the driver would have used.
+///
+/// Failure is non-fatal: the write itself is already confirmed, so the worst
+/// case falls back to the next scheduled poll.
+pub(crate) async fn reread_bridge_pair(app: &AppHandle, state: &State<'_, LiveDeviceState>, device_id: &str, ip: &str, pair_index: u8) {
+    let Ok(request_tx) = state.0.lock().map(|inner| inner.request_tx.clone()) else { return };
+    let Some(request_tx) = request_tx else { return };
+    let frame =
+        send_request_with_retry(&request_tx, ip, ampcore_core::live::cvr::bridge::FC_BRIDGE, pair_index, Vec::new(), false, 0)
+            .await;
+    if let Ok(frame) = frame {
+        if let Some((pair, is_bridged)) = ampcore_core::live::cvr::bridge::parse_bridge_reply(&frame) {
+            let sink = crate::live::event_sink::make_event_sink(app.clone(), state.0.clone());
+            sink.set_bridge_pair(device_id.to_string(), pair, is_bridged);
         }
     }
-
-    Ok(tally.finish())
 }
 
 /// FC=59 mode=1 store — writes the device's *current* DSP state into

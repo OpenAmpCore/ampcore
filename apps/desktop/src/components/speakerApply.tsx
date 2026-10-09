@@ -88,7 +88,25 @@ export async function confirmFit({
   return ok ? pairs : null;
 }
 
-const DIFF_CELL = "px-2 py-0.5 font-mono text-xs whitespace-nowrap";
+/** The question before bridging or unbridging the pair led by output
+ * `leader` — the Output tab's own wording (`handleBridgeToggle`). */
+export function bridgeConfirm(leader: number, bridged: boolean): Parameters<ReturnType<typeof useConfirm>["confirm"]>[0] {
+  const [a, b] = [String.fromCharCode(65 + leader), String.fromCharCode(66 + leader)];
+  return bridged
+    ? {
+        title: `Bridge outputs ${a} and ${b}?`,
+        description: `${b} will follow ${a} at combined power. Make sure it's wired for bridge mode first.`,
+        image: { light: "/bridged_graphic_b.png", dark: "/bridged_graphic_w.png" },
+        confirmLabel: "Bridge",
+      }
+    : {
+        title: `Unbridge outputs ${a} and ${b}?`,
+        description: `${a} and ${b} go back to driving separate speakers. Rewire them first.`,
+        confirmLabel: "Unbridge",
+      };
+}
+
+const DIFF_CELL ="px-2 py-0.5 font-mono text-xs whitespace-nowrap";
 
 /** Debug comparator: every compared value of one output, GitHub-diff style.
  * Red − what the output loses, green + what it gets, orange where `fit`
