@@ -85,8 +85,10 @@ jobs:
       matrix:
         include:
           - platform: 'windows-latest'
+            os_name: 'Windows'
             args: ''
           - platform: 'macos-latest'
+            os_name: 'macOS'
             args: '--target universal-apple-darwin'
     runs-on: ${{ matrix.platform }}
     steps:
@@ -113,8 +115,11 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install
 
-      # Bundles: Windows NSIS + MSI; macOS universal .dmg + .app.tar.gz (the
-      # compressed .app, unpack-and-run). The draft already exists, so
+      # One installer per platform — Windows NSIS .exe, macOS universal .dmg —
+      # plus the macOS .app.tar.gz, which only the updater downloads (it can't
+      # use a .dmg), and latest.json. No MSI (bundle.targets) and no .sig files:
+      # the signatures are inside latest.json. Every asset is named
+      # AmpCore-<version>-<App>-<Platform>.<ext>. The draft already exists, so
       # tauri-action just uploads into it.
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -125,7 +130,8 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ needs.version.outputs.tag }}
           releaseDraft: true
-          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: false
+          releaseAssetNamePattern: 'AmpCore-[version]-Desktop-${{ matrix.os_name }}[ext]'
           args: ${{ matrix.args }}
 
   # Unsigned debug APK: no Android keystore yet. Swap for a signed release
@@ -196,6 +202,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK="AmpCore-mobile-${{ needs.version.outputs.mobile_version }}-debug.apk"
+          APK="AmpCore-${{ needs.version.outputs.mobile_version }}-Mobile-Android.apk"
           cp apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk "$APK"
           gh release upload "${{ needs.version.outputs.tag }}" "$APK" --clobber --repo "${{ github.repository }}"
