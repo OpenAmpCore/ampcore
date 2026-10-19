@@ -160,6 +160,98 @@ pub fn speakers_update_details(
     Ok(entry)
 }
 
+/// A new entry from scratch: one way per label, each with neutral values
+/// (`SpeakerProcessing::neutral`), edited afterwards in the Presets tab.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_create(app: AppHandle, state: State<ProjectDataState>, details: SpeakerDetails) -> Result<SpeakerLibraryEntry, AppError> {
+    if details.way_labels.is_empty() {
+        return Err(AppError::from("A speaker needs at least one way"));
+    }
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let processing = details.way_labels.iter().map(|_| SpeakerProcessing::neutral()).collect();
+    let entry = SpeakerLibraryEntry::new(details, processing)?;
+    inner.speakers.push(entry.clone());
+    saved_library(&app, &inner)?;
+    Ok(entry)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_duplicate(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<SpeakerLibraryEntry, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let copy = find_entry(&mut inner.speakers, &id)?.duplicate();
+    inner.speakers.push(copy.clone());
+    saved_library(&app, &inner)?;
+    Ok(copy)
+}
+
+/// Replaces one way's processing with values edited by hand. Outputs set up
+/// from the entry then read "library updated", same as `speakers_update_from_output`.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_set_way_processing(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    id: String,
+    way_index: u32,
+    processing: SpeakerProcessing,
+) -> Result<SpeakerLibraryEntry, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let entry = find_entry(&mut inner.speakers, &id)?;
+    entry.set_way_processing(way_index, processing)?;
+    let entry = entry.clone();
+    saved_library(&app, &inner)?;
+    Ok(entry)
+}
+
+/// A way's nominal impedance, for the preset editor's watt figures only.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_set_way_nominal_ohms(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    id: String,
+    way_index: u32,
+    ohms: Option<f64>,
+) -> Result<SpeakerLibraryEntry, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let entry = find_entry(&mut inner.speakers, &id)?;
+    entry.set_way_nominal_ohms(way_index, ohms)?;
+    let entry = entry.clone();
+    saved_library(&app, &inner)?;
+    Ok(entry)
+}
+
+/// Appends a way: a copy of way `copy_from`, or neutral values.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_add_way(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    id: String,
+    copy_from: Option<u32>,
+) -> Result<SpeakerLibraryEntry, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let entry = find_entry(&mut inner.speakers, &id)?;
+    entry.add_way(copy_from)?;
+    let entry = entry.clone();
+    saved_library(&app, &inner)?;
+    Ok(entry)
+}
+
+/// Removes the entry's last way; see `SpeakerLibraryEntry::remove_last_way`.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_remove_last_way(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<SpeakerLibraryEntry, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let entry = find_entry(&mut inner.speakers, &id)?;
+    entry.remove_last_way()?;
+    let entry = entry.clone();
+    saved_library(&app, &inner)?;
+    Ok(entry)
+}
+
 /// Outputs set up from the entry keep their values and read as detached.
 #[tauri::command]
 #[specta::specta]
@@ -186,9 +278,12 @@ pub fn speakers_save_from_outputs(
             .iter()
             .map(|&i| channel_mut(assignment, i).map(|c| SpeakerProcessing::from_channel(c)))
             .collect::<Result<Vec<_>, _>>()?;
-        let entry = SpeakerLibraryEntry::new(details, processing)?;
+        let mut entry = SpeakerLibraryEntry::new(details, processing)?;
         for (way, &i) in channel_indices.iter().enumerate() {
-            channel_mut(assignment, i)?.speaker = Some(entry.reference(way as u32)?);
+            let channel = channel_mut(assignment, i)?;
+            // The output's load is the best guess at the speaker's impedance.
+            entry.ways[way].nominal_ohms = Some(channel.ohms).filter(|o| *o > 0.0);
+            channel.speaker = Some(entry.reference(way as u32)?);
         }
         library.push(entry);
         Ok(true)

@@ -990,7 +990,7 @@ function DetailsModal({
 /** Pick any number of speaker preset files (the old app's `.json`), preview
  * every one (with the reason a file can't be read), then import all readable
  * ones at once. */
-function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const compact = useIsCompact();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<{ fileName: string; text: string }[]>([]);

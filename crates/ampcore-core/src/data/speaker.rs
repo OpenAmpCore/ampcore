@@ -18,7 +18,9 @@
 //! - limiter `auto`/`max_*`: the maxima describe the amp, not the speaker
 //!   (the same rule as `channel_clipboard.rs`);
 //! - load (`ohms`): a fact the push adopts *from* the amp (`amp_push.rs`),
-//!   so a preset's would never survive an apply;
+//!   so a preset's would never survive an apply. A way keeps the speaker's
+//!   nominal impedance (`SpeakerWay.nominal_ohms`) for display only — the
+//!   limiter's watt readouts — and never applies or compares it;
 //! - output volume and mute: how loud the system runs tonight, never part of
 //!   a speaker on any make or model — not stored, applied or compared;
 //! - output name and bridging: wiring, not speaker.
@@ -82,6 +84,12 @@ impl SpeakerProcessing {
             fir_bypassed: Some(channel.fir_bypassed),
             fir: Some(channel.fir.clone()),
         }
+    }
+
+    /// A fresh output's values — flat EQ, both limiters off, no delay, no
+    /// FIR: what a way created from scratch starts from.
+    pub fn neutral() -> Self {
+        Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0])
     }
 
     /// The peak floor (`Vp >= √2 · Vrms`, the rule every limiter edit keeps)
@@ -333,6 +341,11 @@ pub struct SpeakerWay {
     /// kept for a later live write. `None` for a way saved from an output.
     #[serde(default)]
     pub fc57_hex: Option<String>,
+    /// The driver's nominal impedance. Only the preset editor's watt figures
+    /// use it: never applied to an output, never compared, no revision bump.
+    /// `None` for a way stored before this existed.
+    #[serde(default)]
+    pub nominal_ohms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -399,6 +412,7 @@ impl SpeakerLibraryEntry {
                     label: way_label(&details.way_labels, i, count),
                     processing,
                     fc57_hex: None,
+                    nominal_ohms: None,
                 })
                 .collect(),
             brand: details.brand.trim().to_string(),
@@ -420,7 +434,7 @@ impl SpeakerLibraryEntry {
         if s.ways.is_empty() {
             return Err("no ways in this preset file".into());
         }
-        let (blobs, processing): (Vec<_>, Vec<_>) = s
+        let (blobs, processing): (Vec<(Vec<u8>, f32)>, Vec<_>) = s
             .ways
             .iter()
             .enumerate()
@@ -428,7 +442,7 @@ impl SpeakerLibraryEntry {
                 let hex = way.device_data.as_ref().map_or("", |d| d.hex.as_str());
                 let blob = hex_to_bytes(hex).map_err(|e| format!("way {}: {e}", i + 1))?;
                 let data = decode_speaker_data(&blob).map_err(|e| format!("way {}: {e}", i + 1))?;
-                Ok((blob, SpeakerProcessing::from_speaker_data(&data)))
+                Ok(((blob, data.load_ohms), SpeakerProcessing::from_speaker_data(&data)))
             })
             .collect::<Result<Vec<_>, String>>()?
             .into_iter()
@@ -443,8 +457,10 @@ impl SpeakerLibraryEntry {
             way_labels: s.ways.iter().map(|w| w.label.clone()).collect(),
         };
         let mut entry = Self::new(details, processing)?;
-        for (way, blob) in entry.ways.iter_mut().zip(&blobs) {
+        for (way, (blob, load_ohms)) in entry.ways.iter_mut().zip(&blobs) {
             way.fc57_hex = Some(blob.iter().map(|b| format!("{b:02x}")).collect());
+            // The blob's load is the speaker's impedance as the old app knew it.
+            way.nominal_ohms = Some(*load_ohms as f64).filter(|o| o.is_finite() && *o > 0.0);
         }
         Ok(entry)
     }
@@ -470,6 +486,58 @@ impl SpeakerLibraryEntry {
         way.processing = processing;
         way.fc57_hex = None; // no longer what the blob says
         self.revision += 1;
+        self.updated_at = now_millis();
+        Ok(())
+    }
+
+    /// A copy under a new id, its model marked "(copy)". It starts at revision
+    /// 1: no output was set up from it yet.
+    pub fn duplicate(&self) -> Self {
+        let now = now_millis();
+        Self {
+            id: new_id(),
+            model: format!("{} (copy)", self.model),
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+            ..self.clone()
+        }
+    }
+
+    /// Appends a way: a copy of way `copy_from`, or neutral values. Existing
+    /// ways keep their index, so no output's reference moves.
+    pub fn add_way(&mut self, copy_from: Option<u32>) -> Result<(), String> {
+        let processing = match copy_from {
+            Some(i) => self.ways.get(i as usize).ok_or("No such way")?.processing.clone(),
+            None => SpeakerProcessing::neutral(),
+        };
+        let count = self.ways.len() + 1;
+        let nominal_ohms = copy_from.and_then(|i| self.ways[i as usize].nominal_ohms);
+        self.ways.push(SpeakerWay { label: way_label(&[], count - 1, count), processing, fc57_hex: None, nominal_ohms });
+        self.revision += 1;
+        self.updated_at = now_millis();
+        Ok(())
+    }
+
+    /// Removes the last way — only the last, so the ways before it keep their
+    /// index and the outputs set up from them their reference. Outputs set up
+    /// from the removed way read as detached.
+    pub fn remove_last_way(&mut self) -> Result<(), String> {
+        if self.ways.len() <= 1 {
+            return Err("A speaker needs at least one way".into());
+        }
+        self.ways.pop();
+        self.revision += 1;
+        self.updated_at = now_millis();
+        Ok(())
+    }
+
+    /// Sets a way's nominal impedance. Display only, so no revision bump.
+    pub fn set_way_nominal_ohms(&mut self, way_index: u32, ohms: Option<f64>) -> Result<(), String> {
+        if ohms.is_some_and(|o| !(o.is_finite() && o > 0.0)) {
+            return Err("Impedance must be above 0 Ω".into());
+        }
+        self.ways.get_mut(way_index as usize).ok_or("No such way")?.nominal_ohms = ohms;
         self.updated_at = now_millis();
         Ok(())
     }
@@ -758,5 +826,37 @@ mod tests {
         let rev = entry.revision;
         entry.set_details(details(2)).unwrap();
         assert_eq!(entry.revision, rev, "metadata never bumps the revision");
+    }
+
+    #[test]
+    fn duplicate_and_way_count() {
+        let mut ch = channel();
+        ch.delay_out_ms = 1.5;
+        let mut entry = SpeakerLibraryEntry::new(details(1), vec![SpeakerProcessing::from_channel(&ch)]).unwrap();
+        entry.set_way_processing(0, SpeakerProcessing::from_channel(&ch)).unwrap();
+
+        let copy = entry.duplicate();
+        assert_ne!(copy.id, entry.id);
+        assert_eq!(copy.model, "Hi (copy)");
+        assert_eq!(copy.revision, 1);
+        assert_eq!(copy.ways[0].processing.delay_out_ms, 1.5);
+
+        assert!(entry.remove_last_way().is_err(), "the last way stays");
+        let rev = entry.revision;
+        entry.add_way(Some(0)).unwrap();
+        entry.add_way(None).unwrap();
+        assert_eq!(entry.ways.len(), 3);
+        assert_eq!(entry.ways[1].processing.delay_out_ms, 1.5, "copied from way 0");
+        assert_eq!(entry.ways[2].processing.delay_out_ms, 0.0, "neutral");
+        assert_eq!(entry.ways[2].label, "Way 3");
+        entry.remove_last_way().unwrap();
+        assert_eq!(entry.ways.len(), 2);
+        assert_eq!(entry.revision, rev + 3, "every way change bumps the revision");
+
+        entry.set_way_nominal_ohms(1, Some(4.0)).unwrap();
+        assert_eq!(entry.revision, rev + 3, "impedance is display only");
+        assert!(entry.set_way_nominal_ohms(1, Some(0.0)).is_err());
+        entry.add_way(Some(1)).unwrap();
+        assert_eq!(entry.ways[2].nominal_ohms, Some(4.0), "a copied way keeps its impedance");
     }
 }
