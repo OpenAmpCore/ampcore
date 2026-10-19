@@ -45,7 +45,8 @@ use commands::projects::{
 };
 use commands::speakers::{
     projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_speaker_position, projects_set_channel_speaker, speakers_apply, speakers_channel_states, speakers_delete, speakers_fit, speakers_import_profiles, speakers_list,
-    speakers_save_from_outputs, speakers_update_details, speakers_update_from_output,
+    speakers_save_from_outputs, speakers_update_details, speakers_update_from_output, speakers_create, speakers_duplicate, speakers_set_way_processing,
+    speakers_add_way, speakers_remove_last_way, speakers_set_way_nominal_ohms,
 };
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;
@@ -95,6 +96,12 @@ pub fn run() {
             speakers_import_profiles,
             speakers_fit,
             speakers_update_details,
+            speakers_create,
+            speakers_duplicate,
+            speakers_set_way_processing,
+            speakers_add_way,
+            speakers_remove_last_way,
+            speakers_set_way_nominal_ohms,
             speakers_delete,
             speakers_save_from_outputs,
             speakers_update_from_output,

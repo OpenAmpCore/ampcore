@@ -162,12 +162,12 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
-	 *  Removes an output's speaker reference. Its values are left alone —
+	 *  Removes an output's speaker reference. Its values are left alone â€”
 	 *  `speakers_apply` is what sets a speaker up.
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
 	/**
-	 *  Places a library speaker in the project, linked to nothing yet — a group
+	 *  Places a library speaker in the project, linked to nothing yet â€” a group
 	 *  of `parallel` identical cabinets on the same outputs (1 = one cabinet).
 	 *  Its ways are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
 	 */
@@ -200,11 +200,28 @@ export const commands = {
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
 	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
+	/**
+	 *  A new entry from scratch: one way per label, each with neutral values
+	 *  (`SpeakerProcessing::neutral`), edited afterwards in the Presets tab.
+	 */
+	speakersCreate: (details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_create", { details })),
+	speakersDuplicate: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_duplicate", { id })),
+	/**
+	 *  Replaces one way's processing with values edited by hand. Outputs set up
+	 *  from the entry then read "library updated", same as `speakers_update_from_output`.
+	 */
+	speakersSetWayProcessing: (id: string, wayIndex: number, processing: SpeakerProcessing) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_processing", { id, wayIndex, processing })),
+	/**  Appends a way: a copy of way `copy_from`, or neutral values. */
+	speakersAddWay: (id: string, copyFrom: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_add_way", { id, copyFrom })),
+	/**  Removes the entry's last way; see `SpeakerLibraryEntry::remove_last_way`. */
+	speakersRemoveLastWay: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_remove_last_way", { id })),
+	/**  A way's nominal impedance, for the preset editor's watt figures only. */
+	speakersSetWayNominalOhms: (id: string, wayIndex: number, ohms: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_nominal_ohms", { id, wayIndex, ohms })),
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
 	/**
-	 *  Creates a library entry from consecutive outputs — one way per output, in
-	 *  order — and sets those outputs up from it.
+	 *  Creates a library entry from consecutive outputs â€” one way per output, in
+	 *  order â€” and sets those outputs up from it.
 	 */
 	speakersSaveFromOutputs: (projectId: string, assignmentId: string, channelIndices: number[], details: SpeakerDetails) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_save_from_outputs", { projectId, assignmentId, channelIndices, details })),
 	/**
@@ -1922,7 +1939,7 @@ export type ProfileImportResult = {
 	error: string | null,
 	/**  The entry the file makes. Not in the library unless `commit` was set. */
 	entry: SpeakerLibraryEntry | null,
-	/**  Brand, family and model already exist in the library — imported anyway. */
+	/**  Brand, family and model already exist in the library â€” imported anyway. */
 	duplicate: boolean,
 };
 
@@ -2095,7 +2112,7 @@ export type SpeakerDetails = {
 /**
  *  One output to set up: which way of which library entry goes onto it.
  *  Entries may differ between items, so any number of speakers is one apply
- *  — and one push.
+ *  â€” and one push.
  */
 export type SpeakerItem = {
 	channelIndex: number,
@@ -2182,6 +2199,12 @@ export type SpeakerWay = {
 	 *  kept for a later live write. `None` for a way saved from an output.
 	 */
 	fc57Hex?: string | null,
+	/**
+	 *  The driver's nominal impedance. Only the preset editor's watt figures
+	 *  use it: never applied to an output, never compared, no revision bump.
+	 *  `None` for a way stored before this existed.
+	 */
+	nominalOhms?: number | null,
 };
 
 export type Telemetry = {
