@@ -1008,7 +1008,7 @@ async function exportLibrary() {
 /** Pick any number of speaker files — the old app's preset files, or a
  * library exported from AmpCore — preview every speaker in them (with the
  * reason one can't be read), then import all readable ones at once. */
-function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const compact = useIsCompact();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<{ fileName: string; text: string }[]>([]);
