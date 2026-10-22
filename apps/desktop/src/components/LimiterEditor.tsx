@@ -11,7 +11,7 @@ import {
 } from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
 import { usePreference } from "../lib/preferences";
-import { FIELD_INPUT } from "./fieldClasses";
+import { CommitNumberInput } from "./CommitNumberInput";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
@@ -335,13 +335,13 @@ export function LimiterEditor({
       >
         <OnOffButton enabled={limiter.rms.enabled} onClick={() => patch({ rmsEnabled: !limiter.rms.enabled })} />
         <div style={{ gridColumn: tight ? "span 1" : "span 2" }}>
-          <LiveNumberField
+          <LimiterNumberField
             label="Load"
             suffix=" Ω"
             min={isBridged ? 4 : 0.5}
             value={effectiveOhms}
             disabled={!actions.setChannelOhms}
-            onChange={(value) => handleOhmsChange(value)}
+            onCommit={(value) => handleOhmsChange(value)}
           />
         </div>
         <OnOffButton enabled={limiter.peak.enabled} onClick={() => patch({ peakEnabled: !limiter.peak.enabled })} />
@@ -368,7 +368,7 @@ export function LimiterEditor({
             min={rmsRangeMinDisplay ?? undefined}
             max={rmsThresholdMaxDisplay}
             disabled={!limiter.rms.enabled}
-            onChange={(value) => patch({ rmsThresholdVrms: Math.min(fromDisplay(value), rmsThresholdMax) })}
+            onCommit={(value) => patch({ rmsThresholdVrms: Math.min(fromDisplay(value), rmsThresholdMax) })}
           />
           <LimiterFieldRow
             label="Prms"
@@ -378,7 +378,7 @@ export function LimiterEditor({
             max={rmsPowerWatts(rmsThresholdMaxDisplay, effectiveOhms)}
             disabled={!limiter.rms.enabled}
             integer
-            onChange={(watts) => {
+            onCommit={(watts) => {
               const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
               patch({ rmsThresholdVrms: Math.min(rawVoltage, rmsThresholdMax) });
             }}
@@ -386,21 +386,22 @@ export function LimiterEditor({
           <LimiterFieldRow
             label="Attack"
             unit="ms"
+            integer
             value={limiter.rms.attackMs ?? 0}
             min={ranges.rmsLimiterAttackMs.min ?? undefined}
             max={ranges.rmsLimiterAttackMs.max ?? undefined}
             disabled={!limiter.rms.enabled}
-            onChange={(value) => patch({ rmsAttackMs: value })}
+            onCommit={(value) => patch({ rmsAttackMs: value })}
           />
           <LimiterFieldRow
             label="Release"
             unit="xAtk"
-            step={0.5}
+            integer
             value={limiter.rms.releaseMultiplier ?? 0}
             min={ranges.rmsLimiterReleaseMultiplier.min ?? undefined}
             max={ranges.rmsLimiterReleaseMultiplier.max ?? undefined}
             disabled={!limiter.rms.enabled}
-            onChange={(value) => patch({ rmsReleaseMultiplier: value })}
+            onCommit={(value) => patch({ rmsReleaseMultiplier: value })}
           />
         </div>
         <div className="flex flex-col gap-2">
@@ -411,7 +412,7 @@ export function LimiterEditor({
             min={peakThresholdMinDisplay}
             max={peakThresholdMaxDisplay}
             disabled={!limiter.peak.enabled}
-            onChange={(value) => patch({ peakThresholdVp: Math.min(fromDisplay(value), peakThresholdMax) })}
+            onCommit={(value) => patch({ peakThresholdVp: Math.min(fromDisplay(value), peakThresholdMax) })}
           />
           <LimiterFieldRow
             label="Ppeak"
@@ -421,7 +422,7 @@ export function LimiterEditor({
             max={peakPowerWatts(peakThresholdMaxDisplay, effectiveOhms)}
             disabled={!limiter.peak.enabled}
             integer
-            onChange={(watts) => {
+            onCommit={(watts) => {
               const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
               patch({ peakThresholdVp: Math.min(rawVoltage, peakThresholdMax) });
             }}
@@ -429,20 +430,22 @@ export function LimiterEditor({
           <LimiterFieldRow
             label="Hold"
             unit="ms"
+            integer
             value={limiter.peak.holdMs ?? 0}
             min={ranges.peakLimiterHoldMs.min ?? undefined}
             max={ranges.peakLimiterHoldMs.max ?? undefined}
             disabled={!limiter.peak.enabled}
-            onChange={(value) => patch({ peakHoldMs: value })}
+            onCommit={(value) => patch({ peakHoldMs: value })}
           />
           <LimiterFieldRow
             label="Release"
             unit="ms"
+            integer
             value={limiter.peak.releaseMs ?? 0}
             min={ranges.peakLimiterReleaseMs.min ?? undefined}
             max={ranges.peakLimiterReleaseMs.max ?? undefined}
             disabled={!limiter.peak.enabled}
-            onChange={(value) => patch({ peakReleaseMs: value })}
+            onCommit={(value) => patch({ peakReleaseMs: value })}
           />
         </div>
       </div>
@@ -604,12 +607,17 @@ function OnOffButton({ enabled, onClick }: { enabled: boolean; onClick: () => vo
   );
 }
 
-/** Plain controlled number input matching Mantine `NumberInput`'s
- * instant-`onChange` behavior (fires on every keystroke/arrow-key change,
- * unlike `CommitNumberInput`'s blur/Enter commit) — kept as-is rather than
- * switched to the commit pattern, since that would be a behavior change
- * beyond this Mantine→HeroUI migration's scope. */
-function LiveNumberField({
+/** A labelled `CommitNumberInput`: the value is written once, on blur or
+ * Enter, never per keystroke.
+ *
+ * This used to commit on every keystroke, from a field whose text was
+ * re-rendered from the committed number each time, which made it impossible
+ * to edit by typing: clearing it parsed as NaN and snapped back, the first
+ * digit of a multi-digit value was clamped to `min` before the second could
+ * be typed, and a decimal point vanished as soon as it was typed ("2." is 2).
+ * On a live amp each of those keystrokes was also a limiter write — typing
+ * 150 set the threshold to 1, then 15, on the way. */
+function LimiterNumberField({
   label,
   suffix,
   value,
@@ -617,7 +625,7 @@ function LiveNumberField({
   max,
   disabled,
   integer,
-  onChange,
+  onCommit,
 }: {
   label?: string;
   suffix?: string;
@@ -626,44 +634,26 @@ function LiveNumberField({
   max?: number;
   disabled?: boolean;
   integer?: boolean;
-  onChange?: (value: number) => void;
+  onCommit?: (value: number) => void;
 }) {
-  const displayValue = integer ? Math.round(value) : Number(value.toFixed(2));
+  // Rounded for display only; min/max stay exact so a clamp lands on the true
+  // floor/ceiling. Leaving the shown figure as is never writes, even when it
+  // sits just outside an un-round bound — see `CommitNumberInput`'s commit.
+  const round = (n: number) => (integer ? Math.round(n) : Number(n.toFixed(2)));
+  const displayValue = round(value);
   return (
     <div className="flex flex-col gap-1" style={{ flex: "0 1 140px", minWidth: 92 }}>
       {label && <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 500 }}>{label}</span>}
-      <div className="relative">
-        <input
-          type="text"
-          inputMode={integer ? "numeric" : "decimal"}
-          className={FIELD_INPUT}
-          style={{ paddingRight: suffix ? `${suffix.length * 7 + 12}px` : undefined }}
-          value={displayValue}
-          disabled={disabled || !onChange}
-          onChange={(e) => {
-            if (!onChange) return;
-            const next = Number.parseFloat(e.currentTarget.value);
-            if (!Number.isFinite(next)) return;
-            const clamped = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, next));
-            onChange(clamped);
-          }}
-        />
-        {suffix && (
-          <span
-            style={{
-              position: "absolute",
-              right: 8,
-              top: "50%",
-              transform: "translateY(-50%)",
-              color: "var(--amp-color-dimmed)",
-              fontSize: "var(--amp-font-size-sm)",
-              pointerEvents: "none",
-            }}
-          >
-            {suffix}
-          </span>
-        )}
-      </div>
+      <CommitNumberInput
+        value={displayValue}
+        min={min}
+        max={max}
+        suffix={suffix}
+        integer={integer}
+        disabled={disabled || !onCommit}
+        format={(n) => String(round(n))}
+        onCommit={(value) => onCommit?.(value)}
+      />
     </div>
   );
 }
@@ -676,33 +666,35 @@ function LimiterFieldRow({
   max,
   disabled,
   integer,
-  onChange,
+  onCommit,
 }: {
   label: string;
   unit: string;
   value: number;
   min?: number;
   max?: number;
-  step?: number;
   disabled?: boolean;
-  /** Restricts this field to whole numbers only — no decimal point can be
-   * typed at all (not just rounded after the fact). Used for the Wattage
-   * fields, which read as round Watt figures rather than the more precise
-   * (and more naturally fractional) voltage thresholds. */
+  /** Restricts this field to whole numbers: a typed fraction is rounded when
+   * it is committed. Used for the Wattage fields, which read as round Watt
+   * figures rather than the more precise (and more naturally fractional)
+   * voltage thresholds, and for the times and the Release multiplier, which
+   * the amp stores as whole numbers (`u16` ms, `u8` multiplier — see
+   * `merge_rms`/`merge_peak` in `write_helpers.rs`). A fraction there would
+   * be truncated on the wire while the field went on showing it. */
   integer?: boolean;
-  onChange?: (value: number) => void;
+  onCommit?: (value: number) => void;
 }) {
   return (
     <div className="flex flex-nowrap items-center justify-between gap-2" style={{ opacity: disabled ? 0.45 : 1 }}>
       <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>{label}</span>
-      <LiveNumberField
+      <LimiterNumberField
         suffix={` ${unit}`}
         min={min}
         max={max}
         integer={integer}
         value={value}
-        disabled={disabled || !onChange}
-        onChange={onChange}
+        disabled={disabled || !onCommit}
+        onCommit={onCommit}
       />
     </div>
   );
