@@ -509,13 +509,16 @@ pub struct Project {
     pub speakers: Vec<ProjectSpeaker>,
 }
 
-/// A version stamp only — nothing reads it to gate behavior. There are no
-/// released builds yet, so there is no old-file compatibility to preserve and
-/// no migration functions exist; a struct change that would otherwise break
-/// deserialization is just made directly. New fields still need
-/// `#[serde(default = ...)]` (see this file's module doc) purely so a
-/// project file saved earlier this session keeps loading after a field is
-/// added mid-development, not for any long-term compatibility guarantee.
+/// The project file format. Released builds have saved projects in users'
+/// data folders, so every change must keep those files loading:
+/// - **Adding a field**: give it `#[serde(default = ...)]` and bump this. An
+///   older file then deserializes as it is.
+/// - **Renaming, removing or reinterpreting a field**: bump this *and* add a
+///   step rewriting the raw JSON in the desktop store's `parse_project_value`,
+///   the one place a project file is read.
+///
+/// A file stamped higher than this was written by a newer build and is
+/// refused, not loaded and re-saved without what this build doesn't know.
 ///
 /// 3: `AmpChannel.fir` — absent in older files, which backfills to a unit
 /// impulse (no filter loaded).

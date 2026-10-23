@@ -191,7 +191,7 @@ export function FirPanel({
     // One coefficient per line — the vendor's own `ExportFIR_file` shape, for
     // round-trip compatibility with files the original vendor software wrote.
     const text = fir.coefficients.map((c) => c ?? 0).join("\n");
-    const result = await commands.firExportFile(`${fir.name?.trim() || `out${label}-fir`}.txt`, text);
+    const result = await commands.saveTextFile(`${fir.name?.trim() || `out${label}-fir`}.txt`, text, "Text", ["txt"]);
     if (result.status === "error") setWriteError(result.error.message);
   }
 

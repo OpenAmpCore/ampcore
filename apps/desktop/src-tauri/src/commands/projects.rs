@@ -1,3 +1,5 @@
+use serde::Serialize;
+use specta::Type;
 use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
@@ -9,8 +11,13 @@ use ampcore_core::data::project::{
     AmpAssignment, AmpChannel, BackupPriorityPatch, ChannelFir, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch,
     EqDirection, LimiterPatch, Project, SourceTrimPatch,
 };
+use ampcore_core::data::common::{new_id, now_millis};
 use ampcore_core::live::cvr::fir::FIR_MAX_TAPS;
-use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
+use crate::data::exchange::{add_missing, export_project, import_project};
+use crate::data::store::{
+    delete_project_file, reconcile_project_eq_band_sizes, reconcile_project_matrix_sizes, save_amp_models,
+    save_project_file, save_speakers, ProjectDataState,
+};
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
 use super::speakers::{candidate_of, save_or_push};
@@ -135,6 +142,99 @@ pub fn projects_update(
     }
     app.emit("project:updated", &project).ok();
     Ok(project)
+}
+
+/// What startup couldn't open — files set aside as unreadable, or saved by a
+/// newer AmpCore — for the project list to show.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_load_problems(state: State<ProjectDataState>) -> Result<Vec<String>, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.load_problems.clone())
+}
+
+/// A copy of a project under a new id and "<name> (copy)". Amps stay linked to
+/// the same network amps, so a copy can be a variant of one rig.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_duplicate(app: AppHandle, state: State<ProjectDataState>, project_id: String) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut copy = inner
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .cloned()
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let now = now_millis();
+    copy.id = new_id();
+    copy.name = format!("{} (copy)", copy.name);
+    copy.created_at = now;
+    copy.updated_at = now;
+    save_project_file(&inner.data_dir, &copy).map_err(AppError::from)?;
+    inner.projects.push(copy.clone());
+    app.emit("project:updated", &copy).ok();
+    Ok(copy)
+}
+
+/// The project as an export file's text (`data/exchange.rs`), for the caller
+/// to save where the user picks.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_export(state: State<ProjectDataState>, project_id: String) -> Result<String, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    export_project(project, &inner.speakers, &inner.amp_models).map_err(AppError::from)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectImport {
+    pub project: Project,
+    /// Library speakers and custom amp models the file brought that this
+    /// machine didn't have.
+    pub speakers_added: u32,
+    pub amp_models_added: u32,
+}
+
+/// Imports an exported project (or a bare project file) as a new project:
+/// a fresh id, so importing the same file twice gives two, and " (imported)"
+/// after the name when one is already taken. Its speakers and custom amp
+/// models are added to this machine's library and catalogue where missing.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_import(app: AppHandle, state: State<ProjectDataState>, text: String) -> Result<ProjectImport, AppError> {
+    let imported = import_project(&text).map_err(|e| AppError::from(format!("This file can't be imported: {e}")))?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
+
+    let amp_models_added = add_missing(&mut inner.amp_models, imported.amp_models, |m| &m.id);
+    if amp_models_added > 0 {
+        save_amp_models(&inner.data_dir, &inner.amp_models).map_err(AppError::from)?;
+        app.emit("amp_model:updated", &inner.amp_models).ok();
+    }
+    let speakers_added = add_missing(&mut inner.speakers, imported.speakers, |e| &e.id);
+    if speakers_added > 0 {
+        save_speakers(&inner.data_dir, &inner.speakers).map_err(AppError::from)?;
+        app.emit("speakers:updated", &inner.speakers).ok();
+    }
+
+    let mut project = imported.project;
+    project.id = new_id();
+    project.touch();
+    if inner.projects.iter().any(|p| p.name == project.name) {
+        project.name = format!("{} (imported)", project.name);
+    }
+    // The file's amps may predate a topology change on this machine's models.
+    reconcile_project_matrix_sizes(&mut project, &inner.amp_models);
+    reconcile_project_eq_band_sizes(&mut project, &inner.amp_models);
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    inner.projects.push(project.clone());
+    app.emit("project:updated", &project).ok();
+    Ok(ProjectImport { project, speakers_added: speakers_added as u32, amp_models_added: amp_models_added as u32 })
 }
 
 #[tauri::command]

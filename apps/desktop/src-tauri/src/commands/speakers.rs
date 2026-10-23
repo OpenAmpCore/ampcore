@@ -23,6 +23,7 @@ use ampcore_core::error::AppError;
 
 use super::amp_links::read_linked_amp;
 use super::amp_push::push_assignment;
+use crate::data::exchange::{add_missing, export_library, import_library};
 use crate::data::store::{save_project_file, save_speakers, ProjectDataInner, ProjectDataState};
 
 fn saved_library(app: &AppHandle, inner: &ProjectDataInner) -> Result<(), AppError> {
@@ -106,9 +107,21 @@ pub struct ProfileImportResult {
     pub duplicate: bool,
 }
 
-/// Parses the old app's speaker preset files (JSON). With `commit`, every file
-/// that parses is added to the library; without, nothing is saved (the import
-/// preview).
+/// The whole library as an export file's text (`data/exchange.rs`), for the
+/// caller to save where the user picks.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_export(state: State<ProjectDataState>) -> Result<String, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    export_library(&inner.speakers).map_err(AppError::from)
+}
+
+/// Parses the old app's speaker preset files (JSON) and this app's exported
+/// libraries — one result per speaker, so a library file gives several. A
+/// library speaker keeps its id, so projects that reference it find it; one
+/// this library already has (same id) is reported and left out. With
+/// `commit`, every importable speaker is added to the library; without,
+/// nothing is saved (the import preview).
 #[tauri::command]
 #[specta::specta]
 pub fn speakers_import_profiles(
@@ -121,27 +134,57 @@ pub fn speakers_import_profiles(
     let key = |e: &SpeakerLibraryEntry| (e.brand.to_lowercase(), e.family.to_lowercase(), e.model.to_lowercase());
     let results: Vec<ProfileImportResult> = files
         .into_iter()
-        .map(|file| {
-            let parsed = serde_json::from_str::<OldProfile>(&file.text)
-                .map_err(|e| format!("not a speaker preset file: {e}"))
-                .and_then(|profile| SpeakerLibraryEntry::from_profile(&profile));
-            match parsed {
-                Ok(entry) => ProfileImportResult {
-                    duplicate: inner.speakers.iter().any(|e| key(e) == key(&entry)),
-                    file_name: file.file_name,
-                    error: None,
-                    entry: Some(entry),
-                },
-                Err(error) => ProfileImportResult { file_name: file.file_name, error: Some(error), entry: None, duplicate: false },
-            }
+        .flat_map(|file| match import_library(&file.text) {
+            Some(Ok(entries)) => entries
+                .into_iter()
+                .map(|entry| {
+                    if inner.speakers.iter().any(|e| e.id == entry.id) {
+                        ProfileImportResult {
+                            file_name: file.file_name.clone(),
+                            error: Some(format!("{} {} is already in this library", entry.brand, entry.model)),
+                            entry: None,
+                            duplicate: false,
+                        }
+                    } else {
+                        ProfileImportResult {
+                            duplicate: inner.speakers.iter().any(|e| key(e) == key(&entry)),
+                            file_name: file.file_name.clone(),
+                            error: None,
+                            entry: Some(entry),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
+            Some(Err(error)) => vec![ProfileImportResult { file_name: file.file_name, error: Some(error), entry: None, duplicate: false }],
+            None => vec![import_profile(&inner.speakers, file, key)],
         })
         .collect();
 
     if commit {
-        inner.speakers.extend(results.iter().filter_map(|r| r.entry.clone()));
+        add_missing(&mut inner.speakers, results.iter().filter_map(|r| r.entry.clone()).collect(), |e| &e.id);
         saved_library(&app, &inner)?;
     }
     Ok(results)
+}
+
+/// One old-app speaker preset file as an import result.
+fn import_profile(
+    library: &[SpeakerLibraryEntry],
+    file: ProfileUpload,
+    key: impl Fn(&SpeakerLibraryEntry) -> (String, String, String),
+) -> ProfileImportResult {
+    let parsed = serde_json::from_str::<OldProfile>(&file.text)
+        .map_err(|e| format!("not a speaker preset file: {e}"))
+        .and_then(|profile| SpeakerLibraryEntry::from_profile(&profile));
+    match parsed {
+        Ok(entry) => ProfileImportResult {
+            duplicate: library.iter().any(|e| key(e) == key(&entry)),
+            file_name: file.file_name,
+            error: None,
+            entry: Some(entry),
+        },
+        Err(error) => ProfileImportResult { file_name: file.file_name, error: Some(error), entry: None, duplicate: false },
+    }
 }
 
 #[tauri::command]
