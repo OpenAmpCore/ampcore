@@ -9,6 +9,9 @@ use super::{AmpCapability, ParamRange, PowerMode, SourceKind};
 /// Ported from the old app's fixed 10-band layout.
 const EQ_BANDS_PER_CHANNEL: u32 = 10;
 
+/// V_num from which the vendor app narrows the source delay to 10 ms
+/// (`SoundSoure_All1.sound_source_Loaded` with `Uesr.ISVN`, a `>=` test).
+pub const VNUM_117: u32 = 117;
 /// V_num threshold for speaker management + FIR filters (current baseline).
 pub const VNUM_118: u32 = 118;
 /// V_num threshold for noise gate thresholds and extended delay.
@@ -102,8 +105,11 @@ fn parse_wire_run(s: &str) -> Option<u32> {
     None
 }
 
-/// Global CVR DSP parameter ranges/units — ported 1:1 from the old app's
-/// `lib/constants.ts`.
+/// Global CVR DSP parameter ranges/units — ported from the old app's
+/// `lib/constants.ts`, corrected where the vendor's own Windows controller
+/// (AMP Controller V1.1.8) bounds a control
+/// differently. Those are the vendor GUI's limits — what it lets a user send
+/// — not limits the firmware is known to enforce.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpParamRanges {
@@ -140,7 +146,8 @@ pub struct AmpParamRanges {
 
 /// Constant across the CVR product line except where `firmware` says
 /// otherwise: `extended_delay` (1.1.9+) raises the input delay to 300 ms, as
-/// the vendor's `TecnareInput_119.LoadVN119` does (its default is 100).
+/// the vendor's `TecnareInput_119.LoadVN119` does (its default is 100), and
+/// 1.1.7+ narrows the source delay (see `source_delay_ms`).
 pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
     AmpParamRanges {
         matrix_gain_db: ParamRange {
@@ -167,13 +174,15 @@ pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
             min: 20.0,
             max: 20000.0,
         },
+        // Vendor `My_EQ.Boost_KeyUp` / `Q_KeyUp`, reached from the 1.1.8
+        // output EQ window. Shelves narrow Q further — `EqFilterType::q_range`.
         eq_band_gain_db: ParamRange {
-            min: -18.0,
-            max: 18.0,
+            min: -24.0,
+            max: 24.0,
         },
         eq_band_q: ParamRange {
-            min: 0.1,
-            max: 32.0,
+            min: 0.01,
+            max: 20.0,
         },
         preset_slots: ParamRange {
             min: 1.0,
@@ -183,12 +192,15 @@ pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
             min: 1.0,
             max: 200.0,
         },
+        // The three timing minimums are the vendor's `limiterview.baml`
+        // (`nb_RMS_Attack.min=1`, `nb_RMS_end.min=2`, `nb_Peak_end.min=20`),
+        // repeated in its separate `peaklimiter.baml`.
         rms_limiter_attack_ms: ParamRange {
-            min: 0.0,
+            min: 1.0,
             max: 2000.0,
         },
         rms_limiter_release_multiplier: ParamRange {
-            min: 1.0,
+            min: 2.0,
             max: 32.0,
         },
         // Max kept at >= 2x rms_limiter_threshold_vrms's max (400.0) so the
@@ -205,7 +217,7 @@ pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
             max: 2000.0,
         },
         peak_limiter_release_ms: ParamRange {
-            min: 0.0,
+            min: 20.0,
             max: 1000.0,
         },
         // Vendor `MyControls1\SoundSoure_All1.xaml`, which is authoritative
@@ -220,15 +232,15 @@ pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
             min: -30.0,
             max: 21.0,
         },
-        // The vendor XAML default. It narrows this to 10 ms for flows
-        // D/E/VN117 and widens it to 200 ms for flow G, but the flow letter
-        // comes from live BASIC_INFO and `resolve` only has the catalog model
-        // plus a firmware string, so the per-flow override is not expressible
-        // here yet — see this module's `builtin_topology` note about the same
-        // gap for source availability.
+        // The vendor XAML default is 30 ms, but its code narrows it to 10 ms
+        // for flows D/E and for any firmware >= 117 (a `>=` test, so 118 and
+        // 119 too), widening it to 200 ms only for flow G within that branch.
+        // The flow letter comes from live BASIC_INFO and `resolve` only has
+        // the catalog model plus a firmware string, so flow G's wider range
+        // is not expressible here yet; 10 ms is the safe side of it.
         source_delay_ms: ParamRange {
             min: 0.0,
-            max: 30.0,
+            max: if firmware.v_num.is_some_and(|v| v >= VNUM_117) { 10.0 } else { 30.0 },
         },
         backup_threshold_db: ParamRange {
             min: -80.0,
@@ -350,13 +362,43 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
 mod tests {
     use super::*;
 
+    fn ranges(fw: Option<&str>) -> AmpParamRanges {
+        cvr_param_ranges(&CvrFirmwareCapability::from_version(fw))
+    }
+
     /// 1.1.9 raises the input delay ceiling to 300 ms (vendor
     /// `TecnareInput_119.LoadVN119`); earlier firmware stays at 100.
     #[test]
     fn input_delay_range_follows_firmware() {
-        let max = |fw: &str| cvr_param_ranges(&CvrFirmwareCapability::from_version(Some(fw))).delay_in_ms.max;
+        let max = |fw: &str| ranges(Some(fw)).delay_in_ms.max;
         assert_eq!(max("1.1.8"), 100.0);
         assert_eq!(max("1.1.9"), 300.0);
         assert_eq!(max("43424B06-106119-DSP-3004D"), 300.0);
+    }
+
+    /// The vendor's `>= 117` source-delay override covers 1.1.8 and 1.1.9;
+    /// older or unknown firmware keeps its 30 ms default.
+    #[test]
+    fn source_delay_narrows_from_117() {
+        let max = |fw: Option<&str>| ranges(fw).source_delay_ms.max;
+        assert_eq!(max(Some("1.1.6")), 30.0);
+        assert_eq!(max(Some("1.1.7")), 10.0);
+        assert_eq!(max(Some("1.1.8")), 10.0);
+        assert_eq!(max(Some("42404B06-006119-DSP-2004")), 10.0);
+        assert_eq!(max(None), 30.0);
+    }
+
+    /// The vendor controller's EQ and limiter-timing bounds.
+    #[test]
+    fn eq_and_limiter_bounds_match_the_vendor_controller() {
+        let r = ranges(Some("1.1.8"));
+        assert_eq!((r.eq_band_gain_db.min, r.eq_band_gain_db.max), (-24.0, 24.0));
+        assert_eq!((r.eq_band_q.min, r.eq_band_q.max), (0.01, 20.0));
+        assert_eq!(r.rms_limiter_attack_ms.min, 1.0);
+        assert_eq!(r.rms_limiter_release_multiplier.min, 2.0);
+        assert_eq!(r.peak_limiter_release_ms.min, 20.0);
+        let shelf = crate::data::capability::EqFilterType::LowShelf.q_range().unwrap();
+        assert_eq!((shelf.min, shelf.max), (0.25, 1.25));
+        assert!(crate::data::capability::EqFilterType::Peaking.q_range().is_none());
     }
 }

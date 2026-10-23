@@ -426,7 +426,7 @@ function SourceStrip({
       <SimpleSelect
         data={options.map(({ value, label }) => ({ value, label }))}
         value={current?.value ?? null}
-        placeholder={channel.source.kind === "backup" ? "Backup" : "—"}
+        placeholder={channel.source.kind === "backup" ? "Backup" : channel.source.kind === "aes3" ? "AES3" : "—"}
         disabled={!onSelect}
         style={{ width: SOURCE_COLUMN_W }}
         onChange={(value) => {

@@ -28,6 +28,7 @@ use specta::Type;
 
 use super::capability::{AmpCapability, ParamRange, PowerMode};
 use super::common::{new_id, now_millis};
+use super::validation;
 use super::fingerprint::{
     canonical_eq, format_band, format_crossover, round_to_step, DELAY_STEPS, GAIN_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
@@ -113,8 +114,9 @@ impl SpeakerProcessing {
     /// the amp can't take a speaker at all. Disabled stages and bypassed
     /// bands are fitted silently: their values don't reach the sound.
     ///
-    /// ponytail: model-wide ranges only; the channel's own hardware maxima
-    /// (`max_vrms`/`max_vp`) are not used. Add them when a real amp clamps.
+    /// Limiter thresholds are capped by the target channel's ceiling
+    /// (`validation::limiter_ceiling`): its own reported maxima, else the
+    /// model's rated voltage — the same bound the limiter editor shows.
     pub fn fit(&self, current: &AmpChannel, cap: &AmpCapability) -> Result<(SpeakerProcessing, Vec<String>), String> {
         if !cap.firmware.speaker_management {
             return Err("This amp's firmware has no speaker management".into());
@@ -135,7 +137,7 @@ impl SpeakerProcessing {
             let n = i + 1;
             band.freq_hz = clamp(to, &format!("EQ · Band {n} freq"), " Hz", band.freq_hz, r.crossover_freq_hz);
             band.gain_db = clamp(to, &format!("EQ · Band {n} gain"), " dB", band.gain_db, r.eq_band_gain_db);
-            band.q = clamp(to, &format!("EQ · Band {n} Q"), "", band.q, r.eq_band_q);
+            band.q = clamp(to, &format!("EQ · Band {n} Q"), "", band.q, validation::eq_q_range(band.filter_type, r));
         }
         for (i, band) in self.output_eq.bands.iter().enumerate().skip(have) {
             if band.active {
@@ -148,16 +150,21 @@ impl SpeakerProcessing {
             issues.push(format!("EQ · Band {}: not in the preset, the amp's band stays", i + 1));
         }
 
+        let ceiling = validation::limiter_ceiling(&current.limiter, cap.topology.rated_rms_voltage, r);
         let rms = &mut out.limiter.rms;
         let to = if rms.enabled { &mut issues } else { &mut quiet };
-        rms.threshold_vrms = clamp(to, "RMS limiter threshold", " Vrms", rms.threshold_vrms, r.rms_limiter_threshold_vrms);
-        rms.attack_ms = clamp(to, "RMS limiter attack", " ms", rms.attack_ms, r.rms_limiter_attack_ms);
-        rms.release_multiplier = clamp(to, "RMS limiter release", "×", rms.release_multiplier, r.rms_limiter_release_multiplier);
+        rms.threshold_vrms =
+            clamp(to, "RMS limiter threshold", " Vrms", rms.threshold_vrms, validation::rms_threshold_range(ceiling, r));
+        // Timings are whole numbers on the wire, which would truncate a fraction.
+        rms.attack_ms = clamp(to, "RMS limiter attack", " ms", rms.attack_ms.round(), r.rms_limiter_attack_ms);
+        rms.release_multiplier =
+            clamp(to, "RMS limiter release", "×", rms.release_multiplier.round(), r.rms_limiter_release_multiplier);
         let peak = &mut out.limiter.peak;
         let to = if peak.enabled { &mut issues } else { &mut quiet };
-        peak.threshold_vp = clamp(to, "Peak limiter threshold", " Vp", peak.threshold_vp, r.peak_limiter_threshold_vp);
-        peak.hold_ms = clamp(to, "Peak limiter hold", " ms", peak.hold_ms, r.peak_limiter_hold_ms);
-        peak.release_ms = clamp(to, "Peak limiter release", " ms", peak.release_ms, r.peak_limiter_release_ms);
+        peak.threshold_vp =
+            clamp(to, "Peak limiter threshold", " Vp", peak.threshold_vp, validation::peak_threshold_range(ceiling, r));
+        peak.hold_ms = clamp(to, "Peak limiter hold", " ms", peak.hold_ms.round(), r.peak_limiter_hold_ms);
+        peak.release_ms = clamp(to, "Peak limiter release", " ms", peak.release_ms.round(), r.peak_limiter_release_ms);
         // The limiter editor's own rule: peak power at least double the RMS power.
         let floor = out.limiter.rms.threshold_vrms * std::f64::consts::SQRT_2;
         if out.limiter.peak.threshold_vp < floor {
@@ -195,7 +202,7 @@ impl SpeakerProcessing {
         }
         out.output_trim_db = out.output_trim_db.map(|v| clamp(&mut issues, "Output trim", " dB", v, r.output_trim_db));
         out.noise_gate_threshold_dbu =
-            out.noise_gate_threshold_dbu.map(|v| clamp(&mut issues, "Noise gate threshold", " dBu", v, r.noise_gate_threshold_dbu));
+            out.noise_gate_threshold_dbu.map(|v| clamp(&mut issues, "Noise gate threshold", " dBu", v.round(), r.noise_gate_threshold_dbu));
         let own = SpeakerProcessing::from_channel(current);
         out.output_trim_db = out.output_trim_db.or(own.output_trim_db);
         out.noise_gate_enabled = out.noise_gate_enabled.or(own.noise_gate_enabled);
@@ -661,12 +668,12 @@ mod tests {
 
         way.delay_out_ms = 25.0;
         way.output_eq.bands[2].active = true;
-        way.output_eq.bands[2].gain_db = 30.0;
+        way.output_eq.bands[2].gain_db = 30.0; // above the vendor's ±24 dB
         way.output_eq.bands.push(way.output_eq.bands[0]); // a 9th band the amp lacks
         way.output_eq.bands[8].active = true;
         let (fitted, issues) = way.fit(&ch, &cap).unwrap();
         assert_eq!(fitted.delay_out_ms, 20.0);
-        assert_eq!(fitted.output_eq.bands[2].gain_db, 18.0);
+        assert_eq!(fitted.output_eq.bands[2].gain_db, 24.0);
         assert_eq!(fitted.output_eq.bands.len(), ch.output_eq.bands.len());
         assert!(issues.iter().any(|i| i.starts_with("Delay: 25.00 → 20.00")), "{issues:?}");
         assert!(issues.iter().any(|i| i.starts_with("EQ · Band 3 gain")), "{issues:?}");

@@ -10,7 +10,11 @@ use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc;
 
+use crate::data::capability::cvr::{
+    cvr_param_ranges, extract_vnum, rated_rms_voltage_from_firmware_string, CvrFirmwareCapability, VNUM_118, VNUM_119,
+};
 use crate::data::project::{CrossoverSlot, CrossoverSlotKind, EqBand, EqDirection, LimiterPatch, PeakLimiter, RmsLimiter};
+use crate::data::validation::AmpLimits;
 use crate::error::AppError;
 use crate::live::cvr::channel_config::ChannelConfig;
 use crate::data::common::now_millis;
@@ -39,6 +43,13 @@ pub fn resolve_write_target(
         let write_tx = inner.write_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
         (device, write_tx)
     };
+    if !writes_verified(&device.firmware_version) {
+        let name = if device.name.trim().is_empty() { device_id } else { device.name.trim() };
+        return Err(AppError::from(format!(
+            "{name} runs firmware {}. This app only writes to 1.1.8 and 1.1.9 amps, so it is read-only here",
+            firmware_label(&device.firmware_version)
+        )));
+    }
     let ip: Ipv4Addr = device
         .ip
         .parse()
@@ -79,6 +90,38 @@ impl WriteTally {
             coalesced: self.coalesced,
         }
     }
+}
+
+/// Whether this app writes to an amp reporting `firmware_version`: exactly
+/// 1.1.8 or 1.1.9, the firmware its encoders were checked against.
+/// `firmware_family` deliberately buckets everything below 119 as "1.1.8" and
+/// everything above as "1.1.9" so those amps can still be *read*, but a
+/// bucket is not evidence that a 1.1.6 or 1.2.0 amp takes the same packets.
+pub fn writes_verified(firmware_version: &str) -> bool {
+    matches!(extract_vnum(firmware_version), Some(VNUM_118 | VNUM_119))
+}
+
+/// "1.1.7" for vNum 117, for messages.
+fn firmware_label(firmware_version: &str) -> String {
+    match extract_vnum(firmware_version) {
+        Some(v) => format!("{}.{}.{}", v / 100, v / 10 % 10, v % 10),
+        None => "that isn't recognised".to_string(),
+    }
+}
+
+/// What a live amp's writes are checked against (`validation.rs`): its
+/// firmware's ranges and its model's rated voltage, read from the factory
+/// firmware string. Also refuses a channel the amp doesn't have.
+pub fn live_limits(state: &LiveDeviceState, device_id: &str, channel_index: u8) -> Result<AmpLimits, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let device = inner.devices.get(device_id).ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+    if device.output_channels > 0 && u32::from(channel_index) >= device.output_channels {
+        return Err(AppError::from(format!("{} has no channel {}", device.name, u32::from(channel_index) + 1)));
+    }
+    Ok(AmpLimits {
+        ranges: cvr_param_ranges(&CvrFirmwareCapability::from_version(Some(&device.firmware_version))),
+        rated_rms_voltage: rated_rms_voltage_from_firmware_string(&device.firmware_version),
+    })
 }
 
 pub fn unknown_firmware_error(device_id: &str) -> AppError {
@@ -480,6 +523,18 @@ mod tests {
         use crate::live::cvr::request::{REQUEST_RETRY_TIMEOUT_MS, REQUEST_TIMEOUT_MS};
         let budget_ms = u64::from(REQUEST_BUSY_MAX_RETRIES) * REQUEST_BUSY_RETRY_DELAY_MS;
         assert!(budget_ms > REQUEST_TIMEOUT_MS + REQUEST_RETRY_TIMEOUT_MS, "busy budget {budget_ms}ms is too short");
+    }
+
+    /// Writes need exactly 1.1.8 or 1.1.9; the read-side buckets don't count.
+    #[test]
+    fn writes_are_gated_to_verified_firmware() {
+        assert!(writes_verified("42404B06-006118-DSP-2004"));
+        assert!(writes_verified("43424B06-106119-DSP-3004D"));
+        assert!(writes_verified("1.1.8"));
+        assert!(!writes_verified("42404B06-006117-DSP-2004"));
+        assert!(!writes_verified("42404B06-006120-DSP-2004"));
+        assert!(!writes_verified("garbage"));
+        assert_eq!(firmware_label("42404B06-006117-DSP-2004"), "1.1.7");
     }
 
     #[test]

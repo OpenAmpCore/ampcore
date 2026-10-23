@@ -11,5 +11,6 @@ pub mod filter_response;
 pub mod fingerprint;
 pub mod project;
 pub mod speaker;
+pub mod validation;
 #[cfg(test)]
 mod test_fixtures;

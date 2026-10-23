@@ -894,13 +894,13 @@ fn power_mode_tag(mode: PowerMode) -> u8 {
     }
 }
 
-/// Tag 2 was AES3; the gap is left rather than renumbering `Backup` down,
-/// because these tags are hashed and shifting one would silently change every
-/// stored fingerprint beyond the `FINGERPRINT_VERSION` bump's intent.
+/// The amp's own source codes, so AES3 (read-only, see `SourceKind`) takes
+/// the 2 that was left free for it.
 fn source_kind_tag(kind: SourceKind) -> u8 {
     match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
+        SourceKind::Aes3 => 2,
         SourceKind::Backup => 3,
     }
 }

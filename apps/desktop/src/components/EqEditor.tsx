@@ -27,10 +27,16 @@ import {
   type CrossoverSlotKind,
   type EqDirection,
   type EqFilterType,
+  type ParamRange,
 } from "../lib/bindings";
 import type { ConfigureActions } from "../lib/configureActions";
 
-/** `filterType -> {supportsGain, supportsQ}` lookup, keyed for O(1) access —
+/** What one filter type exposes: gain and/or Q, and a Q range narrower than
+ * `paramRanges.eqBandQ` where the type has one (shelves — see
+ * `EqFilterType::q_range` in core). */
+type FilterCaps = { supportsGain: boolean; supportsQ: boolean; qRange: ParamRange | null };
+
+/** `filterType -> {supportsGain, supportsQ, qRange}` lookup, keyed for O(1) access —
  * built once from `AmpCapability.eqFilterCapabilities`, the backend-resolved
  * source of truth (`eq_filter_capabilities()` in
  * `src-tauri/src/data/capability/mod.rs`). Not hardcoded here: if a future
@@ -39,10 +45,10 @@ import type { ConfigureActions } from "../lib/configureActions";
  * `AmpCapability` instead of assuming per-model.  */
 function indexEqFilterCapabilities(
   entries: AmpCapability["eqFilterCapabilities"],
-): Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }> {
-  const map = {} as Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
+): Record<EqFilterType, FilterCaps> {
+  const map = {} as Record<EqFilterType, FilterCaps>;
   for (const entry of entries) {
-    map[entry.filterType] = { supportsGain: entry.supportsGain, supportsQ: entry.supportsQ };
+    map[entry.filterType] = { supportsGain: entry.supportsGain, supportsQ: entry.supportsQ, qRange: entry.qRange };
   }
   return map;
 }
@@ -169,7 +175,7 @@ function stageKey(ref: EqStageRef): string {
 function stageInfo(
   eq: ChannelEq,
   ref: EqStageRef,
-  capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>,
+  capsByType: Record<EqFilterType, FilterCaps>,
 ): { freqHz: number; gainDb: number; q: number; active: boolean; supportsGain: boolean; supportsQ: boolean } {
   if (ref.kind === "band") {
     const band = eq.bands[ref.bandIndex];
@@ -319,7 +325,7 @@ function StageHandles({
   onStageMenu,
 }: {
   eq: ChannelEq;
-  capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
+  capsByType: Record<EqFilterType, FilterCaps>;
   selectedRef: EqStageRef | null;
   /** The selected stage's own curve — where its Q handles sit. */
   stageCurve: ResponsePoint[] | null;
@@ -615,7 +621,7 @@ const ResponseGraph = memo(function ResponseGraph({
   onResetGain,
 }: {
   eq: ChannelEq;
-  capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
+  capsByType: Record<EqFilterType, FilterCaps>;
   selectedRef: EqStageRef | null;
   interactive: boolean;
   onSelectStage: (ref: EqStageRef | null) => void;
@@ -863,6 +869,8 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   const freqRange = capability.paramRanges.crossoverFreqHz;
   const gainRange = capability.paramRanges.eqBandGainDb;
   const qRange = capability.paramRanges.eqBandQ;
+  /** The Q range a band of `filterType` takes — what the backend checks too. */
+  const qRangeFor = (filterType: EqFilterType) => eqCapsByType[filterType]?.qRange ?? qRange;
 
   const interactive = Boolean(actions.setEqBand && actions.setCrossoverSlot);
 
@@ -883,11 +891,20 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     patch: Partial<{ filterType: EqFilterType; freqHz: number; gainDb: number; q: number; active: boolean }>,
   ) {
     if (!actions.setEqBand) return;
+    // A type with a narrower Q range (a shelf) takes the band's Q along,
+    // fitted into it — the backend refuses a type change that would leave Q
+    // outside the new type's range.
+    const current = eq.bands[bandIndex];
+    let q = patch.q;
+    if (patch.filterType !== undefined && q === undefined && current && eqCapsByType[patch.filterType]?.supportsQ) {
+      const fitted = roundQ(clampToRange(current.q ?? 1, qRangeFor(patch.filterType)));
+      if (fitted !== current.q) q = fitted;
+    }
     await actions.setEqBand(channelIndex, direction, bandIndex, {
       filterType: patch.filterType ?? null,
       freqHz: patch.freqHz ?? null,
       gainDb: patch.gainDb ?? null,
-      q: patch.q ?? null,
+      q: q ?? null,
       active: patch.active ?? null,
     });
   }
@@ -897,7 +914,10 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     const patch: PreviewPatch = {};
     if (proposed.freqHz !== undefined) patch.freqHz = roundFreq(clampToRange(proposed.freqHz, freqRange));
     if (proposed.gainDb !== undefined) patch.gainDb = roundGain(clampToRange(proposed.gainDb, gainRange));
-    if (proposed.q !== undefined) patch.q = roundQ(clampToRange(proposed.q, qRange));
+    if (proposed.q !== undefined) {
+      const type = ref.kind === "band" ? eq.bands[ref.bandIndex]?.filterType : undefined;
+      patch.q = roundQ(clampToRange(proposed.q, type ? qRangeFor(type) : qRange));
+    }
     if (ref.kind === "band") {
       await handleBandChange(ref.bandIndex, patch);
     } else {
@@ -1003,8 +1023,8 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
               freqMax={freqRange.max}
               gainMin={gainRange.min}
               gainMax={gainRange.max}
-              qMin={qRange.min}
-              qMax={qRange.max}
+              qMin={qRangeFor(band.filterType).min}
+              qMax={qRangeFor(band.filterType).max}
               selected={sameStage(selectedStage, { kind: "band", bandIndex: i })}
               onSelectStage={setSelectedStage}
               onBandChange={onBandChange}
@@ -1188,7 +1208,7 @@ const BandStrip = memo(function BandStrip({
   label: string;
   index: number;
   band: { filterType: EqFilterType; freqHz: number | null; gainDb: number | null; q: number | null; active: boolean };
-  capsByType: Record<EqFilterType, { supportsGain: boolean; supportsQ: boolean }>;
+  capsByType: Record<EqFilterType, FilterCaps>;
   freqMin: number | null;
   freqMax: number | null;
   gainMin: number | null;

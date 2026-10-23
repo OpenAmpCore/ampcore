@@ -1760,6 +1760,8 @@ export type EqFilterCapabilityEntry = {
 	filterType: EqFilterType,
 	supportsGain: boolean,
 	supportsQ: boolean,
+	/**  See `EqFilterType::q_range` — `None` means `param_ranges.eq_band_q`. */
+	qRange: ParamRange | null,
 };
 
 /**
@@ -2050,8 +2052,12 @@ export type SourceChannelCount = {
  *  source vocabulary. Which variants a given model actually offers, and how
  *  many physical channels each variant has, is `AmpDspTopology.source_counts`,
  *  not this enum itself.
+ *
+ *  `Aes3` is read-only: the amp reports it (wire code 2, named in both the
+ *  vendor app and the firmware's source switch), but no catalog model offers
+ *  it, so it is shown rather than mislabelled and never selected or written.
  */
-export type SourceKind = "analog" | "dante" | "backup";
+export type SourceKind = "analog" | "dante" | "backup" | "aes3";
 
 /**  One trim + delay pair for a single input source kind. */
 export type SourceTrim = {

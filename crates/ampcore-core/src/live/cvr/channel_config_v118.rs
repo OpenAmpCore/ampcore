@@ -183,6 +183,10 @@ fn power_mode(code: u8) -> Option<PowerMode> {
 /// `index = channel_index`. For Backup, there is no established index
 /// semantics in this app's model yet — `0` is a placeholder, not a
 /// meaningful position.
+///
+/// Code 2 is `Aes3` (the vendor app and the firmware's own source switch both
+/// name it), read-only: shown as what it is instead of being mislabelled, and
+/// never offered or written. Wired 1:1 like Dante.
 fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<ChannelSource> {
     if raw_code >= 3 {
         return Some(ChannelSource { kind: SourceKind::Backup, index: 0 });
@@ -190,7 +194,7 @@ fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<C
     match raw_code {
         0 => Some(ChannelSource { kind: SourceKind::Analog, index: analog_matrix_index as u32 }),
         1 => Some(ChannelSource { kind: SourceKind::Dante, index: channel_index }),
-        _ => None,
+        _ => Some(ChannelSource { kind: SourceKind::Aes3, index: channel_index }),
     }
 }
 
@@ -455,7 +459,7 @@ mod tests {
             parse_channel_config(&body, 4).unwrap().channels[0].source.map(|s| (s.kind, s.index))
         };
 
-        assert_eq!(source_of(2), None, "AES3 must not be folded into a supported kind");
+        assert_eq!(source_of(2), Some((SourceKind::Aes3, 0)), "AES3 is reported as itself, not folded into a selectable kind");
         assert_eq!(source_of(0), Some((SourceKind::Analog, 3)));
         assert_eq!(source_of(1), Some((SourceKind::Dante, 0)));
         assert_eq!(source_of(3), Some((SourceKind::Backup, 0)));

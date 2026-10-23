@@ -19,6 +19,8 @@ use tauri::{AppHandle, Emitter, State};
 use ampcore_core::data::amp_link::normalize_mac;
 use ampcore_core::data::common::log_clock;
 use ampcore_core::data::amp_push::{action_packets, adopt_device_facts, plan_fir, plan_push, AmpPushPlan, PushAction, PushPlan};
+use ampcore_core::data::capability::cvr::{cvr_param_ranges, CvrFirmwareCapability};
+use ampcore_core::data::validation::{check_push_action, AmpLimits, LimiterCeiling};
 use ampcore_core::data::edit_lock::LiveAmpReading;
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
 use ampcore_core::data::project::{AmpAssignment, Project};
@@ -139,6 +141,7 @@ struct PushContext {
     mac: String,
     reading: LiveAmpReading,
     matrix_input_count: u32,
+    rated_rms_voltage: Option<f64>,
 }
 
 /// The merge command's guard sequence, in the same order and with the same
@@ -195,6 +198,7 @@ fn push_context(
         .and_then(|id| inner.amp_models.iter().find(|m| m.id == id))
         .ok_or_else(|| AppError::from("The project amp has no model assigned".to_string()))?;
     let matrix_input_count = model.topology.matrix_input_count;
+    let rated_rms_voltage = model.topology.rated_rms_voltage;
 
     let snapshot = reading.snapshot.as_ref().expect("checked above");
     let live_fp = fingerprint_live_device(
@@ -233,7 +237,7 @@ fn push_context(
         ));
     }
 
-    Ok(PushContext { device_id: reading.device.id.clone(), mac, reading, matrix_input_count })
+    Ok(PushContext { device_id: reading.device.id.clone(), mac, reading, matrix_input_count, rated_rms_voltage })
 }
 
 /// `candidate` plans that assignment instead of the stored one — see
@@ -265,7 +269,37 @@ fn build_plan(
     // snapshot), and goes ahead of bridging, which stays last.
     let at = plan.stages.iter().position(|s| s.stage.id == "bridge").unwrap_or(plan.stages.len());
     plan.stages.splice(at..at, plan_fir(assignment, &context.reading.fir));
+    check_plan(&plan, context, snapshot)?;
     Ok(plan)
+}
+
+/// Every value the plan would write, against the online amp's limits — its
+/// firmware's ranges and each channel's limiter ceiling (its own reported
+/// maxima, else the model's rating). A project saved before a range was
+/// corrected is refused here, at plan time, instead of half-pushed.
+fn check_plan(plan: &PushPlan, context: &PushContext, snapshot: &ChannelConfigSnapshot) -> Result<(), AppError> {
+    let limits = AmpLimits {
+        ranges: cvr_param_ranges(&CvrFirmwareCapability::from_version(Some(&context.reading.device.firmware_version))),
+        rated_rms_voltage: context.rated_rms_voltage,
+    };
+    // `plan_push` only plans channels the snapshot has; the fallback is the
+    // model's rating (or the generic range) for the sake of totality.
+    let ceiling = |ch: u8| match snapshot.channels.iter().find(|c| c.channel_index == u32::from(ch)) {
+        Some(c) => limits.limiter_ceiling(&c.limiter),
+        None => LimiterCeiling {
+            rms_vrms: limits.rated_rms_voltage.unwrap_or(limits.ranges.rms_limiter_threshold_vrms.max),
+            peak_vp: limits
+                .rated_rms_voltage
+                .map(|v| v * std::f64::consts::SQRT_2)
+                .unwrap_or(limits.ranges.peak_limiter_threshold_vp.max),
+        },
+    };
+    for stage in &plan.stages {
+        for action in &stage.actions {
+            check_push_action(action, &limits.ranges, ceiling).map_err(AppError::from)?;
+        }
+    }
+    Ok(())
 }
 
 /// Read-only: what a push would write, stage by stage. Lets the modal render

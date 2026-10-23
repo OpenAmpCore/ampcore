@@ -201,6 +201,8 @@ const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
   dante: "Dante",
   backup: "Backup",
+  // Reported by the amp, never offered: shown so it isn't mistaken for Analog.
+  aes3: "AES3",
 };
 
 /** Width of the Routing tab's Source column — wider than a strip tile, since
@@ -1043,7 +1045,9 @@ function OutputChannelRow({
   const noiseGateThresholdDbu = channel.noiseGateThresholdDbu ?? 0;
   const phaseInverted = channel.outputPhaseInverted ?? false;
   const muted = channel.outputMuted ?? false;
-  const powerMode = channel.powerMode ?? "lowOhm";
+  // Unset only on a live amp that reported a mode this app can't decode —
+  // shown as such rather than as the Low-Ω it would otherwise read as.
+  const powerMode = channel.powerMode ?? null;
   const eqActive = activeFilterCount(channel.outputEq);
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
@@ -1346,7 +1350,8 @@ function OutputChannelRow({
                   value={noiseGateThresholdDbu}
                   min={noiseGateThresholdMin ?? undefined}
                   max={noiseGateThresholdMax ?? undefined}
-                  step={0.5}
+                  step={1}
+                  integer
                   suffix=" dBu"
                   onCommit={(value) => void gateFeedback.track(onNoiseGateChange(noiseGateEnabled, value))}
                 />
@@ -1373,7 +1378,7 @@ function OutputChannelRow({
             width={180}
             trigger={
               <StatEditorTile
-                value={POWER_MODE_LABELS[powerMode]}
+                value={powerMode ? POWER_MODE_LABELS[powerMode] : "Unknown"}
                 label="Mode"
                 visualValidation={modeFeedback}
                 onClick={() =>
@@ -1400,6 +1405,7 @@ function OutputChannelRow({
                   label: POWER_MODE_LABELS[mode],
                 }))}
                 value={powerMode}
+                placeholder="Unknown"
                 onChange={(value) => {
                   if (value) void modeFeedback.track(onPowerModeChange(value as PowerMode));
                 }}
