@@ -158,6 +158,7 @@ pub(crate) fn live_channel(index: u32) -> ChannelConfig {
         load_ohms: 4.0,
         backup_priority: BackupPriority { enabled: true, first: 1, second: 2, threshold_db: -80 },
         noise_gate_threshold_dbu: None,
+        amp_gain_db: Some(36.0),
     }
 }
 

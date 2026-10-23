@@ -28,6 +28,7 @@ export function MultiSelect({
   values,
   onChange,
   emptyLabel = "Disabled",
+  summary,
   disabled,
   className,
   style,
@@ -37,6 +38,9 @@ export function MultiSelect({
   onChange: (values: string[]) => void;
   /** Shown in the trigger when `values` is empty. */
   emptyLabel?: string;
+  /** Replaces the comma-joined labels in the trigger — for a trigger too
+   * narrow to hold them. `emptyLabel` still applies when nothing is chosen. */
+  summary?: string;
   disabled?: boolean;
   className?: string;
   style?: CSSProperties;
@@ -64,7 +68,7 @@ export function MultiSelect({
         style={{ width: 220, ...style }}
       >
         <span className="min-w-0 truncate">
-          {selectedLabels.length > 0 ? selectedLabels.join(", ") : emptyLabel}
+          {selectedLabels.length > 0 ? (summary ?? selectedLabels.join(", ")) : emptyLabel}
         </span>
         <ChevronDown
           size={14}

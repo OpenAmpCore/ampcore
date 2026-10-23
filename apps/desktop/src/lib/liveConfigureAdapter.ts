@@ -208,6 +208,9 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
+    async setChannelAmpGain(channelIndex, gainDb) {
+      return reportWrite("Set amp gain", commands.liveControlSetChannelAmpGain(deviceId, channelIndex, gainDb));
+    },
     async setSourceTrim(channelIndex, kind, trimDb, delayMs) {
       return reportWrite(
         "Set source trim/delay",

@@ -6,7 +6,7 @@ use ampcore_core::data::channel_clipboard::{copy_from_live, live_paste_actions, 
 use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
+use ampcore_core::live::cvr::write_v118::{amp_gain_range_db, CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
 use ampcore_core::live::cvr::write;
 use ampcore_core::live::state::{
@@ -745,6 +745,36 @@ pub async fn live_control_set_channel_power_mode(
     power_mode: PowerMode,
 ) -> Result<LiveWriteAck, AppError> {
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_power_mode(firmware, channel_index, power_mode)?])).await
+}
+
+/// FC=8 amp gain. Checked against `amp_gain_range_db` before anything is
+/// sent: gain sets the amp's output level, so a mistyped value is refused
+/// rather than delivered. The range depends on the channel's power mode, read
+/// from the last FC=27 poll, and on discovery's `gain_max`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_amp_gain(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    gain_db: f64,
+) -> Result<LiveWriteAck, AppError> {
+    let gain_max = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        inner
+            .devices
+            .get(&device_id)
+            .map(|device| device.gain_max)
+            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?
+    };
+    let power_mode = current_channel(&state, &device_id, channel_index)?.power_mode;
+    let (min, max) = amp_gain_range_db(gain_max, power_mode).ok_or_else(|| {
+        AppError::from(format!("device {} channel {} has no known gain range", device_id, channel_index))
+    })?;
+    if !(f64::from(min)..=f64::from(max)).contains(&gain_db) {
+        return Err(AppError::from(format!("gain {} dB is outside this output's {}–{} dB range", gain_db, min, max)));
+    }
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_amp_gain(firmware, channel_index, gain_db as f32)?])).await
 }
 
 /// Partial update of a channel's output trim/volume/delay — mirrors

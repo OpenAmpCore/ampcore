@@ -93,6 +93,9 @@ export interface ConfigureActions {
   setChannelLimiter?(channelIndex: number, patch: LimiterPatch): Promise<ActionResult>;
   setChannelNoiseGate?(channelIndex: number, enabled: boolean, thresholdDbu: number): Promise<ActionResult>;
   setChannelOhms?(channelIndex: number, ohms: number): Promise<ActionResult>;
+  /** FC=8 amp gain. Live-only: a Project has no gain to store, so Project
+   * mode leaves this undefined and the Overview's Gain field stays a readout. */
+  setChannelAmpGain?(channelIndex: number, gainDb: number): Promise<ActionResult>;
   setDeviceName?(name: string | null): Promise<ActionResult>;
 
   /** Copy/paste of an EQ chain or a limiter stage — the logic lives in core

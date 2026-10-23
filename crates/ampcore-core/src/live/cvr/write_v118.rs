@@ -46,6 +46,15 @@ pub const FC_PRIORITY_INPUTS: u8 = 80;
 /// Vendor `Noise_Gate` — the 1.1.9 gate threshold, one signed byte (dBu).
 pub const FC_NOISE_GATE_THRESHOLD: u8 = 87;
 
+/// The vendor's `Gongneng.GainSet`, read from the enum's constant table in
+/// "AMP Controller V1.1.8" (a .NET build of the same app). Not FC=13 `GAIN` —
+/// see `build_set_amp_gain`.
+pub const FC_AMP_GAIN: u8 = 8;
+
+/// How far either side of `amp_gain_base_dbv` the vendor app lets the gain be
+/// set: `MainVolGain::setMaxMinGain` makes the bounds `base - 6` and `base + 6`.
+pub const AMP_GAIN_SPAN_DB: f32 = 6.0;
+
 /// The device's per-channel name field is a fixed 16-byte null-padded ASCII
 /// buffer — half the width of the 32-byte *preset* name field, so the two
 /// are not interchangeable.
@@ -106,6 +115,60 @@ pub fn build_set_output_volume(channel_index: u8, volume_db: f32) -> Vec<u8> {
         IN_OUT_FLAG_INPUT,
         &volume_db.to_le_bytes(),
     )
+}
+
+/// FC=8 GAIN_SET, `in_out_flag=0`. Wire body: `f32` LE dB — the amplifier
+/// gain the FC=27 trailer reports as `Gains[ch]` (`ChannelConfig.amp_gain_db`),
+/// shown by the vendor app as each output's "Gain".
+///
+/// Read statically out of the vendor's .NET app, then confirmed on a 1.1.9
+/// DSP-2004: a write of 37.0 read back through FC=27 as 37.0.
+/// `Variable.Channels::MyPropertyChanged` is the assembly's only FC=8 sender:
+/// it boxes `(float)GainSet` into the `SendStruct(value, ch, flag, link, obj)`
+/// overload with flag 0 and link 0, so status is the usual 1. `chx` is the
+/// channel's `TDNums`, the same 0-based index `build_set_output_volume` uses —
+/// `VolumeInput` is the neighbouring case of that switch. The read side
+/// agrees: `RD_44::setSynData_Tecnare118` fills `GainSet` from
+/// `SynData_Tecnare118.Gains`, whose field order lands it at the trailer
+/// offset `channel_config_v118` reads.
+///
+/// **Not FC=13 `GAIN`.** That is the vendor's `GainInput` — a one-byte body
+/// plus a link group — which a 1.1.9 DSP-2004 ACKs and then ignores.
+///
+/// No range check here: the caller enforces `amp_gain_range_db`.
+pub fn build_set_amp_gain(channel_index: u8, gain_db: f32) -> Vec<u8> {
+    build_control_packet(
+        FC_AMP_GAIN,
+        channel_index,
+        0,
+        0,
+        IN_OUT_FLAG_INPUT,
+        &gain_db.to_le_bytes(),
+    )
+}
+
+/// The level, in dBV, an output's gain is set against — its full rated output
+/// in the current power mode. Low-impedance mode uses discovery's `gain_max`
+/// (a DSP-2004 reports 42, its 126.5 V rating); the constant-voltage modes use
+/// their line voltage, 70.7 V ≈ 37 dBV and 100 V = 40 dBV. That is the vendor's
+/// `MainVolGain::setMaxMinGain`, which branches on `CPCR` — a field its sync
+/// parse fills from the DZ_DY power mode.
+///
+/// `None` when the base is unknown: a power mode the parser didn't recognize,
+/// or low-ohm on an amp that reports no `gain_max`.
+pub fn amp_gain_base_dbv(gain_max: u32, power_mode: Option<PowerMode>) -> Option<f32> {
+    match power_mode? {
+        PowerMode::LowOhm => (gain_max > 0).then_some(gain_max as f32),
+        PowerMode::V70 => Some(37.0),
+        PowerMode::V100 => Some(40.0),
+    }
+}
+
+/// `(min, max)` dB an output's gain may be set to: `amp_gain_base_dbv` ±
+/// `AMP_GAIN_SPAN_DB`. This is the vendor UI's span, not a known firmware
+/// limit — an amp can hold a gain outside it, set some other way.
+pub fn amp_gain_range_db(gain_max: u32, power_mode: Option<PowerMode>) -> Option<(f32, f32)> {
+    amp_gain_base_dbv(gain_max, power_mode).map(|base| (base - AMP_GAIN_SPAN_DB, base + AMP_GAIN_SPAN_DB))
 }
 
 /// FC=14 DELAY, `in_out_flag=0` (input). Wire body: `f32` LE ms.
@@ -727,6 +790,43 @@ mod tests {
         // of each field's range.
         let (_, body) = decode(&build_set_backup_priority(0, 1, 0, false, 0));
         assert_eq!(body, vec![1, 0, 0, 0]);
+    }
+
+    /// Pins the FC=8 frame byte for byte. The fields worth guarding are the
+    /// function code itself (13 is the look-alike the firmware ignores) and
+    /// `in_out_flag` 0, despite the vendor showing gain beside each *output*.
+    #[test]
+    fn amp_gain_frame() {
+        assert_eq!(
+            build_set_amp_gain(0, 37.0),
+            vec![
+                // NetworkData: flag 0xd903 LE, machine_mode=0, count=1,
+                // frame_len=17, step=1, state=0, pad
+                0x03, 0xd9, 0x00, 0x00, 0x01, 0x11, 0x00, 0x01, 0x00, 0x00,
+                // StructHeader: 0x55, FC=8, status=1, chx=0, seg=0, link=0, in_out=0
+                0x55, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                // 37.0f32 LE
+                0x00, 0x00, 0x14, 0x42,
+                // checksum: hi, lo, sum
+                0x00, 0x11, 0xc5,
+            ]
+        );
+        let (header, body) = decode(&build_set_amp_gain(3, 41.5));
+        assert_eq!(header, (8, 1, 3, 0, 0));
+        assert_eq!(f32::from_le_bytes(body.try_into().unwrap()), 41.5);
+    }
+
+    /// The base follows the power mode, as the vendor's `CPCR` switch does;
+    /// an unknown base yields no range rather than a guessed one.
+    #[test]
+    fn amp_gain_range_follows_power_mode() {
+        assert_eq!(amp_gain_range_db(42, Some(PowerMode::LowOhm)), Some((36.0, 48.0)));
+        assert_eq!(amp_gain_range_db(42, Some(PowerMode::V70)), Some((31.0, 43.0)));
+        assert_eq!(amp_gain_range_db(42, Some(PowerMode::V100)), Some((34.0, 46.0)));
+        // Constant-voltage modes don't need `gain_max` at all.
+        assert_eq!(amp_gain_range_db(0, Some(PowerMode::V70)), Some((31.0, 43.0)));
+        assert_eq!(amp_gain_range_db(0, Some(PowerMode::LowOhm)), None);
+        assert_eq!(amp_gain_range_db(42, None), None);
     }
 
     fn chain_band(type_code: u8, active: bool) -> EqChainBand {

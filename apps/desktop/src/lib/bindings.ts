@@ -487,6 +487,13 @@ export const commands = {
 	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
 	liveControlSetChannelPowerMode: (deviceId: string, channelIndex: number, powerMode: PowerMode) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_power_mode", { deviceId, channelIndex, powerMode })),
 	/**
+	 *  FC=8 amp gain. Checked against `amp_gain_range_db` before anything is
+	 *  sent: gain sets the amp's output level, so a mistyped value is refused
+	 *  rather than delivered. The range depends on the channel's power mode, read
+	 *  from the last FC=27 poll, and on discovery's `gain_max`.
+	 */
+	liveControlSetChannelAmpGain: (deviceId: string, channelIndex: number, gainDb: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_amp_gain", { deviceId, channelIndex, gainDb })),
+	/**
 	 *  Partial update of one parametric EQ band (1-8) — mirrors
 	 *  `projects_set_eq_band`'s shape (`EqBandPatch`, only non-`None` fields
 	 *  applied), but `filter_type`/`active` share one wire byte (FC=30) on this
@@ -1340,6 +1347,13 @@ export type ChannelConfig = {
 	 *  (`channel_config_v119`); `None` on 1.1.8, which stores none.
 	 */
 	noiseGateThresholdDbu: number | null,
+	/**
+	 *  The amplifier's gain (dB), from the trailer's `Gains[4]`; written by
+	 *  FC=8 (`write_v118::build_set_amp_gain`), not the look-alike FC=13.
+	 *  `None` for a value that isn't positive — no power amp has 0 dB of
+	 *  gain, so that is the field left unfilled, not a reading.
+	 */
+	ampGainDb: number | null,
 };
 
 export type ChannelConfigSnapshot = {

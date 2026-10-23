@@ -4,7 +4,7 @@
 //! firmware's function codes/body layout directly in a Tauri command.
 //!
 //! 1.1.9 reuses the 1.1.8 encoders (`write_v118.rs`); the noise gate adds a
-//! 1.1.9-only threshold packet. Mute, EQ, delay and trim have been read back correctly on
+//! 1.1.9-only threshold packet. Mute, EQ, delay, trim and amp gain have been read back correctly on
 //! 1.1.9 hardware; the rest is unverified there and would silently send the
 //! wrong bytes if 1.1.9 has diverged. Give a diverging action its own `match`
 //! arm (see `build_set_noise_gate`).
@@ -76,6 +76,12 @@ pub fn build_set_output_trim(firmware_family: Option<&str>, channel_index: u8, t
 
 pub fn build_set_output_volume(firmware_family: Option<&str>, channel_index: u8, volume_db: f32) -> Option<Vec<u8>> {
     is_known_family(firmware_family).then(|| super::write_v118::build_set_output_volume(channel_index, volume_db))
+}
+
+/// FC=8 amp gain — see `write_v118::build_set_amp_gain`. Read back correctly
+/// on 1.1.9; 1.1.8 shares the encoder but is unverified.
+pub fn build_set_amp_gain(firmware_family: Option<&str>, channel_index: u8, gain_db: f32) -> Option<Vec<u8>> {
+    is_known_family(firmware_family).then(|| super::write_v118::build_set_amp_gain(channel_index, gain_db))
 }
 
 pub fn build_set_delay_in(firmware_family: Option<&str>, channel_index: u8, delay_ms: f32) -> Option<Vec<u8>> {
