@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Modal, Spinner, toast } from "@heroui/react";
 import { listen } from "@tauri-apps/api/event";
-import { FileUp, GripVertical, Info, Link2, ListFilter, RotateCcw, Save, SplitSquareVertical, Trash2, Upload } from "lucide-react";
+import { FileDown, FileUp, GripVertical, Info, Link2, ListFilter, RotateCcw, Save, SplitSquareVertical, Trash2, Upload } from "lucide-react";
 import {
   commands,
   type AmpAssignment,
@@ -516,9 +516,14 @@ export function SpeakersTab({
           <h3 className="text-sm font-semibold">
             Library <span className={MUTED}>{library.length}</span>
           </h3>
-          <Button size="sm" variant="secondary" isDisabled={locked} onPress={() => setImportOpen(true)}>
-            <FileUp size={14} /> Import presets…
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="secondary" isDisabled={locked} onPress={() => setImportOpen(true)}>
+              <FileUp size={14} /> Import…
+            </Button>
+            <Button size="sm" variant="secondary" isDisabled={library.length === 0} onPress={() => void exportLibrary()}>
+              <FileDown size={14} /> Export…
+            </Button>
+          </div>
         </div>
         <LibraryTable
           library={library}
@@ -987,9 +992,22 @@ function DetailsModal({
   );
 }
 
-/** Pick any number of speaker preset files (the old app's `.json`), preview
- * every one (with the reason a file can't be read), then import all readable
- * ones at once. */
+/** This machine's whole speaker library as one file, for another machine's
+ * Import — see `data/exchange.rs`. */
+async function exportLibrary() {
+  const text = await commands.speakersExport();
+  if (text.status !== "ok") {
+    toast.danger("Export failed", { description: text.error.message });
+    return;
+  }
+  const saved = await commands.saveTextFile("speaker-library.ampcore.json", text.data, "AmpCore speaker library", ["json"]);
+  if (saved.status !== "ok") toast.danger("Export failed", { description: saved.error.message });
+  else if (saved.data) toast.success("Speaker library exported");
+}
+
+/** Pick any number of speaker files — the old app's preset files, or a
+ * library exported from AmpCore — preview every speaker in them (with the
+ * reason one can't be read), then import all readable ones at once. */
 function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const compact = useIsCompact();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1033,7 +1051,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
       <Modal.Container placement="center" size={compact ? "full" : "lg"}>
         <Modal.Dialog>
           <Modal.Header>
-            <Modal.Heading>Import speaker preset files</Modal.Heading>
+            <Modal.Heading>Import speakers</Modal.Heading>
             <Modal.CloseTrigger />
           </Modal.Header>
           <Modal.Body>
@@ -1056,12 +1074,14 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
                 <Button size="sm" variant="secondary" isDisabled={busy} onPress={() => inputRef.current?.click()}>
                   <FileUp size={14} /> Choose files…
                 </Button>
-                <span className={MUTED}>Speaker preset files (.json). Details can be edited after importing.</span>
+                <span className={MUTED}>
+                  Speaker preset files or an exported AmpCore library (.json). Details can be edited after importing.
+                </span>
               </div>
               {preview && (
                 <div className="flex max-h-[50vh] flex-col gap-0.5 overflow-auto">
-                  {preview.map((p) => (
-                    <div key={p.fileName} className="flex min-w-0 items-center gap-2 text-sm" style={{ opacity: p.entry ? 1 : 0.6 }}>
+                  {preview.map((p, i) => (
+                    <div key={`${i}:${p.fileName}`} className="flex min-w-0 items-center gap-2 text-sm" style={{ opacity: p.entry ? 1 : 0.6 }}>
                       <span className={p.entry ? "text-success" : "text-danger"}>{p.entry ? "✓" : "✗"}</span>
                       <Hint text={p.fileName} className="min-w-0 flex-1"><span className="block truncate">{p.fileName}</span></Hint>
                       {p.entry ? (

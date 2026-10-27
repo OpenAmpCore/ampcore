@@ -9,12 +9,17 @@ pub mod cvr;
 /// source vocabulary. Which variants a given model actually offers, and how
 /// many physical channels each variant has, is `AmpDspTopology.source_counts`,
 /// not this enum itself.
+///
+/// `Aes3` is read-only: the amp reports it (wire code 2, named in both the
+/// vendor app and the firmware's source switch), but no catalog model offers
+/// it, so it is shown rather than mislabelled and never selected or written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceKind {
     Analog,
     Dante,
     Backup,
+    Aes3,
 }
 
 /// Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`.
@@ -103,6 +108,16 @@ impl EqFilterType {
         EqFilterType::BesselHigh,
     ];
 
+    /// A Q range narrower than the general `eq_band_q`, for the types the
+    /// vendor app limits further: its `My_EQ.EQ_Type_SelectionChanged` gives
+    /// shelves 0.25–1.25. `None` means the general range applies.
+    pub fn q_range(self) -> Option<ParamRange> {
+        match self {
+            EqFilterType::LowShelf | EqFilterType::HighShelf => Some(ParamRange { min: 0.25, max: 1.25 }),
+            _ => None,
+        }
+    }
+
     pub fn capabilities(self) -> FilterCapabilities {
         use EqFilterType::*;
         match self {
@@ -132,6 +147,8 @@ pub struct EqFilterCapabilityEntry {
     pub filter_type: EqFilterType,
     pub supports_gain: bool,
     pub supports_q: bool,
+    /// See `EqFilterType::q_range` — `None` means `param_ranges.eq_band_q`.
+    pub q_range: Option<ParamRange>,
 }
 
 /// The full `EqFilterType` -> `FilterCapabilities` table, resolved once per
@@ -144,7 +161,12 @@ pub fn eq_filter_capabilities() -> Vec<EqFilterCapabilityEntry> {
         .iter()
         .map(|&filter_type| {
             let caps = filter_type.capabilities();
-            EqFilterCapabilityEntry { filter_type, supports_gain: caps.supports_gain, supports_q: caps.supports_q }
+            EqFilterCapabilityEntry {
+                filter_type,
+                supports_gain: caps.supports_gain,
+                supports_q: caps.supports_q,
+                q_range: filter_type.q_range(),
+            }
         })
         .collect()
 }

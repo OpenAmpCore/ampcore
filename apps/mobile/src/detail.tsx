@@ -183,7 +183,19 @@ function EqStage({ ctx, dir, ch, channel: c, disabled }: StageProps) {
                 types={EQ_FILTER_TYPES}
                 value={eq.bands[open].filterType}
                 disabled={disabled}
-                onChange={(filterType) => write("set_eq_band", { channelIndex: ch, direction, bandIndex: open, patch: { filterType } })}
+                onChange={(filterType) => {
+                  // A shelf's Q range is narrower; core refuses a type change
+                  // that leaves Q outside it, so the fitted Q goes along.
+                  const r = caps?.[filterType]?.supportsQ ? caps[filterType].qRange : null;
+                  const q = eq.bands[open].q;
+                  const fitted = r ? Math.min(r.max, Math.max(r.min, q)) : q;
+                  write("set_eq_band", {
+                    channelIndex: ch,
+                    direction,
+                    bandIndex: open,
+                    patch: fitted === q ? { filterType } : { filterType, q: fitted },
+                  });
+                }}
               />
               <Fader
                 label="Frequency"
@@ -211,8 +223,8 @@ function EqStage({ ctx, dir, ch, channel: c, disabled }: StageProps) {
                 unit=""
                 step={0.05}
                 value={eq.bands[open].q}
-                min={ranges.eqBandQ.min}
-                max={ranges.eqBandQ.max}
+                min={(caps?.[eq.bands[open].filterType]?.qRange ?? ranges.eqBandQ).min}
+                max={(caps?.[eq.bands[open].filterType]?.qRange ?? ranges.eqBandQ).max}
                 disabled={disabled || caps?.[eq.bands[open].filterType]?.supportsQ === false}
                 onCommit={(q) => write("set_eq_band", { channelIndex: ch, direction, bandIndex: open, patch: { q } })}
               />

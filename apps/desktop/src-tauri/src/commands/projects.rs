@@ -1,14 +1,23 @@
+use serde::Serialize;
+use specta::Type;
 use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
+use ampcore_core::data::capability::cvr::{cvr_param_ranges, CvrFirmwareCapability};
 use ampcore_core::data::capability::{PowerMode, SourceKind};
+use ampcore_core::data::validation::{self, AmpLimits};
 use ampcore_core::data::channel_clipboard::{copy_from_project, paste_into_project, ChannelClip, ClipSection};
 use ampcore_core::data::project::{
     AmpAssignment, AmpChannel, BackupPriorityPatch, ChannelFir, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch,
     EqDirection, LimiterPatch, Project, SourceTrimPatch,
 };
+use ampcore_core::data::common::{new_id, now_millis};
 use ampcore_core::live::cvr::fir::FIR_MAX_TAPS;
-use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
+use crate::data::exchange::{add_missing, export_project, import_project};
+use crate::data::store::{
+    delete_project_file, reconcile_project_eq_band_sizes, reconcile_project_matrix_sizes, save_amp_models,
+    save_project_file, save_speakers, ProjectDataState,
+};
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
 use super::speakers::{candidate_of, save_or_push};
@@ -17,17 +26,33 @@ fn find_amp_model<'a>(models: &'a [AmpModelCatalogEntry], id: &str) -> Option<&'
     models.iter().find(|m| m.id == id)
 }
 
+/// What an assignment's values are checked against: its planned firmware's
+/// ranges and its model's rated voltage. CVR is the only protocol, so the
+/// ranges don't need the model itself.
+fn assignment_limits(models: &[AmpModelCatalogEntry], assignment: &AmpAssignment) -> AmpLimits {
+    AmpLimits {
+        ranges: cvr_param_ranges(&CvrFirmwareCapability::from_version(assignment.firmware_version.as_deref())),
+        rated_rms_voltage: assignment
+            .amp_model_id
+            .as_deref()
+            .and_then(|id| find_amp_model(models, id))
+            .and_then(|m| m.topology.rated_rms_voltage),
+    }
+}
+
 /// The mutation pipeline every amp-level command shares: lock → find project →
 /// find assignment → `edit` → touch → save → emit `project:updated`. An error
-/// from `edit` aborts before anything is saved.
+/// from `edit` aborts before anything is saved. `edit` gets the assignment's
+/// limits, so a setter can refuse a value before storing it.
 fn edit_assignment(
     app: &AppHandle,
     state: &State<ProjectDataState>,
     project_id: &str,
     assignment_id: &str,
-    edit: impl FnOnce(&mut AmpAssignment) -> Result<(), AppError>,
+    edit: impl FnOnce(&mut AmpAssignment, &AmpLimits) -> Result<(), AppError>,
 ) -> Result<Project, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
     let project = inner
         .projects
         .iter_mut()
@@ -38,7 +63,8 @@ fn edit_assignment(
         .iter_mut()
         .find(|a| a.id == assignment_id)
         .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-    edit(assignment)?;
+    let limits = assignment_limits(&inner.amp_models, assignment);
+    edit(assignment, &limits)?;
     project.touch();
 
     let project = project.clone();
@@ -54,15 +80,15 @@ fn edit_channel(
     project_id: &str,
     assignment_id: &str,
     channel_index: u32,
-    edit: impl FnOnce(&mut AmpChannel) -> Result<(), AppError>,
+    edit: impl FnOnce(&mut AmpChannel, &AmpLimits) -> Result<(), AppError>,
 ) -> Result<Project, AppError> {
-    edit_assignment(app, state, project_id, assignment_id, |assignment| {
+    edit_assignment(app, state, project_id, assignment_id, |assignment, limits| {
         let channel = assignment
             .channels
             .iter_mut()
             .find(|c| c.channel_index == channel_index)
             .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
-        edit(channel)
+        edit(channel, limits)
     })
 }
 
@@ -118,6 +144,99 @@ pub fn projects_update(
     Ok(project)
 }
 
+/// What startup couldn't open — files set aside as unreadable, or saved by a
+/// newer AmpCore — for the project list to show.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_load_problems(state: State<ProjectDataState>) -> Result<Vec<String>, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.load_problems.clone())
+}
+
+/// A copy of a project under a new id and "<name> (copy)". Amps stay linked to
+/// the same network amps, so a copy can be a variant of one rig.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_duplicate(app: AppHandle, state: State<ProjectDataState>, project_id: String) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut copy = inner
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .cloned()
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let now = now_millis();
+    copy.id = new_id();
+    copy.name = format!("{} (copy)", copy.name);
+    copy.created_at = now;
+    copy.updated_at = now;
+    save_project_file(&inner.data_dir, &copy).map_err(AppError::from)?;
+    inner.projects.push(copy.clone());
+    app.emit("project:updated", &copy).ok();
+    Ok(copy)
+}
+
+/// The project as an export file's text (`data/exchange.rs`), for the caller
+/// to save where the user picks.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_export(state: State<ProjectDataState>, project_id: String) -> Result<String, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    export_project(project, &inner.speakers, &inner.amp_models).map_err(AppError::from)
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectImport {
+    pub project: Project,
+    /// Library speakers and custom amp models the file brought that this
+    /// machine didn't have.
+    pub speakers_added: u32,
+    pub amp_models_added: u32,
+}
+
+/// Imports an exported project (or a bare project file) as a new project:
+/// a fresh id, so importing the same file twice gives two, and " (imported)"
+/// after the name when one is already taken. Its speakers and custom amp
+/// models are added to this machine's library and catalogue where missing.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_import(app: AppHandle, state: State<ProjectDataState>, text: String) -> Result<ProjectImport, AppError> {
+    let imported = import_project(&text).map_err(|e| AppError::from(format!("This file can't be imported: {e}")))?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
+
+    let amp_models_added = add_missing(&mut inner.amp_models, imported.amp_models, |m| &m.id);
+    if amp_models_added > 0 {
+        save_amp_models(&inner.data_dir, &inner.amp_models).map_err(AppError::from)?;
+        app.emit("amp_model:updated", &inner.amp_models).ok();
+    }
+    let speakers_added = add_missing(&mut inner.speakers, imported.speakers, |e| &e.id);
+    if speakers_added > 0 {
+        save_speakers(&inner.data_dir, &inner.speakers).map_err(AppError::from)?;
+        app.emit("speakers:updated", &inner.speakers).ok();
+    }
+
+    let mut project = imported.project;
+    project.id = new_id();
+    project.touch();
+    if inner.projects.iter().any(|p| p.name == project.name) {
+        project.name = format!("{} (imported)", project.name);
+    }
+    // The file's amps may predate a topology change on this machine's models.
+    reconcile_project_matrix_sizes(&mut project, &inner.amp_models);
+    reconcile_project_eq_band_sizes(&mut project, &inner.amp_models);
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    inner.projects.push(project.clone());
+    app.emit("project:updated", &project).ok();
+    Ok(ProjectImport { project, speakers_added: speakers_added as u32, amp_models_added: amp_models_added as u32 })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn projects_delete(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<(), AppError> {
@@ -157,15 +276,16 @@ pub fn projects_add_amp_assignment(
         None => (0, 0, 0),
     };
 
+    let mut assignment = AmpAssignment::new(None, device_name, channel_count, amp_model_id, firmware_version);
+    assignment.reconcile_matrix_size(matrix_input_count);
+    assignment.reconcile_eq_bands(eq_bands_per_channel);
+    let limits = assignment_limits(&inner.amp_models, &assignment);
+    assignment.fit_limiters(limits.rated_rms_voltage, &limits.ranges);
     let project = inner
         .projects
         .iter_mut()
         .find(|p| p.id == project_id)
         .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-
-    let mut assignment = AmpAssignment::new(None, device_name, channel_count, amp_model_id, firmware_version);
-    assignment.reconcile_matrix_size(matrix_input_count);
-    assignment.reconcile_eq_bands(eq_bands_per_channel);
     project.amp_assignments.push(assignment);
     project.touch();
 
@@ -213,7 +333,7 @@ pub fn projects_set_amp_model(
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
-    let (channel_count, matrix_input_count, eq_bands_per_channel) = match &amp_model_id {
+    let (channel_count, matrix_input_count, eq_bands_per_channel, rated_rms_voltage) = match &amp_model_id {
         Some(id) => {
             let model = find_amp_model(&inner.amp_models, id)
                 .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?;
@@ -221,9 +341,10 @@ pub fn projects_set_amp_model(
                 model.channel_count,
                 model.topology.matrix_input_count,
                 model.topology.eq_bands_per_channel,
+                model.topology.rated_rms_voltage,
             )
         }
-        None => (0, 0, 0),
+        None => (0, 0, 0, None),
     };
 
     let project = inner
@@ -244,6 +365,9 @@ pub fn projects_set_amp_model(
     }
     assignment.reconcile_matrix_size(matrix_input_count);
     assignment.reconcile_eq_bands(eq_bands_per_channel);
+    // A smaller model's output caps the planned limiter thresholds.
+    let ranges = cvr_param_ranges(&CvrFirmwareCapability::from_version(assignment.firmware_version.as_deref()));
+    assignment.fit_limiters(rated_rms_voltage, &ranges);
     project.touch();
 
     let project = project.clone();
@@ -262,7 +386,10 @@ pub fn projects_set_channel_ohms(
     channel_index: u32,
     ohms: f64,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+        if !(ohms.is_finite() && ohms > 0.0) {
+            return Err(AppError::from(format!("Load {ohms} Ω must be a positive number")));
+        }
         channel.ohms = ohms;
         Ok(())
     })
@@ -282,7 +409,10 @@ pub fn projects_set_channel_source(
     kind: SourceKind,
     index: Option<u32>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+        if kind == SourceKind::Aes3 {
+            return Err(AppError::from("AES3 is shown as the amp reports it, but can't be selected here"));
+        }
         channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
         Ok(())
     })
@@ -305,16 +435,23 @@ pub fn projects_set_source_trim(
     kind: SourceKind,
     patch: SourceTrimPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
-        let trim = match kind {
-            SourceKind::Analog => &mut channel.source_trims.analog,
-            SourceKind::Dante => &mut channel.source_trims.dante,
-            SourceKind::Backup => {
-                return Err(AppError::from(
-                    "backup is a failover state, not an input with its own trim".to_string(),
-                ))
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        let r = &limits.ranges;
+        let (trim, trim_range) = match kind {
+            SourceKind::Analog => (&mut channel.source_trims.analog, r.source_trim_analog_db),
+            SourceKind::Dante => (&mut channel.source_trims.dante, r.source_trim_digital_db),
+            SourceKind::Backup | SourceKind::Aes3 => {
+                return Err(AppError::from(format!("{kind:?} has no trim of its own")))
             }
         };
+        // Only the half being set: an older delay above today's ceiling
+        // mustn't block a trim edit.
+        if let Some(trim_db) = patch.trim_db {
+            validation::check_range(&format!("{kind:?} trim"), " dB", trim_db, trim_range)?;
+        }
+        if let Some(delay_ms) = patch.delay_ms {
+            validation::check_range(&format!("{kind:?} delay"), " ms", delay_ms, r.source_delay_ms)?;
+        }
         if let Some(trim_db) = patch.trim_db {
             trim.trim_db = trim_db;
         }
@@ -341,7 +478,13 @@ pub fn projects_set_backup_priority(
     channel_index: u32,
     patch: BackupPriorityPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        if let Some(threshold_db) = patch.threshold_db {
+            validation::check_range("Backup threshold", " dB", f64::from(threshold_db), limits.ranges.backup_threshold_db)?;
+        }
+        if patch.first.is_some_and(|c| c > 1) || patch.second.is_some_and(|c| c > 1) {
+            return Err(AppError::from("Backup priorities must be Analog or Dante"));
+        }
         let priority = &mut channel.backup_priority;
         if let Some(enabled) = patch.enabled {
             priority.enabled = enabled;
@@ -377,7 +520,10 @@ pub fn projects_set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        if let Some(gain_db) = gain_db {
+            validation::check_range("Matrix gain", " dB", gain_db, limits.ranges.matrix_gain_db)?;
+        }
         let crosspoint = channel
             .matrix_crosspoints
             .iter_mut()
@@ -405,7 +551,8 @@ pub fn projects_set_channel_delay_in(
     channel_index: u32,
     delay_in_ms: f64,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        validation::check_range("Input delay", " ms", delay_in_ms, limits.ranges.delay_in_ms)?;
         channel.delay_in_ms = delay_in_ms;
         Ok(())
     })
@@ -422,7 +569,7 @@ pub fn projects_set_channel_input_mute(
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.input_muted = muted;
         Ok(())
     })
@@ -443,7 +590,17 @@ pub fn projects_set_channel_output(
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        let r = &limits.ranges;
+        if let Some(v) = trim_db {
+            validation::check_range("Output trim", " dB", v, r.output_trim_db)?;
+        }
+        if let Some(v) = volume_db {
+            validation::check_range("Output volume", " dB", v, r.output_volume_db)?;
+        }
+        if let Some(v) = delay_out_ms {
+            validation::check_range("Output delay", " ms", v, r.delay_out_ms)?;
+        }
         if let Some(trim_db) = trim_db {
             channel.output_trim_db = trim_db;
         }
@@ -473,7 +630,14 @@ pub fn projects_set_crossover_slot(
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        if let Some(freq_hz) = patch.freq_hz {
+            let name = match slot {
+                CrossoverSlotKind::Hp => "HP",
+                CrossoverSlotKind::Lp => "LP",
+            };
+            validation::check_crossover_freq(name, freq_hz, &limits.ranges)?;
+        }
         let eq = match direction {
             EqDirection::Input => &mut channel.input_eq,
             EqDirection::Output => &mut channel.output_eq,
@@ -513,7 +677,7 @@ pub fn projects_set_eq_band(
     band_index: u32,
     patch: EqBandPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
         let eq = match direction {
             EqDirection::Input => &mut channel.input_eq,
             EqDirection::Output => &mut channel.output_eq,
@@ -523,21 +687,9 @@ pub fn projects_set_eq_band(
             .get_mut(band_index as usize)
             .ok_or_else(|| AppError::from(format!("eq band {} not found", band_index)))?;
 
-        if let Some(filter_type) = patch.filter_type {
-            band.filter_type = filter_type;
-        }
-        if let Some(freq_hz) = patch.freq_hz {
-            band.freq_hz = freq_hz;
-        }
-        if let Some(gain_db) = patch.gain_db {
-            band.gain_db = gain_db;
-        }
-        if let Some(q) = patch.q {
-            band.q = q;
-        }
-        if let Some(active) = patch.active {
-            band.active = active;
-        }
+        let patched = band.patched(&patch);
+        validation::check_eq_band_patch(&format!("Band {}", band_index + 1), &patch, &patched, &limits.ranges)?;
+        *band = patched;
         Ok(())
     })
 }
@@ -554,31 +706,10 @@ pub fn projects_set_channel_limiter(
     channel_index: u32,
     patch: LimiterPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
-        if let Some(enabled) = patch.rms_enabled {
-            channel.limiter.rms.enabled = enabled;
-        }
-        if let Some(threshold_vrms) = patch.rms_threshold_vrms {
-            channel.limiter.rms.threshold_vrms = threshold_vrms;
-        }
-        if let Some(attack_ms) = patch.rms_attack_ms {
-            channel.limiter.rms.attack_ms = attack_ms;
-        }
-        if let Some(release_multiplier) = patch.rms_release_multiplier {
-            channel.limiter.rms.release_multiplier = release_multiplier;
-        }
-        if let Some(enabled) = patch.peak_enabled {
-            channel.limiter.peak.enabled = enabled;
-        }
-        if let Some(threshold_vp) = patch.peak_threshold_vp {
-            channel.limiter.peak.threshold_vp = threshold_vp;
-        }
-        if let Some(hold_ms) = patch.peak_hold_ms {
-            channel.limiter.peak.hold_ms = hold_ms;
-        }
-        if let Some(release_ms) = patch.peak_release_ms {
-            channel.limiter.peak.release_ms = release_ms;
-        }
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        let patched = channel.limiter.patched(&patch);
+        validation::check_limiter_patch(&patch, &patched, limits.limiter_ceiling(&channel.limiter), &limits.ranges)?;
+        channel.limiter = patched;
         Ok(())
     })
 }
@@ -624,8 +755,8 @@ pub fn projects_paste_channel_section(
     section: ClipSection,
     clip: ChannelClip,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
-        paste_into_project(channel, section, &clip).map_err(AppError::from)
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        paste_into_project(channel, section, &clip, &limits.ranges, limits.rated_rms_voltage).map_err(AppError::from)
     })
 }
 
@@ -643,7 +774,10 @@ pub fn projects_set_channel_noise_gate(
     enabled: Option<bool>,
     threshold_dbu: Option<f64>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+        if let Some(threshold_dbu) = threshold_dbu {
+            validation::check_noise_gate_threshold(threshold_dbu, &limits.ranges)?;
+        }
         if let Some(enabled) = enabled {
             channel.noise_gate_enabled = enabled;
         }
@@ -665,7 +799,7 @@ pub fn projects_set_channel_phase_invert(
     channel_index: u32,
     inverted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.output_phase_inverted = inverted;
         Ok(())
     })
@@ -682,7 +816,7 @@ pub fn projects_set_channel_power_mode(
     channel_index: u32,
     power_mode: PowerMode,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.power_mode = power_mode;
         Ok(())
     })
@@ -702,7 +836,7 @@ pub fn projects_set_channel_name(
     direction: EqDirection,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         match direction {
             EqDirection::Input => channel.input_name = name,
             EqDirection::Output => channel.output_name = name,
@@ -723,7 +857,7 @@ pub fn projects_set_amp_device_name(
     assignment_id: String,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment| {
+    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment, _| {
         assignment.device_name = name;
         Ok(())
     })
@@ -741,7 +875,7 @@ pub fn projects_set_channel_output_mute(
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.output_muted = muted;
         Ok(())
     })
@@ -761,7 +895,7 @@ pub fn projects_set_channel_fir_bypass(
     channel_index: u32,
     bypassed: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.fir_bypassed = bypassed;
         Ok(())
     })
@@ -788,7 +922,7 @@ pub fn projects_set_channel_fir(
     if fir.coefficients.iter().any(|c| !c.is_finite()) {
         return Err(AppError::from("FIR coefficients must be finite numbers"));
     }
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel| {
+    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.fir = fir;
         Ok(())
     })

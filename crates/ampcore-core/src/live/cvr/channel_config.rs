@@ -78,6 +78,11 @@ pub struct ChannelConfig {
     /// Output gate threshold (dBu), written by FC=87. 1.1.9 only
     /// (`channel_config_v119`); `None` on 1.1.8, which stores none.
     pub noise_gate_threshold_dbu: Option<i8>,
+    /// The amplifier's gain (dB), from the trailer's `Gains[4]`; written by
+    /// FC=8 (`write_v118::build_set_amp_gain`), not the look-alike FC=13.
+    /// `None` for a value that isn't positive — no power amp has 0 dB of
+    /// gain, so that is the field left unfilled, not a reading.
+    pub amp_gain_db: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

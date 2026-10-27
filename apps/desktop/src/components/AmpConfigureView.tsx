@@ -30,6 +30,7 @@ import {
   ListPlus,
   Lock,
   Radio,
+  SlidersVertical,
   Speaker,
   Volume2,
   VolumeX,
@@ -101,12 +102,14 @@ import {
 } from "../lib/liveConfigureAdapter";
 import { FirPanel } from "./FirPanel";
 import { Hint } from "./Hint";
+import { OverviewTab } from "./OverviewTab";
 import { SpeakersTab } from "./SpeakersTab";
 import { StatusChip } from "./SpeakerBench";
 import { useSpeakerLibrary, useSpeakerStates } from "../lib/speakers";
 import { usePreference } from "../lib/preferences";
 import { useElementWidth } from "../hooks/useElementWidth";
 import { useIsCompact } from "../lib/breakpoints";
+import { ampGainReading, type AmpGainReading } from "../lib/ampGain";
 
 /** Which project (persisted) or live device (Direct Edit, no project) this
  * Configure screen instance targets — the single seam that lets the same
@@ -169,6 +172,7 @@ const DEVICE_NAME_MAX_LENGTH = 32;
 const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
 const TABS = [
+  { value: "overview", label: "Overview", icon: SlidersVertical, skeleton: "grid" },
   { value: "main", label: "Input / Output", icon: LayoutDashboard, skeleton: "list" },
   { value: "routing", label: "Matrix", icon: Route, skeleton: "grid" },
   { value: "speakers", label: "Speakers", icon: Speaker, skeleton: "list" },
@@ -191,12 +195,14 @@ const TABS = [
  * at all (FC=59 is a live wire-protocol feature, not model-catalog-driven),
  * so it's special-cased in the render loop below instead of going through
  * the capability-gated dispatch every other tab here shares. */
-const CONFIGURABLE_TABS = new Set(["main", "routing"]);
+const CONFIGURABLE_TABS = new Set(["overview", "main", "routing"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
   dante: "Dante",
   backup: "Backup",
+  // Reported by the amp, never offered: shown so it isn't mistaken for Analog.
+  aes3: "AES3",
 };
 
 /** Width of the Routing tab's Source column — wider than a strip tile, since
@@ -561,7 +567,7 @@ function TabSkeleton({
   );
 }
 
-interface ConfigurableTabProps {
+export interface ConfigurableTabProps {
   assignment: AmpAssignment;
   capability: AmpCapability;
   /** Latest heartbeat reading for a `"live"` source — `undefined` for a
@@ -570,6 +576,10 @@ interface ConfigurableTabProps {
    * array (a firmware whose packet carries fewer channels than the model's
    * topology) degrades to `null`/unlit instead of `0`. */
   telemetry?: Telemetry;
+  /** Each output's amplifier gain and the sensitivity it implies, indexed by
+   * channel — `undefined` without a live amp (see `ampGainReading`). Shown on
+   * the Overview tab only. */
+  ampGains?: AmpGainReading[];
   /** Every mutation a tab can make, targeting either a Project or a live
    * device — see `configureActions.ts`. Fields with no write support for
    * the current source (Project-only concepts, or live writes not built
@@ -590,6 +600,13 @@ interface ConfigurableTabProps {
   /** The view is locked; for what a tab renders outside its panel's own
    * disabled fieldset (a dialog). */
   locked?: boolean;
+  /** The live amp this view reads, for the Overview's info bar — Direct
+   * Edit's device or the one a project amp is following. */
+  device?: DiscoveredDevice;
+  /** Catalog brand and model of the assigned amp model. */
+  modelLabel?: string;
+  /** Label of the amp's last recalled preset, from the FC=27 snapshot. */
+  presetName?: string | null;
 }
 
 const METER_FLOOR_DB = -60;
@@ -1028,7 +1045,9 @@ function OutputChannelRow({
   const noiseGateThresholdDbu = channel.noiseGateThresholdDbu ?? 0;
   const phaseInverted = channel.outputPhaseInverted ?? false;
   const muted = channel.outputMuted ?? false;
-  const powerMode = channel.powerMode ?? "lowOhm";
+  // Unset only on a live amp that reported a mode this app can't decode —
+  // shown as such rather than as the Low-Ω it would otherwise read as.
+  const powerMode = channel.powerMode ?? null;
   const eqActive = activeFilterCount(channel.outputEq);
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
@@ -1331,7 +1350,8 @@ function OutputChannelRow({
                   value={noiseGateThresholdDbu}
                   min={noiseGateThresholdMin ?? undefined}
                   max={noiseGateThresholdMax ?? undefined}
-                  step={0.5}
+                  step={1}
+                  integer
                   suffix=" dBu"
                   onCommit={(value) => void gateFeedback.track(onNoiseGateChange(noiseGateEnabled, value))}
                 />
@@ -1358,7 +1378,7 @@ function OutputChannelRow({
             width={180}
             trigger={
               <StatEditorTile
-                value={POWER_MODE_LABELS[powerMode]}
+                value={powerMode ? POWER_MODE_LABELS[powerMode] : "Unknown"}
                 label="Mode"
                 visualValidation={modeFeedback}
                 onClick={() =>
@@ -1385,6 +1405,7 @@ function OutputChannelRow({
                   label: POWER_MODE_LABELS[mode],
                 }))}
                 value={powerMode}
+                placeholder="Unknown"
                 onChange={(value) => {
                   if (value) void modeFeedback.track(onPowerModeChange(value as PowerMode));
                 }}
@@ -2734,6 +2755,7 @@ const TAB_COMPONENTS: Record<
   string,
   (props: ConfigurableTabProps) => ReactNode
 > = {
+  overview: OverviewTab,
   main: MainTab,
   routing: RoutingTab,
 };
@@ -2780,7 +2802,7 @@ export function AmpConfigureView({
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const showFingerprintMenu = usePreference("showFingerprintMenu");
   // Fallback for callers that don't own the tab themselves.
-  const [ownTab, setOwnTab] = useState<string | null>("main");
+  const [ownTab, setOwnTab] = useState<string | null>("overview");
   const currentTab = activeTab ?? ownTab;
   const handleTabChange = onActiveTabChange ?? setOwnTab;
 
@@ -2921,6 +2943,11 @@ export function AmpConfigureView({
   const speakerLibrary = useSpeakerLibrary();
   const speakerStates = useSpeakerStates(projectSource?.project, projectSource?.assignment.id, speakerLibrary);
   const telemetry = live?.telemetry;
+  const ampGains = live
+    ? Array.from({ length: liveChannelCount }, (_, i) =>
+        ampGainReading(live.channelConfig, i, live.device.gainMax),
+      )
+    : undefined;
   const deviceId = live?.device.id;
   const firmwareFamily = live?.device.firmwareFamily;
   const fingerprintTarget: FingerprintTarget | undefined =
@@ -3195,11 +3222,15 @@ export function AmpConfigureView({
               assignment={assignment}
               capability={capability}
               telemetry={telemetry}
+              ampGains={ampGains}
               actions={actions}
               deviceId={liveAmpDeviceId}
               speakerStates={speakerStates}
               onOpenSpeakers={() => handleTabChange("speakers")}
               locked={locked}
+              device={live?.device}
+              modelLabel={ampModel ? `${ampModel.brand} ${ampModel.model}` : undefined}
+              presetName={live?.channelConfig?.presetName}
             />
           );
         }

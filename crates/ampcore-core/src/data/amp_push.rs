@@ -353,6 +353,12 @@ fn plan_input(
                 index + 1
             )));
         }
+        if planned.kind == SourceKind::Aes3 {
+            return Err(PushPlanError(format!(
+                "In {}: AES3 is shown as the amp reports it, but this app can't select it — pick Analog or Dante",
+                index + 1
+            )));
+        }
         // Only an analog pick names a physical input; Dante is wired 1:1 to
         // its channel, so FC=79 would be meaningless for it.
         //
@@ -779,8 +785,8 @@ pub fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec
             let source_code = match kind {
                 SourceKind::Analog => 0,
                 SourceKind::Dante => 1,
-                // Rejected at plan time — FC=11 cannot select backup.
-                SourceKind::Backup => return None,
+                // Rejected at plan time — this app never selects either.
+                SourceKind::Backup | SourceKind::Aes3 => return None,
             };
             let mut out = vec![write::build_set_source_select(firmware, *channel, source_code)?];
             if let Some(index) = analog_index {

@@ -1,6 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { Button, Card, Input, Label, Modal, TextArea, TextField } from "@heroui/react";
-import { Pencil } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Alert, Button, Card, Input, Label, Modal, TextArea, TextField, toast } from "@heroui/react";
+import { FileUp, Pencil } from "lucide-react";
 import { ProjectEditModal } from "./ProjectEditModal";
 import { commands, type Project } from "../lib/bindings";
 
@@ -17,6 +17,9 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   const [nameError, setNameError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
+  /** What startup couldn't open — see `projects_load_problems`. */
+  const [loadProblems, setLoadProblems] = useState<string[]>([]);
+  const importRef = useRef<HTMLInputElement>(null);
 
   async function loadProjects() {
     setLoading(true);
@@ -29,7 +32,25 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
 
   useEffect(() => {
     loadProjects();
+    void commands.projectsLoadProblems().then((r) => r.status === "ok" && setLoadProblems(r.data));
   }, []);
+
+  async function handleImport(file: File) {
+    const result = await commands.projectsImport(await file.text());
+    if (result.status !== "ok") {
+      toast.danger("Import failed", { description: result.error.message });
+      return;
+    }
+    const { project, speakersAdded, ampModelsAdded } = result.data;
+    setProjects((current) => [...current, project]);
+    const added = [
+      speakersAdded > 0 && `${speakersAdded} speaker${speakersAdded === 1 ? "" : "s"}`,
+      ampModelsAdded > 0 && `${ampModelsAdded} amp model${ampModelsAdded === 1 ? "" : "s"}`,
+    ].filter(Boolean);
+    toast.success(`Imported “${project.name}”`, {
+      description: added.length > 0 ? `Also added to this computer: ${added.join(" and ")}.` : undefined,
+    });
+  }
 
   function resetForm() {
     setName("");
@@ -62,6 +83,19 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
       <div className="flex min-h-full flex-col items-center justify-center p-4">
         <div className="flex w-full flex-col gap-3" style={{ maxWidth: 420 }}>
           <h2 className="m-0 text-center text-2xl font-semibold">Select a Project</h2>
+
+          {loadProblems.length > 0 && (
+            <Alert status="warning">
+              <Alert.Indicator />
+              <Alert.Content>
+                <div className="flex flex-col gap-1" style={{ fontSize: "var(--amp-font-size-sm)" }}>
+                  {loadProblems.map((problem) => (
+                    <span key={problem}>{problem}</span>
+                  ))}
+                </div>
+              </Alert.Content>
+            </Alert>
+          )}
 
           {!loading && projects.length === 0 && (
             <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
@@ -107,9 +141,27 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
             ))}
           </div>
 
-          <Button variant="primary" onPress={() => setModalOpen(true)}>
-            New Project
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="primary" className="flex-1" onPress={() => setModalOpen(true)}>
+              New Project
+            </Button>
+            <Button variant="secondary" onPress={() => importRef.current?.click()}>
+              <FileUp size={16} /> Import…
+            </Button>
+          </div>
+          <input
+            ref={importRef}
+            type="file"
+            accept=".json,application/json"
+            aria-label="Import a project file"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              // Copied before the reset: clearing `value` empties the live `FileList`.
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (file) void handleImport(file);
+            }}
+          />
         </div>
       </div>
 
@@ -175,6 +227,7 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
         onClose={() => setEditingProject(null)}
         onSaved={(updated) => setProjects((current) => current.map((p) => (p.id === updated.id ? updated : p)))}
         onDeleted={(id) => setProjects((current) => current.filter((p) => p.id !== id))}
+        onDuplicated={(copy) => setProjects((current) => [...current, copy])}
       />
     </div>
   );

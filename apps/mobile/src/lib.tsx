@@ -306,15 +306,20 @@ export function useRanges(deviceId: string): Ranges | null {
   return r;
 }
 
-/** Which filter types expose gain/Q, resolved by core. Device-independent
- * today, so fetched once. */
-type Caps = Record<string, { supportsGain: boolean; supportsQ: boolean }>;
+/** Which filter types expose gain/Q, and a narrower Q range where a type has
+ * one (shelves), resolved by core. Device-independent today, so fetched once. */
+type QRange = { min: number; max: number };
+type Caps = Record<string, { supportsGain: boolean; supportsQ: boolean; qRange: QRange | null }>;
 let eqCaps: Promise<Caps> | undefined;
 export function useEqFilterCaps(): Caps | null {
   const [caps, setCaps] = useState<Caps | null>(null);
   useEffect(() => {
-    eqCaps ??= invoke<{ filterType: string; supportsGain: boolean; supportsQ: boolean }[]>("amp_eq_filter_capabilities").then((list) =>
-      Object.fromEntries(list.map((e) => [e.filterType, { supportsGain: e.supportsGain, supportsQ: e.supportsQ }])),
+    eqCaps ??= invoke<{ filterType: string; supportsGain: boolean; supportsQ: boolean; qRange: QRange | null }[]>(
+      "amp_eq_filter_capabilities",
+    ).then((list) =>
+      Object.fromEntries(
+        list.map((e) => [e.filterType, { supportsGain: e.supportsGain, supportsQ: e.supportsQ, qRange: e.qRange }]),
+      ),
     );
     eqCaps.then(setCaps, () => setCaps(null));
   }, []);

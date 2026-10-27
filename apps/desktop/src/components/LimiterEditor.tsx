@@ -153,18 +153,21 @@ export function LimiterEditor({
   const rmsRange = ranges.rmsLimiterThresholdVrms;
   const peakRange = ranges.peakLimiterThresholdVp;
 
-  // The assigned model's actual rated RMS voltage (`capability.topology.ratedRmsVoltage`,
-  // resolved per-model in `capability::cvr::rated_rms_voltage` — `None` for
-  // models with no known electrical datasheet, e.g. user-defined) caps the
-  // threshold sliders/fields automatically, tighter than the generic
-  // cross-model `AmpParamRanges` bound when it's the smaller of the two.
+  // This channel's threshold ceiling — the same one core's
+  // `validation::limiter_ceiling` gives, so the backend accepts whatever the
+  // sliders reach. The amp's own reported maxima (`maxVrms`/`maxVp`) come
+  // first: the firmware clamps every threshold to them. Without a report
+  // (0, or a project amp never read from hardware), the assigned model's
+  // rated RMS voltage (`capability.topology.ratedRmsVoltage`, `None` for
+  // models with no known datasheet), ×√2 for peak; then the generic range.
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
-  const rmsThresholdMax =
-    ratedRmsVoltage != null ? Math.min(rmsRange.max ?? ratedRmsVoltage, ratedRmsVoltage) : (rmsRange.max ?? 200);
+  const reported = (v: number | null | undefined) => (v != null && Number.isFinite(v) && v > 0 ? v : null);
+  const rmsThresholdMax = reported(limiter.rms.maxVrms) ?? ratedRmsVoltage ?? rmsRange.max ?? 200;
   const peakThresholdMax =
-    ratedRmsVoltage != null
-      ? Math.min(peakRange.max ?? ratedRmsVoltage * PEAK_HEADROOM_FACTOR, ratedRmsVoltage * PEAK_HEADROOM_FACTOR)
-      : (peakRange.max ?? 280);
+    reported(limiter.peak.maxVp) ??
+    (ratedRmsVoltage != null ? ratedRmsVoltage * PEAK_HEADROOM_FACTOR : null) ??
+    peakRange.max ??
+    400;
   // Peak's own min (slider drag range and NumberInput `min`) is raised to
   // this floor dynamically, so it's physically impossible to drag/type
   // below double the RMS threshold rather than relying solely on

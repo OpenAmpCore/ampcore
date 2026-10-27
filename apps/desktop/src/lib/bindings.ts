@@ -21,7 +21,36 @@ export const commands = {
 	 *  Bumps `updated_at` regardless of what the caller passed.
 	 */
 	projectsUpdate: (project: Project) => typedError<Project, AppError>(__TAURI_INVOKE("projects_update", { project })),
+	/**
+	 *  What startup couldn't open — files set aside as unreadable, or saved by a
+	 *  newer AmpCore — for the project list to show.
+	 */
+	projectsLoadProblems: () => typedError<string[], AppError>(__TAURI_INVOKE("projects_load_problems")),
+	/**
+	 *  A copy of a project under a new id and "<name> (copy)". Amps stay linked to
+	 *  the same network amps, so a copy can be a variant of one rig.
+	 */
+	projectsDuplicate: (projectId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_duplicate", { projectId })),
+	/**
+	 *  The project as an export file's text (`data/exchange.rs`), for the caller
+	 *  to save where the user picks.
+	 */
+	projectsExport: (projectId: string) => typedError<string, AppError>(__TAURI_INVOKE("projects_export", { projectId })),
+	/**
+	 *  Imports an exported project (or a bare project file) as a new project:
+	 *  a fresh id, so importing the same file twice gives two, and " (imported)"
+	 *  after the name when one is already taken. Its speakers and custom amp
+	 *  models are added to this machine's library and catalogue where missing.
+	 */
+	projectsImport: (text: string) => typedError<ProjectImport, AppError>(__TAURI_INVOKE("projects_import", { text })),
 	projectsDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_delete", { id })),
+	/**
+	 *  Native "Save as" for anything the app exports as text — a FIR filter, a
+	 *  project, the speaker library. A webview `<a download>` is a no-op inside
+	 *  Tauri. `filter_name`/`extensions` set the dialog's file-type filter.
+	 *  Returns `false` when the user cancels the dialog.
+	 */
+	saveTextFile: (defaultName: string, contents: string, filterName: string, extensions: string[]) => typedError<boolean, AppError>(__TAURI_INVOKE("save_text_file", { defaultName, contents, filterName, extensions })),
 	/**
 	 *  Adds an amp assignment to a project by model/name alone — `mac` starts
 	 *  unset (`None`) and is linked later via live network discovery, not typed
@@ -192,9 +221,17 @@ export const commands = {
 	speakersApply: (projectId: string, assignmentId: string, items: SpeakerItem[], acceptLossy: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_apply", { projectId, assignmentId, items, acceptLossy })),
 	speakersList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speakers_list")),
 	/**
-	 *  Parses the old app's speaker preset files (JSON). With `commit`, every file
-	 *  that parses is added to the library; without, nothing is saved (the import
-	 *  preview).
+	 *  The whole library as an export file's text (`data/exchange.rs`), for the
+	 *  caller to save where the user picks.
+	 */
+	speakersExport: () => typedError<string, AppError>(__TAURI_INVOKE("speakers_export")),
+	/**
+	 *  Parses the old app's speaker preset files (JSON) and this app's exported
+	 *  libraries — one result per speaker, so a library file gives several. A
+	 *  library speaker keeps its id, so projects that reference it find it; one
+	 *  this library already has (same id) is reported and left out. With
+	 *  `commit`, every importable speaker is added to the library; without,
+	 *  nothing is saved (the import preview).
 	 */
 	speakersImportProfiles: (files: ProfileUpload[], commit: boolean) => typedError<ProfileImportResult[], AppError>(__TAURI_INVOKE("speakers_import_profiles", { files, commit })),
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
@@ -468,11 +505,6 @@ export const commands = {
 	/**  FC=43 write with `status_code=6` — the vendor's Remove. Fits one datagram. */
 	liveControlClearChannelFirData: (deviceId: string, channelIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_clear_channel_fir_data", { deviceId, channelIndex })),
 	/**
-	 *  Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
-	 *  no-op inside Tauri. Returns `false` when the user cancels the dialog.
-	 */
-	firExportFile: (defaultName: string, contents: string) => typedError<boolean, AppError>(__TAURI_INVOKE("fir_export_file", { defaultName, contents })),
-	/**
 	 *  Partial update of a channel's output trim/volume/delay — mirrors
 	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
 	 *  that single-struct-mutation command, each populated field here is its own
@@ -486,6 +518,13 @@ export const commands = {
 	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
 	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
 	liveControlSetChannelPowerMode: (deviceId: string, channelIndex: number, powerMode: PowerMode) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_power_mode", { deviceId, channelIndex, powerMode })),
+	/**
+	 *  FC=8 amp gain. Checked against `amp_gain_range_db` before anything is
+	 *  sent: gain sets the amp's output level, so a mistyped value is refused
+	 *  rather than delivered. The range depends on the channel's power mode, read
+	 *  from the last FC=27 poll, and on discovery's `gain_max`.
+	 */
+	liveControlSetChannelAmpGain: (deviceId: string, channelIndex: number, gainDb: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_amp_gain", { deviceId, channelIndex, gainDb })),
 	/**
 	 *  Partial update of one parametric EQ band (1-8) — mirrors
 	 *  `projects_set_eq_band`'s shape (`EqBandPatch`, only non-`None` fields
@@ -1340,6 +1379,13 @@ export type ChannelConfig = {
 	 *  (`channel_config_v119`); `None` on 1.1.8, which stores none.
 	 */
 	noiseGateThresholdDbu: number | null,
+	/**
+	 *  The amplifier's gain (dB), from the trailer's `Gains[4]`; written by
+	 *  FC=8 (`write_v118::build_set_amp_gain`), not the look-alike FC=13.
+	 *  `None` for a value that isn't positive — no power amp has 0 dB of
+	 *  gain, so that is the field left unfilled, not a reading.
+	 */
+	ampGainDb: number | null,
 };
 
 export type ChannelConfigSnapshot = {
@@ -1746,6 +1792,8 @@ export type EqFilterCapabilityEntry = {
 	filterType: EqFilterType,
 	supportsGain: boolean,
 	supportsQ: boolean,
+	/**  See `EqFilterType::q_range` — `None` means `param_ranges.eq_band_q`. */
+	qRange: ParamRange | null,
 };
 
 /**
@@ -1916,6 +1964,16 @@ export type PresetSlot = {
 	name: string,
 };
 
+export type ProjectImport = {
+	project: Project,
+	/**
+	 *  Library speakers and custom amp models the file brought that this
+	 *  machine didn't have.
+	 */
+	speakersAdded: number,
+	ampModelsAdded: number,
+};
+
 export type ProfileImportResult = {
 	fileName: string,
 	/**  Why the file can't be imported; `None` when it can (or was). */
@@ -2036,8 +2094,12 @@ export type SourceChannelCount = {
  *  source vocabulary. Which variants a given model actually offers, and how
  *  many physical channels each variant has, is `AmpDspTopology.source_counts`,
  *  not this enum itself.
+ *
+ *  `Aes3` is read-only: the amp reports it (wire code 2, named in both the
+ *  vendor app and the firmware's source switch), but no catalog model offers
+ *  it, so it is shown rather than mislabelled and never selected or written.
  */
-export type SourceKind = "analog" | "dante" | "backup";
+export type SourceKind = "analog" | "dante" | "backup" | "aes3";
 
 /**  One trim + delay pair for a single input source kind. */
 export type SourceTrim = {

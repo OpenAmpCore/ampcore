@@ -183,6 +183,10 @@ fn power_mode(code: u8) -> Option<PowerMode> {
 /// `index = channel_index`. For Backup, there is no established index
 /// semantics in this app's model yet — `0` is a placeholder, not a
 /// meaningful position.
+///
+/// Code 2 is `Aes3` (the vendor app and the firmware's own source switch both
+/// name it), read-only: shown as what it is instead of being mislabelled, and
+/// never offered or written. Wired 1:1 like Dante.
 fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<ChannelSource> {
     if raw_code >= 3 {
         return Some(ChannelSource { kind: SourceKind::Backup, index: 0 });
@@ -190,7 +194,7 @@ fn source(raw_code: u8, channel_index: u32, analog_matrix_index: u8) -> Option<C
     match raw_code {
         0 => Some(ChannelSource { kind: SourceKind::Analog, index: analog_matrix_index as u32 }),
         1 => Some(ChannelSource { kind: SourceKind::Dante, index: channel_index }),
-        _ => None,
+        _ => Some(ChannelSource { kind: SourceKind::Aes3, index: channel_index }),
     }
 }
 
@@ -293,6 +297,10 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         threshold_db: i8_at(body, priority_base + 3) as i32,
     };
 
+    // Trailer `Gains[4]`: f32 dB per channel. 36.0 on all four channels of a
+    // 1.1.9 DSP-2004.
+    let amp_gain_db = Some(f32_le(body, trailer_base + 156 + channel_index as usize * 4)).filter(|g| *g > 0.0);
+
     ChannelConfig {
         channel_index,
         delay_in_ms: f32_le(body, at(86)),
@@ -346,6 +354,7 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         load_ohms: f32_le(body, at(410)),
         backup_priority,
         noise_gate_threshold_dbu: None, // 1.1.8 stores none
+        amp_gain_db,
     }
 }
 
@@ -409,7 +418,7 @@ pub fn parse_channel_config(body: &[u8], output_channels: u32) -> Option<Channel
     // (i32 channel link groups — not supported by this app for any model, so
     // deliberately not read), then `Scene_mode_name[32]`; mutes, analog
     // matrix and priority follow and are read per channel in `parse_channel`.
-    // The trailing vendor `Gains[4]` is no setting on CVR amps and is not read.
+    // The trailing vendor `Gains[4]` is read per channel in `parse_channel`.
     let preset_name = ascii_n(body, trailer_base + 100, 32);
 
     // `Bridge_data.Bridge` is wire-inverted like MUTE: 0 = bridged.
@@ -450,7 +459,7 @@ mod tests {
             parse_channel_config(&body, 4).unwrap().channels[0].source.map(|s| (s.kind, s.index))
         };
 
-        assert_eq!(source_of(2), None, "AES3 must not be folded into a supported kind");
+        assert_eq!(source_of(2), Some((SourceKind::Aes3, 0)), "AES3 is reported as itself, not folded into a selectable kind");
         assert_eq!(source_of(0), Some((SourceKind::Analog, 3)));
         assert_eq!(source_of(1), Some((SourceKind::Dante, 0)));
         assert_eq!(source_of(3), Some((SourceKind::Backup, 0)));
@@ -495,5 +504,20 @@ mod tests {
         assert_eq!(snapshot.channels.len(), 2, "placeholder bodies are not channels");
         assert!(snapshot.channels[1].input_muted);
         assert!(parse_channel_config(&body, 0).is_none(), "no count, no guess");
+    }
+
+    #[test]
+    fn amp_gain_is_read_per_channel_from_the_trailer() {
+        let gains = 4 * BYTES_PER_CHANNEL + 156;
+        let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
+        body[gains..gains + 4].copy_from_slice(&36.0f32.to_le_bytes());
+        body[gains + 4..gains + 8].copy_from_slice(&31.5f32.to_le_bytes());
+        // Channel 2 left at 0.0, channel 3 negative: neither is a gain.
+        body[gains + 12..gains + 16].copy_from_slice(&(-6.0f32).to_le_bytes());
+        let snapshot = parse_channel_config(&body, 4).unwrap();
+        assert_eq!(
+            snapshot.channels.iter().map(|c| c.amp_gain_db).collect::<Vec<_>>(),
+            [Some(36.0), Some(31.5), None, None]
+        );
     }
 }

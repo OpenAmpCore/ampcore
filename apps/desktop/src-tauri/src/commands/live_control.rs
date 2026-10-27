@@ -4,9 +4,10 @@ use ampcore_core::data::amp_push::action_packets;
 use ampcore_core::data::capability::{PowerMode, SourceKind};
 use ampcore_core::data::channel_clipboard::{copy_from_live, live_paste_actions, ChannelClip, ClipSection};
 use ampcore_core::data::project::{CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch};
+use ampcore_core::data::validation;
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
-use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
+use ampcore_core::live::cvr::write_v118::{amp_gain_range_db, CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
 use ampcore_core::live::cvr::write;
 use ampcore_core::live::state::{
@@ -14,9 +15,23 @@ use ampcore_core::live::state::{
     LiveWriteAck,
 };
 use ampcore_core::live::write_helpers::{
-    current_channel, current_crossover_slot, current_eq_band, fetch_channel_fir, fetch_presets, merge_peak, merge_rms, require_fir_firmware, require_v118_firmware,
-    resolve_write_target, send_writes, send_request_with_retry, unknown_firmware_error, validate_name, WriteTally,
+    current_channel, current_crossover_slot, current_eq_band, fetch_channel_fir, fetch_presets, live_limits, merge_peak, merge_rms,
+    require_fir_firmware, require_v118_firmware, resolve_write_target, send_writes, send_request_with_retry, unknown_firmware_error,
+    validate_name, WriteTally,
 };
+
+/// How many analog inputs `device_id` reported in BASIC_INFO (0 when unknown).
+fn analog_input_count(state: &LiveDeviceState, device_id: &str) -> Result<u32, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.devices.get(device_id).map(|d| d.analog_input_channels).unwrap_or(0))
+}
+
+fn side_label(direction: EqDirection, channel_index: u8) -> String {
+    match direction {
+        EqDirection::Input => format!("In {} EQ", u32::from(channel_index) + 1),
+        EqDirection::Output => format!("Out {} EQ", char::from(b'A' + channel_index)),
+    }
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -253,6 +268,10 @@ pub async fn live_control_set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    if let Some(gain_db) = gain_db {
+        validation::check_range("Matrix gain", " dB", gain_db, limits.ranges.matrix_gain_db)?;
+    }
     let channel = current_channel(&state, &device_id, channel_index)?;
     let existing = channel
         .matrix_crosspoints
@@ -273,6 +292,9 @@ pub async fn live_control_set_channel_noise_gate(
     enabled: bool,
     threshold_dbu: f64,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    // Whole dBu, so the cast below is exact rather than a silent rounding.
+    validation::check_noise_gate_threshold(threshold_dbu, &limits.ranges)?;
     send_writes(&state, &device_id, |firmware| {
         write::build_set_noise_gate(firmware, channel_index, enabled, threshold_dbu.round() as i8)
     })
@@ -295,6 +317,13 @@ pub async fn live_control_set_channel_limiter(
     patch: LimiterPatch,
 ) -> Result<LiveWriteAck, AppError> {
     let channel = current_channel(&state, &device_id, channel_index)?;
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    validation::check_limiter_patch(
+        &patch,
+        &channel.limiter.patched(&patch),
+        limits.limiter_ceiling(&channel.limiter),
+        &limits.ranges,
+    )?;
     send_writes(&state, &device_id, |firmware| {
         let mut packets = Vec::new();
         if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = merge_rms(&patch, &channel.limiter.rms) {
@@ -335,7 +364,9 @@ pub async fn live_control_paste_channel_section(
     clip: ChannelClip,
 ) -> Result<LiveWriteAck, AppError> {
     let channel = current_channel(&state, &device_id, channel_index)?;
-    let actions = live_paste_actions(&channel, section, &clip).map_err(AppError::from)?;
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    let actions =
+        live_paste_actions(&channel, section, &clip, &limits.ranges, limits.rated_rms_voltage).map_err(AppError::from)?;
     send_writes(&state, &device_id, |firmware| {
         Some(actions.iter().map(|action| action_packets(action, firmware)).collect::<Option<Vec<_>>>()?.concat())
     })
@@ -387,6 +418,7 @@ pub async fn live_control_set_channel_source(
     kind: SourceKind,
     index: Option<u32>,
 ) -> Result<LiveWriteAck, AppError> {
+    live_limits(&state, &device_id, channel_index)?;
     let source_code: u8 = match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
@@ -395,8 +427,13 @@ pub async fn live_control_set_channel_source(
                 "backup is a readback state, not an FC=11 selection — configure it via priority inputs".to_string(),
             ))
         }
+        SourceKind::Aes3 => return Err(AppError::from("AES3 is shown as the amp reports it, but can't be selected here".to_string())),
     };
+    let analog_inputs = analog_input_count(&state, &device_id)?;
     let analog_input = match (kind, index) {
+        (SourceKind::Analog, Some(i)) if analog_inputs > 0 && i >= analog_inputs => {
+            return Err(AppError::from(format!("analog input {} doesn't exist — this amp has {}", i + 1, analog_inputs)))
+        }
         (SourceKind::Analog, Some(i)) => Some(
             u8::try_from(i).map_err(|_| AppError::from(format!("analog input index {} is out of range", i)))?,
         ),
@@ -596,20 +633,6 @@ pub async fn live_control_clear_channel_fir_data(
     Ok(ack)
 }
 
-/// Native "Save as" for the FIR panel's Export — a webview `<a download>` is a
-/// no-op inside Tauri. Returns `false` when the user cancels the dialog.
-#[tauri::command]
-#[specta::specta]
-pub async fn fir_export_file(app: AppHandle, default_name: String, contents: String) -> Result<bool, AppError> {
-    use tauri_plugin_dialog::DialogExt;
-    let Some(path) = app.dialog().file().set_file_name(&default_name).add_filter("Text", &["txt"]).blocking_save_file() else {
-        return Ok(false);
-    };
-    let path = path.into_path().map_err(|e| AppError::from(e.to_string()))?;
-    std::fs::write(path, contents).map_err(|e| AppError::from(e.to_string()))?;
-    Ok(true)
-}
-
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_input_mute(
@@ -629,6 +652,8 @@ pub async fn live_control_set_channel_delay_in(
     channel_index: u8,
     delay_in_ms: f64,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    validation::check_range("Input delay", " ms", delay_in_ms, limits.ranges.delay_in_ms)?;
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_delay_in(firmware, channel_index, delay_in_ms as f32)?])).await
 }
 
@@ -647,14 +672,12 @@ pub async fn live_control_set_source_trim(
     trim_db: f64,
     delay_ms: f64,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    validation::check_source_trim(kind, trim_db, delay_ms, &limits.ranges)?;
     let segment: u8 = match kind {
         SourceKind::Analog => 0,
         SourceKind::Dante => 1,
-        SourceKind::Backup => {
-            return Err(AppError::from(
-                "backup is a failover state, not an input with its own trim".to_string(),
-            ))
-        }
+        SourceKind::Backup | SourceKind::Aes3 => unreachable!("check_source_trim refuses {kind:?}"),
     };
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_source_trim(firmware, channel_index, segment, trim_db as f32, delay_ms as f32)?])).await
 }
@@ -674,6 +697,11 @@ pub async fn live_control_set_backup_priority(
     enabled: bool,
     threshold_db: i32,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    validation::check_range("Backup threshold", " dB", f64::from(threshold_db), limits.ranges.backup_threshold_db)?;
+    if first > 1 || second > 1 {
+        return Err(AppError::from(format!("backup priorities must be Analog (0) or Dante (1), not {first}/{second}")));
+    }
     let threshold = i8::try_from(threshold_db)
         .map_err(|_| AppError::from(format!("backup threshold {} dB is out of range", threshold_db)))?;
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_backup_priority(firmware, channel_index, first, second, enabled, threshold)?])).await
@@ -747,6 +775,36 @@ pub async fn live_control_set_channel_power_mode(
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_power_mode(firmware, channel_index, power_mode)?])).await
 }
 
+/// FC=8 amp gain. Checked against `amp_gain_range_db` before anything is
+/// sent: gain sets the amp's output level, so a mistyped value is refused
+/// rather than delivered. The range depends on the channel's power mode, read
+/// from the last FC=27 poll, and on discovery's `gain_max`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_amp_gain(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    gain_db: f64,
+) -> Result<LiveWriteAck, AppError> {
+    let gain_max = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        inner
+            .devices
+            .get(&device_id)
+            .map(|device| device.gain_max)
+            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?
+    };
+    let power_mode = current_channel(&state, &device_id, channel_index)?.power_mode;
+    let (min, max) = amp_gain_range_db(gain_max, power_mode).ok_or_else(|| {
+        AppError::from(format!("device {} channel {} has no known gain range", device_id, channel_index))
+    })?;
+    if !(f64::from(min)..=f64::from(max)).contains(&gain_db) {
+        return Err(AppError::from(format!("gain {} dB is outside this output's {}–{} dB range", gain_db, min, max)));
+    }
+    send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_amp_gain(firmware, channel_index, gain_db as f32)?])).await
+}
+
 /// Partial update of a channel's output trim/volume/delay — mirrors
 /// `projects_set_channel_output`'s per-field-optional convention, but unlike
 /// that single-struct-mutation command, each populated field here is its own
@@ -764,6 +822,17 @@ pub async fn live_control_set_channel_output(
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
 ) -> Result<LiveWriteAck, AppError> {
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    let r = &limits.ranges;
+    if let Some(v) = trim_db {
+        validation::check_range("Output trim", " dB", v, r.output_trim_db)?;
+    }
+    if let Some(v) = volume_db {
+        validation::check_range("Output volume", " dB", v, r.output_volume_db)?;
+    }
+    if let Some(v) = delay_out_ms {
+        validation::check_range("Output delay", " ms", v, r.delay_out_ms)?;
+    }
     send_writes(&state, &device_id, |firmware| {
         let mut packets = Vec::with_capacity(3);
         if let Some(trim_db) = trim_db {
@@ -800,14 +869,15 @@ pub async fn live_control_set_eq_band(
 ) -> Result<LiveWriteAck, AppError> {
     let in_out_flag = write::in_out_flag(direction);
     let segment = write::eq_band_segment(band_index);
-    // Read before sending: the merge must use the state as it was.
-    let current = if patch.filter_type.is_some() || patch.active.is_some() {
-        Some(current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)?.ok_or_else(|| {
-            AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index))
-        })?)
-    } else {
-        None
-    };
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    // Read before sending: the merge must use the state as it was. Always
+    // read, since Q's range depends on the band's filter type.
+    let band = current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)?.ok_or_else(|| {
+        AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index))
+    })?;
+    let label = format!("{} band {}", side_label(direction, channel_index), u32::from(band_index) + 1);
+    validation::check_eq_band_patch(&label, &patch, &band.patched(&patch), &limits.ranges)?;
+    let current = (patch.filter_type.is_some() || patch.active.is_some()).then_some(band);
 
     send_writes(&state, &device_id, |firmware| {
         let mut packets = Vec::new();
@@ -850,6 +920,14 @@ pub async fn live_control_set_crossover_slot(
 ) -> Result<LiveWriteAck, AppError> {
     let in_out_flag = write::in_out_flag(direction);
     let segment = write::crossover_segment(slot);
+    let limits = live_limits(&state, &device_id, channel_index)?;
+    if let Some(freq_hz) = patch.freq_hz {
+        let name = match slot {
+            CrossoverSlotKind::Hp => "HP",
+            CrossoverSlotKind::Lp => "LP",
+        };
+        validation::check_crossover_freq(&format!("{} {name}", side_label(direction, channel_index)), freq_hz, &limits.ranges)?;
+    }
     let current = if patch.filter_type.is_some() || patch.active.is_some() {
         Some(current_crossover_slot(&state, &device_id, channel_index, direction, slot)?.ok_or_else(|| {
             AppError::from(format!("device {} channel {} has no cached EQ state yet — try again shortly", device_id, channel_index))

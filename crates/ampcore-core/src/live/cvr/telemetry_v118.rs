@@ -97,7 +97,10 @@ fn parse_whole118_family(body: &[u8]) -> HeartFields {
             output_currents: read_floats(body, 36, 4),
             output_states: read_bytes(body, 52, 4),
             input_voltages: read_floats(body, 56, 4),
-            limiters: if body.len() >= 88 { read_floats(body, 72, 4) } else { vec![0.0; 4] },
+            // Empty, never `vec![0.0; 4]`: shorter bodies (the vendor's
+            // `Heart_Inf_Whole117`) carry no limiter array, and four zeros
+            // would read downstream as a real "not limiting" reading.
+            limiters: if body.len() >= 88 { read_floats(body, 72, 4) } else { Vec::new() },
             // Empty, never `vec![0; 4]`: the vendor's `InputChState` names 0
             // "Clip", so four fabricated zeros would read as every input
             // clipping on any firmware whose body stops short of this field.
@@ -210,6 +213,16 @@ mod tests {
         let parsed = parse_heartbeat_telemetry(&framed(&[0u8; WHOLE118_MINUS_INSTATES])).unwrap();
         assert!(parsed.input_states.is_empty());
         assert!(parsed.input_clipping.is_empty());
+    }
+
+    /// Same rule for the limiter array, which the 72-byte `Heart_Inf_Whole117`
+    /// doesn't have: no reading, rather than four "not limiting" zeros.
+    #[test]
+    fn body_without_limiters_reports_no_limiter_reading() {
+        let parsed = parse_heartbeat_telemetry(&framed(&[0u8; WHOLE117])).unwrap();
+        assert!(parsed.limiters.is_empty());
+        let parsed = parse_heartbeat_telemetry(&framed(&[0u8; WHOLE118])).unwrap();
+        assert_eq!(parsed.limiters.len(), 4);
     }
 
     #[test]

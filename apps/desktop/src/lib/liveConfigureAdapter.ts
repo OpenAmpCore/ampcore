@@ -32,8 +32,9 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
   return {
     channelIndex: config.channelIndex,
     ohms: config.loadOhms ?? 8,
-    // A channel always has a source. The 1.1.8/1.1.9 parsers always read one,
-    // so this fallback is unreachable today; it only keeps the type honest.
+    // A channel always has a source, and the 1.1.8/1.1.9 parsers decode every
+    // code (AES3 included, as a read-only kind), so this fallback is
+    // unreachable today; it only keeps the type honest.
     source: config.source ?? { kind: "analog", index: config.channelIndex },
     matrixCrosspoints: config.matrixCrosspoints,
     delayInMs: config.delayInMs ?? 0,
@@ -54,7 +55,9 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
     // the pair's single flag — the wire has one byte per pair, not per
     // channel.
     outputBridged: bridged,
-    powerMode: config.powerMode ?? "lowOhm",
+    // Left unset for a mode byte the decoder doesn't know, so the editor shows
+    // "Unknown" rather than a Low-Ω the amp never reported.
+    powerMode: config.powerMode ?? undefined,
     firBypassed: config.firBypassed,
     sourceTrims: {
       analog: { trimDb: config.analogTrimDb ?? 0, delayMs: config.analogDelayMs ?? 0 },
@@ -207,6 +210,9 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     },
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
+    },
+    async setChannelAmpGain(channelIndex, gainDb) {
+      return reportWrite("Set amp gain", commands.liveControlSetChannelAmpGain(deviceId, channelIndex, gainDb));
     },
     async setSourceTrim(channelIndex, kind, trimDb, delayMs) {
       return reportWrite(

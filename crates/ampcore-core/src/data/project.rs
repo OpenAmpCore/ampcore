@@ -100,6 +100,19 @@ pub struct EqBandPatch {
     pub active: Option<bool>,
 }
 
+impl EqBand {
+    /// `self` with `patch`'s set fields applied — what a band edit leaves.
+    pub fn patched(&self, patch: &EqBandPatch) -> EqBand {
+        EqBand {
+            filter_type: patch.filter_type.unwrap_or(self.filter_type),
+            freq_hz: patch.freq_hz.unwrap_or(self.freq_hz),
+            gain_db: patch.gain_db.unwrap_or(self.gain_db),
+            q: patch.q.unwrap_or(self.q),
+            active: patch.active.unwrap_or(self.active),
+        }
+    }
+}
+
 /// Partial update for a `CrossoverSlot` — same bundling rationale as
 /// `EqBandPatch`.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -162,6 +175,38 @@ pub struct LimiterPatch {
     pub peak_threshold_vp: Option<f64>,
     pub peak_hold_ms: Option<f64>,
     pub peak_release_ms: Option<f64>,
+}
+
+impl Limiter {
+    /// `self` with `patch`'s set fields applied — what a limiter edit leaves.
+    pub fn patched(&self, patch: &LimiterPatch) -> Limiter {
+        let mut out = *self;
+        if let Some(v) = patch.rms_enabled {
+            out.rms.enabled = v;
+        }
+        if let Some(v) = patch.rms_threshold_vrms {
+            out.rms.threshold_vrms = v;
+        }
+        if let Some(v) = patch.rms_attack_ms {
+            out.rms.attack_ms = v;
+        }
+        if let Some(v) = patch.rms_release_multiplier {
+            out.rms.release_multiplier = v;
+        }
+        if let Some(v) = patch.peak_enabled {
+            out.peak.enabled = v;
+        }
+        if let Some(v) = patch.peak_threshold_vp {
+            out.peak.threshold_vp = v;
+        }
+        if let Some(v) = patch.peak_hold_ms {
+            out.peak.hold_ms = v;
+        }
+        if let Some(v) = patch.peak_release_ms {
+            out.peak.release_ms = v;
+        }
+        out
+    }
 }
 
 /// One trim + delay pair for a single input source kind.
@@ -464,13 +509,16 @@ pub struct Project {
     pub speakers: Vec<ProjectSpeaker>,
 }
 
-/// A version stamp only — nothing reads it to gate behavior. There are no
-/// released builds yet, so there is no old-file compatibility to preserve and
-/// no migration functions exist; a struct change that would otherwise break
-/// deserialization is just made directly. New fields still need
-/// `#[serde(default = ...)]` (see this file's module doc) purely so a
-/// project file saved earlier this session keeps loading after a field is
-/// added mid-development, not for any long-term compatibility guarantee.
+/// The project file format. Released builds have saved projects in users'
+/// data folders, so every change must keep those files loading:
+/// - **Adding a field**: give it `#[serde(default = ...)]` and bump this. An
+///   older file then deserializes as it is.
+/// - **Renaming, removing or reinterpreting a field**: bump this *and* add a
+///   step rewriting the raw JSON in the desktop store's `parse_project_value`,
+///   the one place a project file is read.
+///
+/// A file stamped higher than this was written by a newer build and is
+/// refused, not loaded and re-saved without what this build doesn't know.
 ///
 /// 3: `AmpChannel.fir` — absent in older files, which backfills to a unit
 /// impulse (no filter loaded).
@@ -586,6 +634,26 @@ impl AmpAssignment {
             reconcile_bands(&mut channel.output_eq.bands, target);
         }
     }
+
+    /// Caps every channel's limiter thresholds to what the assigned model can
+    /// take (`validation::limiter_ceiling`: the amp's own reported maxima,
+    /// else the model's rated voltage), keeping peak on or above its √2 × RMS
+    /// floor. Called when an amp is added and whenever its model changes, so
+    /// a planned threshold never sits above the new model's output. Thresholds
+    /// are only ever lowered: a bigger model leaves them where they were.
+    pub fn fit_limiters(&mut self, rated_rms_voltage: Option<f64>, ranges: &super::capability::cvr::AmpParamRanges) {
+        for channel in &mut self.channels {
+            let ceiling = super::validation::limiter_ceiling(&channel.limiter, rated_rms_voltage, ranges);
+            let limiter = &mut channel.limiter;
+            limiter.rms.threshold_vrms = limiter.rms.threshold_vrms.min(ceiling.rms_vrms);
+            limiter.peak.threshold_vp = limiter
+                .peak
+                .threshold_vp
+                .min(ceiling.peak_vp)
+                .max(limiter.rms.threshold_vrms * std::f64::consts::SQRT_2)
+                .min(ceiling.peak_vp);
+        }
+    }
 }
 
 fn new_channel(channel_index: u32) -> AmpChannel {
@@ -625,7 +693,10 @@ fn default_power_mode() -> PowerMode {
 }
 
 /// Both stages disabled by default, with in-range starting values so the
-/// Limiter sub-tab never opens showing an out-of-range number.
+/// Limiter sub-tab never opens showing an out-of-range number. Peak sits on
+/// the √2 × RMS floor every limiter editor keeps. 100 Vrms is above smaller
+/// models' rated output, so `AmpAssignment::fit_limiters` then caps both to
+/// the assigned model.
 fn default_limiter() -> Limiter {
     Limiter {
         rms: RmsLimiter {
@@ -636,7 +707,13 @@ fn default_limiter() -> Limiter {
             auto: false,
             max_vrms: 0.0,
         },
-        peak: PeakLimiter { enabled: false, threshold_vp: 140.0, hold_ms: 10.0, release_ms: 50.0, max_vp: 0.0 },
+        peak: PeakLimiter {
+            enabled: false,
+            threshold_vp: 100.0 * std::f64::consts::SQRT_2,
+            hold_ms: 10.0,
+            release_ms: 50.0,
+            max_vp: 0.0,
+        },
     }
 }
 

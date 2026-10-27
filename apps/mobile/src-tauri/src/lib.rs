@@ -17,7 +17,23 @@ use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FI
 use ampcore_core::live::cvr::{preset, write};
 use ampcore_core::live::cvr::request::WriteOutcome;
 use ampcore_core::live::state::{DiscoveredDevice, EventEmitter, LiveDeviceState, LiveEvent, LiveEventSink, LiveWriteAck};
-use ampcore_core::live::write_helpers::{self, send_write, WriteTally};
+use ampcore_core::data::validation;
+use ampcore_core::live::write_helpers::{self, live_limits, send_write, WriteTally};
+
+/// `value` against one of the amp's ranges (`validation::check_range`),
+/// picked by `range`. Refuses a channel the amp doesn't have, too.
+fn check(
+    state: &LiveDeviceState,
+    device_id: &str,
+    channel_index: u8,
+    label: &str,
+    unit: &str,
+    value: f32,
+    range: impl FnOnce(&AmpParamRanges) -> ampcore_core::data::capability::ParamRange,
+) -> Result<(), String> {
+    let limits = live_limits(state, device_id, channel_index).map_err(|e| e.message)?;
+    validation::check_range(label, unit, f64::from(value), range(&limits.ranges))
+}
 
 /// Forwards everything the mobile screens read; bridge state is never consumed.
 struct MobileEmitter(AppHandle);
@@ -103,21 +119,25 @@ async fn set_input_mute(
 
 #[tauri::command]
 async fn set_output_volume(state: State<'_, LiveDeviceState>, device_id: String, channel_index: u8, db: f32) -> Result<LiveWriteAck, String> {
+    check(&state, &device_id, channel_index, "Output volume", " dB", db, |r| r.output_volume_db)?;
     send_write(&state, &device_id, |fw| write::build_set_output_volume(fw, channel_index, db)).await.map(ack).map_err(|e| e.message)
 }
 
 #[tauri::command]
 async fn set_output_trim(state: State<'_, LiveDeviceState>, device_id: String, channel_index: u8, db: f32) -> Result<LiveWriteAck, String> {
+    check(&state, &device_id, channel_index, "Output trim", " dB", db, |r| r.output_trim_db)?;
     send_write(&state, &device_id, |fw| write::build_set_output_trim(fw, channel_index, db)).await.map(ack).map_err(|e| e.message)
 }
 
 #[tauri::command]
 async fn set_output_delay(state: State<'_, LiveDeviceState>, device_id: String, channel_index: u8, ms: f32) -> Result<LiveWriteAck, String> {
+    check(&state, &device_id, channel_index, "Output delay", " ms", ms, |r| r.delay_out_ms)?;
     send_write(&state, &device_id, |fw| write::build_set_delay_out(fw, channel_index, ms)).await.map(ack).map_err(|e| e.message)
 }
 
 #[tauri::command]
 async fn set_input_delay(state: State<'_, LiveDeviceState>, device_id: String, channel_index: u8, ms: f32) -> Result<LiveWriteAck, String> {
+    check(&state, &device_id, channel_index, "Input delay", " ms", ms, |r| r.delay_in_ms)?;
     send_write(&state, &device_id, |fw| write::build_set_delay_in(fw, channel_index, ms)).await.map(ack).map_err(|e| e.message)
 }
 
@@ -179,10 +199,14 @@ async fn set_eq_band(
     let segment = write::eq_band_segment(band_index);
     let mut tally = WriteTally::default();
 
+    // Always read: Q's range depends on the band's filter type.
+    let current = write_helpers::current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)
+        .map_err(|e| e.message)?
+        .ok_or_else(|| format!("channel {channel_index} has no EQ data yet — try again shortly"))?;
+    let limits = live_limits(&state, &device_id, channel_index).map_err(|e| e.message)?;
+    validation::check_eq_band_patch(&format!("Band {}", band_index + 1), &patch, &current.patched(&patch), &limits.ranges)?;
+
     if patch.filter_type.is_some() || patch.active.is_some() {
-        let current = write_helpers::current_eq_band(&state, &device_id, channel_index, direction, band_index as usize)
-            .map_err(|e| e.message)?
-            .ok_or_else(|| format!("channel {channel_index} has no EQ data yet — try again shortly"))?;
         let type_code = eq_filter_type_code(patch.filter_type.unwrap_or(current.filter_type));
         let active = patch.active.unwrap_or(current.active);
         send_write(&state, &device_id, |fw| write::build_set_eq_filter_type(fw, channel_index, flag, segment, type_code, active))
@@ -234,6 +258,10 @@ async fn set_crossover_slot(
     let segment = write::crossover_segment(slot);
     let mut tally = WriteTally::default();
     let mut wrote_anything = false;
+    if let Some(freq_hz) = patch.freq_hz {
+        let limits = live_limits(&state, &device_id, channel_index).map_err(|e| e.message)?;
+        validation::check_crossover_freq("Crossover", freq_hz, &limits.ranges)?;
+    }
 
     if patch.filter_type.is_some() || patch.active.is_some() {
         let current = write_helpers::current_crossover_slot(&state, &device_id, channel_index, direction, slot)
@@ -282,6 +310,8 @@ async fn set_limiter(
     patch: LimiterPatch,
 ) -> Result<LiveWriteAck, String> {
     let channel = write_helpers::current_channel(&state, &device_id, channel_index).map_err(|e| e.message)?;
+    let limits = live_limits(&state, &device_id, channel_index).map_err(|e| e.message)?;
+    validation::check_limiter_patch(&patch, &channel.limiter.patched(&patch), limits.limiter_ceiling(&channel.limiter), &limits.ranges)?;
     let mut tally = WriteTally::default();
 
     if let Some((enabled, threshold_vrms, attack_ms, release_multiplier)) = write_helpers::merge_rms(&patch, &channel.limiter.rms) {
@@ -313,6 +343,9 @@ async fn set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<LiveWriteAck, String> {
+    if let Some(gain_db) = gain_db {
+        check(&state, &device_id, channel_index, "Matrix gain", " dB", gain_db as f32, |r| r.matrix_gain_db)?;
+    }
     let channel = write_helpers::current_channel(&state, &device_id, channel_index).map_err(|e| e.message)?;
     let existing = channel
         .matrix_crosspoints
