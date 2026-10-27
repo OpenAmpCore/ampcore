@@ -12,6 +12,8 @@ import {
 import { AMP_LINK_STATUS_META, ampLinkStatus, linkedDeviceFor } from "../lib/ampLinkStatus";
 import { useIsCompact, useIsTight } from "../lib/breakpoints";
 import { useDetectedModels } from "./AmpLivePicker";
+import { ScanStatus } from "./ScanStatus";
+import { useScanTimeout } from "../hooks/useScanTimeout";
 
 interface AmpLinkModalProps {
   project: Project;
@@ -180,6 +182,8 @@ export function AmpLinkModal({
   const status = AMP_LINK_STATUS_META[assignment ? ampLinkStatus(assignment, devices) : "unlinked"];
   const linkedDevice = assignment ? linkedDeviceFor(assignment, devices) : undefined;
   const detectedModels = useDetectedModels(devices, assignment !== null);
+  // `false` while closed: this dialog stays mounted, and each open should scan afresh.
+  const scan = useScanTimeout(assignment !== null && devicesReady && devices.length === 0);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [validation, setValidation] = useState<{ deviceId: string; result: AmpLinkValidation } | null>(null);
@@ -340,10 +344,16 @@ export function AmpLinkModal({
                     className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--amp-color-default-border)]"
                     style={{ minHeight: 140 }}
                   >
-                    <Spinner size="sm" />
-                    <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)", textAlign: "center" }}>
-                      {devicesReady ? "Scanning the network…" : "Starting discovery…"}
-                    </span>
+                    <ScanStatus
+                      timedOut={scan.timedOut}
+                      spinner
+                      scanning={
+                        <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)" }}>
+                          {devicesReady ? "Scanning the network…" : "Starting discovery…"}
+                        </span>
+                      }
+                      onScanAgain={scan.scanAgain}
+                    />
                   </div>
                 ) : (
                   <div className="overflow-y-auto" style={{ maxHeight: compact ? undefined : 360 }}>

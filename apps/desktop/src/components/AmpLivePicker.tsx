@@ -3,7 +3,9 @@ import { Button, Chip, Spinner } from "@heroui/react";
 import { Check, Server } from "lucide-react";
 import { commands, type AmpModelCatalogEntry, type DiscoveredDevice, type Project } from "../lib/bindings";
 import { normalizeMac } from "../lib/ampLinkStatus";
+import { useScanTimeout } from "../hooks/useScanTimeout";
 import { MUTED } from "./SpeakerBench";
+import { ScanStatus } from "./ScanStatus";
 
 /** Catalog model per discovered device id, resolved exactly like Live Control's
  * model select (`deviceModelLinkAutoMatch`: a manual pick wins, otherwise the
@@ -69,6 +71,7 @@ export function AmpLivePicker({
   const candidates = unlinkedDevices(project, devices);
   const models = useDetectedModels(candidates, true);
   const rows = batch ?? candidates;
+  const scan = useScanTimeout(rows.length === 0);
   const running = Object.values(steps).some((s) => s.state === "adding" || s.state === "reading");
 
   /** Why a device can't be added; `null` when it can. */
@@ -114,10 +117,19 @@ export function AmpLivePicker({
   }
 
   if (rows.length === 0) {
+    // Discovery did find amps, just none this project can take, so the
+    // network hint would send the user after the wrong problem.
+    const allTaken = devices.length > 0;
     return (
       <div className="flex min-h-[420px] flex-col items-center justify-center gap-2">
-        <Spinner size="sm" />
-        <span className={MUTED}>No unlinked amps found on the network yet. Still looking…</span>
+        <ScanStatus
+          timedOut={scan.timedOut}
+          spinner
+          scanning={<span className={MUTED}>No unlinked amps found on the network yet. Still looking…</span>}
+          title={allTaken ? "No amps to add" : undefined}
+          hint={allTaken ? "Every amp found on the network is offline or already in this project." : undefined}
+          onScanAgain={scan.scanAgain}
+        />
       </div>
     );
   }

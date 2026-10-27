@@ -13,6 +13,17 @@ type CommitNumberInputProps = {
   /** Opt-in up/down arrows. Off by default so existing callers keep the
    * plain field — see the stepper note in the component doc. */
   showStepper?: boolean;
+  /** Whole numbers only: a committed value is rounded — before clamping, so
+   * the result still respects `min`/`max` — and touch keyboards get a
+   * digits-only pad. */
+  integer?: boolean;
+  disabled?: boolean;
+  /** How a number is shown in the field. Pass the same rounding the caller
+   * applies to `value`, so a committed number is shown at that precision
+   * rather than as typed. */
+  format?: (value: number) => string;
+  /** For a field with no visible `<label>` of its own. */
+  "aria-label"?: string;
   /** Called once per committed edit, never per keystroke. */
   onCommit: (value: number) => void;
 };
@@ -64,9 +75,13 @@ export function CommitNumberInput({
   suffix,
   className,
   showStepper,
+  integer,
+  disabled,
+  format = String,
+  "aria-label": ariaLabel,
   onCommit,
 }: CommitNumberInputProps) {
-  const [draft, setDraft] = useState<string>(String(value));
+  const [draft, setDraft] = useState<string>(format(value));
   const focused = useRef(false);
   const cancelled = useRef(false);
   const stepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -82,7 +97,7 @@ export function CommitNumberInput({
   // this guard the ~200ms config poll would overwrite whatever the user is
   // halfway through typing — or has just stepped but not yet committed.
   useEffect(() => {
-    if (!focused.current && stepTimer.current === null) setDraft(String(value));
+    if (!focused.current && stepTimer.current === null) setDraft(format(value));
   }, [value]);
 
   useEffect(() => clearStepTimer, []);
@@ -91,15 +106,26 @@ export function CommitNumberInput({
 
   const commit = () => {
     clearStepTimer();
-    const next = Number.parseFloat(draft);
+    // The shown text left as is (or typed back) is not an edit. Comparing the
+    // parsed number instead would write on every blur for a value sitting on
+    // an un-round bound: the shown, rounded figure clamps back to the exact
+    // bound, which never equals it (Peak's floor is Vrms·√2).
+    if (draft === format(value)) return;
+    const parsed = Number.parseFloat(draft);
+    const next = integer ? Math.round(parsed) : parsed;
     if (Number.isFinite(next)) {
       const clamped = clamp(next);
       if (clamped !== value) {
         onCommit(clamped);
+        // Show what was sent, not what was typed. The re-sync above only runs
+        // when `value` changes, and committing a bound the field already sits
+        // at (a too-low entry clamped to the same floor again) leaves it
+        // unchanged — so without this the typed text would stay up for good.
+        setDraft(format(clamped));
         return;
       }
     }
-    setDraft(String(value));
+    setDraft(format(value));
   };
 
   const nudge = (direction: 1 | -1) => {
@@ -107,7 +133,7 @@ export function CommitNumberInput({
     const parsed = Number.parseFloat(draft);
     const base = Number.isFinite(parsed) ? parsed : value;
     const next = clamp(Number((base + direction * increment).toFixed(decimalsOf(increment))));
-    setDraft(String(next));
+    setDraft(format(next));
     clearStepTimer();
     stepTimer.current = setTimeout(() => {
       stepTimer.current = null;
@@ -131,8 +157,10 @@ export function CommitNumberInput({
     <div className="relative">
       <input
         type="text"
-        inputMode="decimal"
+        inputMode={integer ? "numeric" : "decimal"}
+        aria-label={ariaLabel}
         value={draft}
+        disabled={disabled}
         step={step}
         className={`${FIELD_INPUT} ${className ?? ""}`}
         style={{ paddingRight: suffix || showStepper ? `${(suffix?.length ?? 0) * 7 + 12 + stepperWidth}px` : undefined }}
@@ -140,11 +168,16 @@ export function CommitNumberInput({
         onFocus={() => {
           focused.current = true;
         }}
-        onBlur={() => {
+        onBlur={(event) => {
           focused.current = false;
-          if (cancelled.current) {
+          // A field disabled while focused (say, a poll turned its limiter
+          // stage off mid-edit) gets blurred by the browser's focus fix-up —
+          // WKWebView and Chromium both do it. Committing then would send a
+          // half-typed draft, so treat it like Escape.
+          if (cancelled.current || event.currentTarget.disabled) {
             cancelled.current = false;
-            setDraft(String(value));
+            clearStepTimer();
+            setDraft(format(value));
             return;
           }
           commit();
@@ -171,6 +204,7 @@ export function CommitNumberInput({
               key={direction}
               type="button"
               tabIndex={-1}
+              disabled={disabled}
               aria-label={direction === 1 ? "Increase" : "Decrease"}
               // Keeps focus (and therefore the draft) in the input: letting
               // the button take focus would blur-commit the typed value and

@@ -3,9 +3,11 @@ import { Button, ButtonGroup, Card, Chip, Spinner } from "@heroui/react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { SimpleSelect } from "./SimpleSelect";
 import { DeviceTelemetryPanel } from "./DeviceTelemetryPanel";
+import { ScanStatus } from "./ScanStatus";
 import { useLiveDevices } from "../hooks/useLiveDevices";
 import { useLiveDriver } from "../hooks/useLiveDriver";
 import { useLivePolling } from "../hooks/useLivePolling";
+import { useScanTimeout } from "../hooks/useScanTimeout";
 import { useLiveChannelConfig, useLiveTelemetry } from "../hooks/useLiveMap";
 import { commands, type AmpModelCatalogEntry, type DiscoveredDevice } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
@@ -63,6 +65,9 @@ function useDeviceModelLink(device: DiscoveredDevice | null) {
 export function LiveControlView() {
   const compact = useIsCompact();
   const { devices, ready } = useLiveDevices();
+  // One timer for every "nothing found" spot below — rail, main pane and the
+  // compact select — so they can never disagree about whether we gave up.
+  const scan = useScanTimeout(ready && devices.length === 0);
   const telemetryById = useLiveTelemetry();
   const channelConfigById = useLiveChannelConfig();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -139,9 +144,15 @@ export function LiveControlView() {
     )
   ) : (
     <div className="flex h-full items-center justify-center p-4">
-      <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>
-        {devices.length === 0 ? "Scanning for amplifiers on the network…" : "Select an amp from the list"}
-      </span>
+      {devices.length === 0 ? (
+        <ScanStatus
+          timedOut={scan.timedOut}
+          scanning={<span style={{ color: "var(--amp-color-dimmed)" }}>Scanning for amplifiers on the network…</span>}
+          onScanAgain={scan.scanAgain}
+        />
+      ) : (
+        <span style={{ color: "var(--amp-color-dimmed)", textAlign: "center" }}>Select an amp from the list</span>
+      )}
     </div>
   );
 
@@ -166,8 +177,9 @@ export function LiveControlView() {
 
             {devices.length === 0 ? (
               <div className="flex flex-1 items-center justify-center">
+                {/* Text only: Scan again lives in the main pane right beside it. */}
                 <span style={{ color: "var(--amp-color-dimmed)", fontSize: "var(--amp-font-size-sm)", textAlign: "center" }}>
-                  Scanning for amplifiers on the network…
+                  {scan.timedOut ? "No amps found" : "Scanning for amplifiers on the network…"}
                 </span>
               </div>
             ) : (
@@ -219,7 +231,7 @@ export function LiveControlView() {
                 <SimpleSelect
                   className="min-w-0"
                   style={{ flex: "1 1 160px" }}
-                  placeholder={devices.length === 0 ? "Scanning…" : "Discovered amps…"}
+                  placeholder={devices.length === 0 ? (scan.timedOut ? "No amps found" : "Scanning…") : "Discovered amps…"}
                   data={devices.map((d) => ({
                     value: d.id,
                     label: `${d.name || d.mac}${d.online ? "" : " (offline)"}`,

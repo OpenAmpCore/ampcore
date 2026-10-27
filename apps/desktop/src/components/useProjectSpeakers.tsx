@@ -15,6 +15,7 @@ import { usePreference } from "../lib/preferences";
 import { useSpeakerLibrary } from "../lib/speakers";
 import { useConfirm } from "./ConfirmDialog";
 import { MUTED, outputRows } from "./SpeakerBench";
+import { CommitNumberInput } from "./CommitNumberInput";
 import { FIELD_INPUT } from "./fieldClasses";
 import { bridgeConfirm, confirmFit } from "./speakerApply";
 
@@ -314,25 +315,62 @@ type Level = (typeof LEVELS)[number]["key"];
 const MAX_QUANTITY = 32;
 const MAX_PARALLEL = 8;
 
-/** A whole number from 1 to `max`: −, the value, +. */
+/** A whole number from 1 to `max`: −, the value, +. The field commits on
+ * blur or Enter like every other number field (`CommitNumberInput`); parsing
+ * each keystroke made it impossible to clear — "" became 1 — so typing 12
+ * over it gave 112, clamped to the max. */
 function Stepper({ label, hint, value, max, onChange }: { label: string; hint?: string; value: number; max: number; onChange: (value: number) => void }) {
+  // The number being typed, as the field will commit it. A press on −/+ blurs
+  // the field first, committing that, then steps from it — so the buttons go
+  // by this, not the stale `value`. (Disabling by `value` dropped a press at a
+  // bound: at 1, typing 12 and clicking − hit a button still disabled at
+  // pointerdown.) Matching the commit exactly — round, clamp, nothing when
+  // unparseable — means no button's disabled state flips at the blur, so
+  // focus never lands on a button that is then disabled under it. Every edit
+  // ends in a blur (Enter and Escape blur too), which drops it.
+  const [typed, setTyped] = useState<number | null>(null);
+  const shown = typed ?? value;
   return (
     <div className="flex flex-col gap-1">
       <span className={MUTED}>{label}</span>
-      <div className="flex items-center gap-1">
-        <Button size="sm" variant="secondary" isIconOnly aria-label={`Fewer (${label})`} isDisabled={value <= 1} onPress={() => onChange(value - 1)}>
+      <div
+        className="flex items-center gap-1"
+        onChange={(e) => {
+          if (!(e.target instanceof HTMLInputElement)) return;
+          const n = Math.round(Number.parseFloat(e.target.value));
+          setTyped(Number.isFinite(n) ? Math.min(max, Math.max(1, n)) : null);
+        }}
+        onBlur={(e) => {
+          if (e.target instanceof HTMLInputElement) setTyped(null);
+        }}
+      >
+        <Button
+          size="sm"
+          variant="secondary"
+          isIconOnly
+          aria-label={`Fewer (${label})`}
+          isDisabled={shown <= 1}
+          onPress={() => onChange(Math.max(1, value - 1))}
+        >
           <Minus size={14} />
         </Button>
-        <input
-          type="number"
+        <CommitNumberInput
           aria-label={label}
+          integer
           min={1}
           max={max}
-          className={`${FIELD_INPUT} w-14 text-center`}
+          className="w-14 text-center"
           value={value}
-          onChange={(e) => onChange(Math.min(max, Math.max(1, Math.round(Number(e.currentTarget.value)) || 1)))}
+          onCommit={onChange}
         />
-        <Button size="sm" variant="secondary" isIconOnly aria-label={`More (${label})`} isDisabled={value >= max} onPress={() => onChange(value + 1)}>
+        <Button
+          size="sm"
+          variant="secondary"
+          isIconOnly
+          aria-label={`More (${label})`}
+          isDisabled={shown >= max}
+          onPress={() => onChange(Math.min(max, value + 1))}
+        >
           <Plus size={14} />
         </Button>
       </div>
