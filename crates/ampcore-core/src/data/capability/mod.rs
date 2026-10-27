@@ -196,3 +196,21 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
         AmpProtocol::CvrUdp => cvr::resolve(model, firmware_version),
     }
 }
+
+/// What a discovered amp takes, known from what it reports about itself —
+/// the counterpart of `AmpCapability` for live writes, which have no catalog
+/// model to resolve against.
+#[derive(Debug, Clone)]
+pub struct LiveCapability {
+    pub firmware: cvr::CvrFirmwareCapability,
+    /// Its ranges and, when the amp's identity names it, its rated voltage.
+    pub limits: super::validation::AmpLimits,
+}
+
+/// `resolve()` for a live amp: the same per-protocol seam, fed by the
+/// firmware string the amp reported instead of a project assignment.
+pub fn resolve_live(protocol: AmpProtocol, firmware_version: &str) -> LiveCapability {
+    match protocol {
+        AmpProtocol::CvrUdp => cvr::resolve_live(firmware_version),
+    }
+}

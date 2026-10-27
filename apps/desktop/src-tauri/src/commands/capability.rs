@@ -1,7 +1,7 @@
 use tauri::State;
 
 use ampcore_core::data::capability::{resolve, AmpCapability};
-use ampcore_core::data::filter_response::{response_curve, EqStageRef, ResponsePoint, DEFAULT_CURVE_POINTS};
+use ampcore_core::data::filter_response::{fir_response_curve as fir_curve, response_curves, EqStageRef, ResponseCurves, ResponsePoint, DEFAULT_CURVE_POINTS};
 use ampcore_core::data::project::ChannelEq;
 use crate::data::store::ProjectDataState;
 use ampcore_core::error::AppError;
@@ -26,11 +26,21 @@ pub fn amp_capability_resolve(
     Ok(resolve(model, firmware_version.as_deref()))
 }
 
-/// Magnitude response of one EQ chain for the EQ graph — the whole chain, or
-/// one stage isolated. Pure math over the passed-in values (a live preview of
-/// an uncommitted drag included), shared with the mobile app via core.
+/// Magnitude response of one EQ chain for the EQ graph — the whole chain, and
+/// one stage isolated when `stage` is given. Pure math over the passed-in
+/// values (a live preview of an uncommitted drag included), shared with the
+/// mobile app via core. `async` so it runs off the main thread: a drag asks
+/// for it every frame.
 #[tauri::command]
 #[specta::specta]
-pub fn eq_response_curve(eq: ChannelEq, stage: Option<EqStageRef>, points: Option<u32>) -> Vec<ResponsePoint> {
-    response_curve(&eq, stage, points.unwrap_or(DEFAULT_CURVE_POINTS))
+pub async fn eq_response_curves(eq: ChannelEq, stage: Option<EqStageRef>, points: Option<u32>) -> ResponseCurves {
+    response_curves(&eq, stage, points.unwrap_or(DEFAULT_CURVE_POINTS))
+}
+
+/// Magnitude response of an FIR filter's taps, on the EQ curve's frequency
+/// axis, floored at `floor_db`.
+#[tauri::command]
+#[specta::specta]
+pub async fn fir_response_curve(taps: Vec<f64>, sample_rate_hz: f64, floor_db: f64, points: Option<u32>) -> Vec<ResponsePoint> {
+    fir_curve(&taps, sample_rate_hz, floor_db, points.unwrap_or(DEFAULT_CURVE_POINTS))
 }

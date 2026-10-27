@@ -1,24 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Dropdown, Tooltip, dropdownVariants } from "@heroui/react";
-import {
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  ResponsiveContainer,
-  Tooltip as ChartTooltip,
-  usePlotArea,
-  useXAxisInverseScale,
-  useXAxisScale,
-  useYAxisInverseScale,
-  useYAxisScale,
-  XAxis,
-  YAxis,
-  ZIndexLayer,
-} from "recharts";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Switch } from "@heroui/react";
+import { Power, RotateCcw } from "lucide-react";
 import { ClipboardButtons } from "./ClipboardButtons";
-import { CommitNumberInput } from "./CommitNumberInput";
+import { CommitNumberInput, STEP_COMMIT_DELAY_MS, stepSizeOf, stepped } from "./CommitNumberInput";
+import { useContextMenu } from "./ContextMenu";
+import { formatDb, FrequencyPlot, pathD, toPlotPoints, type PlotAxis, type PlotCurve, type PlotScale } from "./FrequencyPlot";
 import { SimpleSelect } from "./SimpleSelect";
-import { useResponseCurves, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
+import { checkAgainstCore, responseCurve } from "../lib/eqResponse";
+import type { EqStageRef, ResponsePoint } from "../lib/filterResponse";
 import {
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
@@ -30,6 +19,8 @@ import {
   type ParamRange,
 } from "../lib/bindings";
 import type { ConfigureActions } from "../lib/configureActions";
+import { ACTION_UNAVAILABLE, type ActionResult } from "../lib/actionResult";
+import { outputLetter } from "../lib/channelTelemetry";
 
 /** What one filter type exposes: gain and/or Q, and a Q range narrower than
  * `paramRanges.eqBandQ` where the type has one (shelves — see
@@ -108,25 +99,21 @@ const CROSSOVER_FILTER_OPTIONS = (Object.keys(CROSSOVER_FILTER_LABELS) as Crosso
   label: CROSSOVER_FILTER_LABELS[value],
 }));
 
-const DROPDOWN_SLOTS = dropdownVariants();
-/** Narrowest a band/crossover column can get before its inputs stop being
- * readable — the strip scrolls horizontally rather than going below it. */
-const STRIP_MIN_WIDTH = 96;
 const GRAPH_MIN_DB = -24;
 const GRAPH_MAX_DB = 24;
 const GRAPH_MIN_HZ = 20;
 const GRAPH_MAX_HZ = 20000;
-const GRAPH_FREQ_TICKS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-/** Space the chart reserves around its plot area: the y-axis labels on the
- * left, the x-axis labels at the bottom, a little air on top and right. */
-const PLOT_LEFT = 32;
-const PLOT_BOTTOM = 20;
-const PLOT_TOP = 22;
-const PLOT_RIGHT = 8;
-/** Dashed minor grid lines every 2 dB; the solid major ones sit on the ticks. */
-const GRAPH_DB_MINOR = Array.from({ length: 25 }, (_, i) => -24 + i * 2).filter((db) => db % 6 !== 0);
-const GRAPH_DB_TICKS = [-24, -18, -12, -6, 0, 6, 12, 18, 24];
+/** ±24 dB, labelled every 6, a dashed line every 2. */
+const EQ_DB_AXIS: PlotAxis = {
+  min: GRAPH_MIN_DB,
+  max: GRAPH_MAX_DB,
+  ticks: [-24, -18, -12, -6, 0, 6, 12, 18, 24],
+  minorTicks: Array.from({ length: 25 }, (_, i) => -24 + i * 2).filter((db) => db % 6 !== 0),
+  format: formatDb,
+};
 const LOG_HZ_SPAN = Math.log10(GRAPH_MAX_HZ) - Math.log10(GRAPH_MIN_HZ);
+const GRAPH_HZ = { min: GRAPH_MIN_HZ, max: GRAPH_MAX_HZ };
+const GRAPH_DB = { min: GRAPH_MIN_DB, max: GRAPH_MAX_DB };
 
 /** Q-drag pixel-to-Q sensitivity — ported from the old app's
  * `cvr-amp-controller-web` reference (`qDirection * deltaClientX * 0.02`),
@@ -138,17 +125,13 @@ const LOG_HZ_SPAN = Math.log10(GRAPH_MAX_HZ) - Math.log10(GRAPH_MIN_HZ);
  * 0.02 * (1000 / 800) = 0.025. */
 const Q_DRAG_SENSITIVITY = 0.025;
 
-/** Converts a pointer event's client coordinates into the chart SVG's own
- * coordinate space (the one Recharts' scales and the handles use). */
+/** Converts a pointer event's client coordinates into the plot SVG's own
+ * coordinate space (the one its scale and the handles use). */
 function toViewBoxPoint(svg: SVGSVGElement, clientX: number, clientY: number): { x: number; y: number } {
   const ctm = svg.getScreenCTM();
   if (!ctm) return { x: 0, y: 0 };
   const point = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
   return { x: point.x, y: point.y };
-}
-
-function freqLabel(hz: number): string {
-  return hz >= 1000 ? `${hz / 1000}k` : String(hz);
 }
 
 /** Which of the 10 stages a `ref` and `b` name are the same one — `null`
@@ -162,6 +145,25 @@ function sameStage(a: EqStageRef | null, b: EqStageRef | null): boolean {
 
 function stageKey(ref: EqStageRef): string {
   return ref.kind === "band" ? `band-${ref.bandIndex}` : ref.kind;
+}
+
+/** HP is 0, bands 1-8, LP 9 — the position in the chain and in the strip. */
+function stageIndex(ref: EqStageRef): number {
+  return ref.kind === "hp" ? 0 : ref.kind === "lp" ? 9 : ref.bandIndex + 1;
+}
+
+/** The stage's own colour (`--amp-band-*`): its handle, isolated curve and tile. */
+function stageColor(ref: EqStageRef): string {
+  return `var(--amp-band-${stageIndex(ref)})`;
+}
+
+function stageName(ref: EqStageRef): string {
+  return ref.kind === "band" ? `Band ${ref.bandIndex + 1}` : ref.kind.toUpperCase();
+}
+
+/** HP, every band, LP — the chain in order. */
+function stagesOf(eq: ChannelEq): EqStageRef[] {
+  return [{ kind: "hp" }, ...eq.bands.map((_, i) => ({ kind: "band", bandIndex: i }) as const), { kind: "lp" }];
 }
 
 /** Resolved, always-defined view of one stage — coalesces `EqBand`'s/
@@ -222,6 +224,32 @@ function applyPreview(eq: ChannelEq, preview: { ref: EqStageRef; patch: PreviewP
   return ref.kind === "hp" ? { ...eq, hp: nextSlot } : { ...eq, lp: nextSlot };
 }
 
+/** Where a stage's last freq/gain/Q write stands: in flight, acknowledged
+ * (shown green for a moment), or refused (shown red for a moment). */
+type WriteStatus = "pending" | "ok" | "fail";
+
+/** A written patch held on screen from the moment it is sent until the amp's
+ * own reading agrees with it (or `WRITE_HOLD_MS` passes), so the point never
+ * falls back to the old value while the write and the next poll are on
+ * their way. */
+type StageWrite = { ref: EqStageRef; patch: PreviewPatch; acked: boolean; token: number };
+
+const WRITE_HOLD_MS = 3000;
+/** A curve or ring easing back from a result flash to its own colour. */
+const CURVE_EASE = "transition-[stroke] duration-500";
+const WRITE_FLASH_MS = 700;
+
+/** The amp's reading matches what was written — f32 read-back included. */
+function writeConfirmed(eq: ChannelEq, write: StageWrite, capsByType: Record<EqFilterType, FilterCaps>): boolean {
+  const info = stageInfo(eq, write.ref, capsByType);
+  const { freqHz, gainDb, q } = write.patch;
+  return (
+    (freqHz === undefined || Math.abs(info.freqHz - freqHz) <= 0.5) &&
+    (gainDb === undefined || Math.abs(info.gainDb - gainDb) <= 0.05) &&
+    (q === undefined || Math.abs(info.q - q) <= 0.005)
+  );
+}
+
 function roundFreq(hz: number): number {
   return Math.round(hz);
 }
@@ -240,154 +268,152 @@ function clampToRange(value: number, range: { min: number | null; max: number | 
 
 type DragMode = "xy" | "x" | "y" | "qLeft" | "qRight";
 
+/** How much of the pointer's movement a drag follows while Shift is held. */
+const FINE_DRAG_SCALE = 0.25;
+
+/** A drag measures the pointer's movement from an anchor — where it began,
+ * or where Shift was last pressed or released, so switching to fine never
+ * makes the point jump. */
 type DragState = {
   pointerId: number;
   ref: EqStageRef;
   mode: DragMode;
+  fine: boolean;
   startClientX: number;
   startViewX: number;
   startViewY: number;
   startFreqHz: number;
   startGainDb: number;
   startQ: number;
+  /** The elements a drag writes to directly, and where the handle was drawn. */
+  els: { body: SVGGElement | null; q: SVGGElement[]; total: SVGPathElement | null; stage: SVGPathElement | null };
+  baseCx: number;
+  baseCy: number;
+  last: PreviewPatch | null;
 };
-
-/** One row of the chart: the whole chain's response and, when a stage is
- * selected, that stage on its own. */
-type GraphRow = { f: number; total: number; stage: number | null };
 
 function freqText(hz: number): string {
   return hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${Math.round(hz)} Hz`;
 }
 
-/** The hover readout: frequency, the chain's level there and, with a stage
- * selected, that stage's. Recharts hands it the hovered row. */
-function GraphTooltip({
-  active,
-  payload,
-  stageLabel,
-}: {
-  active?: boolean;
-  payload?: ReadonlyArray<{ payload?: unknown }>;
-  stageLabel: string | null;
-}) {
-  const row = payload?.[0]?.payload as GraphRow | undefined;
-  if (!active || !row) return null;
-  return (
-    <div
-      className="rounded-lg border"
-      style={{
-        background: "var(--amp-graph-tip-bg)",
-        borderColor: "var(--amp-graph-tip-border)",
-        color: "var(--amp-color-text)",
-        padding: "8px 12px",
-        fontSize: 12,
-        lineHeight: 1.6,
-      }}
-    >
-      <div className="font-semibold">{freqText(row.f)}</div>
-      <div style={{ color: "var(--accent)" }}>Total: {row.total.toFixed(1)} dB</div>
-      {stageLabel && row.stage !== null && (
-        <div style={{ color: "var(--amp-graph-stage)" }}>
-          {stageLabel}: {row.stage.toFixed(1)} dB
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Points asked of core per curve: few while a handle moves, so every frame is
- * cheap, and enough at rest for the steepest slopes to look smooth. */
-const DRAG_CURVE_POINTS = 120;
-const REST_CURVE_POINTS = 360;
+/** Points per curve. Computed locally in the same frame, so this is about
+ * smoothness, not speed: 240 keeps a 48 dB/oct slope crisp. */
+const CURVE_POINTS = 240;
+/** How often a drag tells the rest of the editor (strip, editor row) where
+ * the point is; the graph itself follows every frame. */
+const PARENT_PREVIEW_MS = 100;
 
 /** The draggable handles of the 10 stages (HP, 8 parametric bands, LP), drawn
- * inside the chart so Recharts' own scales place them: a main dot for free XY
+ * in the plot with its own scale: a main dot for free XY
  * drag (freq+gain), small side handles for freq-only/gain-only drag, and (once
  * selected) a pair of Q-width handles — matching the old app's reference
  * (`components/monitor/amp-tabs/eq-curve-chart.tsx` in `cvr-amp-controller-web`).
  * HP/LP only ever expose the main dot + freq handles — a `CrossoverSlot` has no
  * gain/Q to drag.
  *
- * Dragging never writes on every pointer tick: a preview is reported at most
- * once per animation frame (a mouse can poll faster than the screen redraws),
- * and `onCommit` fires once on release with the rounded/clamped final patch. */
+ * A drag never goes through React. Once per animation frame it computes the
+ * curves for the moved point (`lib/eqResponse.ts`) and writes them, the
+ * handle's offset and the Q dots straight to the SVG (`paint`); React renders
+ * once, on release, when `onCommit` hands over the final patch. A render that
+ * lands mid-drag (a poll) is painted over again before the screen updates. */
 function StageHandles({
+  scale,
   eq,
   capsByType,
   selectedRef,
+  writeStatus,
   stageCurve,
   interactive,
   onSelectStage,
-  onPreview,
   onCommit,
-  onDraggingChange,
   onStageMenu,
 }: {
+  scale: PlotScale;
   eq: ChannelEq;
   capsByType: Record<EqFilterType, FilterCaps>;
   selectedRef: EqStageRef | null;
+  writeStatus: Record<string, WriteStatus>;
   /** The selected stage's own curve — where its Q handles sit. */
   stageCurve: ResponsePoint[] | null;
   interactive: boolean;
   onSelectStage: (ref: EqStageRef | null) => void;
-  onPreview: (ref: EqStageRef, patch: PreviewPatch) => void;
   onCommit: (ref: EqStageRef, patch: PreviewPatch) => void;
-  onDraggingChange: (dragging: boolean) => void;
-  onStageMenu: (ref: EqStageRef, clientX: number, clientY: number) => void;
+  onStageMenu: (ref: EqStageRef, event: React.MouseEvent) => void;
 }) {
-  const xScale = useXAxisScale();
-  const yScale = useYAxisScale();
-  const xInverse = useXAxisInverseScale();
-  const yInverse = useYAxisInverseScale();
-  const plot = usePlotArea();
   const dragRef = useRef<DragState | null>(null);
   const frameRef = useRef(0);
-  const pendingRef = useRef<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
+  const pendingRef = useRef<PreviewPatch | null>(null);
   useEffect(() => () => cancelAnimationFrame(frameRef.current), []);
-  if (!xScale || !yScale || !xInverse || !yInverse || !plot) return null;
+  const { toX, toY, plot } = scale;
 
-  const toX = (hz: number) => xScale(hz) ?? 0;
-  const toY = (db: number) => yScale(db) ?? 0;
-  const xToFreq = (x: number) => Math.min(GRAPH_MAX_HZ, Math.max(GRAPH_MIN_HZ, Number(xInverse(x)) || GRAPH_MIN_HZ));
-  const yToDb = (y: number) => Math.min(GRAPH_MAX_DB, Math.max(GRAPH_MIN_DB, Number(yInverse(y)) || 0));
+  /** Where a stage's Q dots sit: an octave span either side of its centre,
+   * on its own curve. */
+  function qDots(info: { freqHz: number; q: number }, curve: ResponsePoint[] | null, fallbackY: number) {
+    const octaves = 1 / Math.max(info.q, 0.1);
+    return [info.freqHz / 2 ** octaves, info.freqHz * 2 ** octaves].map((hz) => {
+      const f = clampToRange(hz, GRAPH_HZ);
+      if (!curve?.length) return { x: toX(f), y: fallbackY };
+      const t = (Math.log10(f) - Math.log10(GRAPH_MIN_HZ)) / LOG_HZ_SPAN;
+      return { x: toX(f), y: toY(curve[Math.round(t * (curve.length - 1))].db) };
+    });
+  }
 
-  const stages: EqStageRef[] = [
-    { kind: "hp" },
-    ...eq.bands.map((_, i) => ({ kind: "band", bandIndex: i }) as const),
-    { kind: "lp" },
-  ];
+  /** One drag frame, written straight to the SVG. */
+  function paint(drag: DragState, patch: PreviewPatch) {
+    drag.last = patch;
+    const next = applyPreview(eq, { ref: drag.ref, patch });
+    const info = stageInfo(next, drag.ref, capsByType);
+    const stage = responseCurve(next, drag.ref, CURVE_POINTS);
+    drag.els.total?.setAttribute("d", pathD(toPlotPoints(responseCurve(next, null, CURVE_POINTS)), scale));
+    drag.els.stage?.setAttribute("d", pathD(toPlotPoints(stage), scale));
+    const cx = toX(info.freqHz);
+    const cy = toY(info.gainDb);
+    drag.els.body?.setAttribute("transform", `translate(${(cx - drag.baseCx).toFixed(1)} ${(cy - drag.baseCy).toFixed(1)})`);
+    qDots(info, stage, cy).forEach((dot, i) => {
+      drag.els.q[i]?.querySelectorAll("circle").forEach((circle) => {
+        circle.setAttribute("cx", dot.x.toFixed(1));
+        circle.setAttribute("cy", dot.y.toFixed(1));
+      });
+    });
+  }
 
-  /** The patch a drag proposes at `vb` (the pointer, in chart pixels). */
+  // A render during a drag (a poll's new chain) resets what `paint` wrote;
+  // put it back before the screen updates.
+  useLayoutEffect(() => {
+    const drag = dragRef.current;
+    if (!drag?.last) return;
+    drag.els.body?.removeAttribute("transform");
+    const body = drag.els.body?.querySelector<SVGCircleElement>("circle[data-main]");
+    if (body) {
+      drag.baseCx = Number(body.getAttribute("cx"));
+      drag.baseCy = Number(body.getAttribute("cy"));
+    }
+    paint(drag, drag.last);
+  });
+
+  /** The patch a drag proposes at `vb` (the pointer, in chart pixels): the
+   * anchor's values moved by the pointer's travel since the anchor, a quarter
+   * of it while fine. */
   function patchFor(drag: DragState, vb: { x: number; y: number }, clientX: number): PreviewPatch {
     const info = stageInfo(eq, drag.ref, capsByType);
+    const fine = drag.fine ? FINE_DRAG_SCALE : 1;
+    const freqHz = () =>
+      clampToRange(drag.startFreqHz * 10 ** ((((vb.x - drag.startViewX) * fine) / plot.width) * LOG_HZ_SPAN), GRAPH_HZ);
+    const gainDb = () =>
+      clampToRange(drag.startGainDb + (((drag.startViewY - vb.y) * fine) / plot.height) * (GRAPH_MAX_DB - GRAPH_MIN_DB), GRAPH_DB);
     if (drag.mode === "xy") {
-      const patch: PreviewPatch = { freqHz: xToFreq(vb.x) };
-      if (info.supportsGain) patch.gainDb = yToDb(vb.y);
+      const patch: PreviewPatch = { freqHz: freqHz() };
+      if (info.supportsGain) patch.gainDb = gainDb();
       return patch;
     }
-    if (drag.mode === "x") {
-      return { freqHz: drag.startFreqHz * 10 ** (((vb.x - drag.startViewX) / plot!.width) * LOG_HZ_SPAN) };
-    }
-    if (drag.mode === "y") {
-      if (!info.supportsGain) return {};
-      const gainDelta = ((drag.startViewY - vb.y) / plot!.height) * (GRAPH_MAX_DB - GRAPH_MIN_DB);
-      return { gainDb: drag.startGainDb + gainDelta };
-    }
+    if (drag.mode === "x") return { freqHz: freqHz() };
+    if (drag.mode === "y") return info.supportsGain ? { gainDb: gainDb() } : {};
     // qLeft / qRight — mapped from raw client-pixel delta, not chart distance,
     // matching the reference's Q-drag (see Q_DRAG_SENSITIVITY).
     if (!info.supportsQ) return {};
     const qDirection = drag.mode === "qLeft" ? 1 : -1;
-    return { q: drag.startQ + qDirection * (clientX - drag.startClientX) * Q_DRAG_SENSITIVITY };
+    return { q: drag.startQ + qDirection * (clientX - drag.startClientX) * fine * Q_DRAG_SENSITIVITY };
   }
-
-  /** Height of the selected stage's own curve at `hz` (both curves share core's
-   * log grid), or `fallback` until that curve has arrived. */
-  const stageY = (hz: number, fallback: number) => {
-    if (!stageCurve?.length) return fallback;
-    const t = (Math.log10(hz) - Math.log10(GRAPH_MIN_HZ)) / LOG_HZ_SPAN;
-    return toY(stageCurve[Math.round(t * (stageCurve.length - 1))].db);
-  };
 
   function beginDrag(event: React.PointerEvent<SVGElement>, ref: EqStageRef, mode: DragMode) {
     if (!interactive) return;
@@ -401,20 +427,30 @@ function StageHandles({
     event.preventDefault();
     event.stopPropagation();
     const vb = toViewBoxPoint(svg, event.clientX, event.clientY);
+    const handle = event.currentTarget.closest("[data-eq-handle]");
 
     dragRef.current = {
       pointerId: event.pointerId,
       ref,
       mode,
+      fine: event.shiftKey,
       startClientX: event.clientX,
       startViewX: vb.x,
       startViewY: vb.y,
       startFreqHz: info.freqHz,
       startGainDb: info.gainDb,
       startQ: info.q,
+      els: {
+        body: handle?.querySelector<SVGGElement>("[data-body]") ?? null,
+        q: Array.from(handle?.querySelectorAll<SVGGElement>("[data-q]") ?? []),
+        total: svg.querySelector<SVGPathElement>('path[data-curve="total"]'),
+        stage: svg.querySelector<SVGPathElement>('path[data-curve="stage"]'),
+      },
+      baseCx: toX(info.freqHz),
+      baseCy: toY(info.gainDb),
+      last: null,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-    onDraggingChange(true);
   }
 
   /** First press on a not-yet-selected stage only selects it — a second
@@ -433,16 +469,28 @@ function StageHandles({
     const drag = dragRef.current;
     const svg = event.currentTarget.ownerSVGElement;
     if (!drag || !svg || drag.pointerId !== event.pointerId) return;
-    pendingRef.current = {
-      ref: drag.ref,
-      patch: patchFor(drag, toViewBoxPoint(svg, event.clientX, event.clientY), event.clientX),
-    };
+    const vb = toViewBoxPoint(svg, event.clientX, event.clientY);
+    if (event.shiftKey !== drag.fine) {
+      // Re-anchor where the point is now, so it carries on from here.
+      const here = patchFor(drag, vb, event.clientX);
+      dragRef.current = {
+        ...drag,
+        fine: event.shiftKey,
+        startClientX: event.clientX,
+        startViewX: vb.x,
+        startViewY: vb.y,
+        startFreqHz: here.freqHz ?? drag.startFreqHz,
+        startGainDb: here.gainDb ?? drag.startGainDb,
+        startQ: here.q ?? drag.startQ,
+      };
+    }
+    pendingRef.current = patchFor(dragRef.current!, vb, event.clientX);
     if (frameRef.current) return;
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = 0;
       const pending = pendingRef.current;
       pendingRef.current = null;
-      if (pending) onPreview(pending.ref, pending.patch);
+      if (pending && dragRef.current) paint(dragRef.current, pending);
     });
   }
 
@@ -454,7 +502,8 @@ function StageHandles({
     cancelAnimationFrame(frameRef.current);
     frameRef.current = 0;
     pendingRef.current = null;
-    onDraggingChange(false);
+    // React draws the final position from here on.
+    drag.els.body?.removeAttribute("transform");
 
     // `patchFor` only proposes what the stage supports; `onCommit` rounds and clamps.
     const patch = patchFor(drag, toViewBoxPoint(svg, event.clientX, event.clientY), event.clientX);
@@ -463,111 +512,123 @@ function StageHandles({
   }
 
   return (
-    // Above the curves, the hover cursor and its dot, which Recharts lifts
-    // into z layers of their own.
-    <ZIndexLayer zIndex={1500}>
-      <g onPointerMove={handlePointerMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
-        {stages.map((ref) => {
-          const info = stageInfo(eq, ref, capsByType);
-          if (!info.active) return null;
-          const cx = toX(info.freqHz);
-          const cy = toY(info.gainDb);
-          const selected = sameStage(selectedRef, ref);
-          const label = ref.kind === "hp" ? "HP" : ref.kind === "lp" ? "LP" : String(ref.bandIndex + 1);
-          const octaves = 1 / Math.max(info.q, 0.1);
-          const qFreqs = [info.freqHz / 2 ** octaves, info.freqHz * 2 ** octaves].map((hz) =>
-            Math.min(GRAPH_MAX_HZ, Math.max(GRAPH_MIN_HZ, hz)),
-          );
+    <g onPointerMove={handlePointerMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
+      {stagesOf(eq).map((ref) => {
+        const info = stageInfo(eq, ref, capsByType);
+        if (!info.active) return null;
+        const cx = toX(info.freqHz);
+        const cy = toY(info.gainDb);
+        const selected = sameStage(selectedRef, ref);
+        const color = stageColor(ref);
+        const label = ref.kind === "hp" ? "H" : ref.kind === "lp" ? "L" : String(ref.bandIndex + 1);
+        const dots = selected && info.supportsQ ? qDots(info, stageCurve, cy) : [];
+        const status = writeStatus[stageKey(ref)];
+        const ring = status === "ok" ? "var(--amp-color-green-6)" : status === "fail" ? "var(--amp-color-red-6)" : selected ? color : null;
 
-          return (
-            <g key={stageKey(ref)} data-eq-handle>
+        return (
+          <g key={stageKey(ref)} data-eq-handle className={status === "pending" ? "eq-write-pending" : undefined}>
+            <g data-body>
+            {ring && (
               <circle
                 cx={cx}
                 cy={cy}
-                r={16}
-                fill="transparent"
-                style={{ cursor: interactive ? "grab" : "pointer" }}
-                onPointerDown={(e) => beginDragIfActivated(e, ref, "xy")}
-                onContextMenu={(e) => {
-                  if (!interactive) return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onStageMenu(ref, e.clientX, e.clientY);
-                }}
-              />
-              <circle
-                cx={cx}
-                cy={cy}
-                r={5}
-                fill={selected ? "var(--accent-soft)" : "var(--amp-color-body)"}
-                stroke={selected ? "var(--accent)" : "var(--amp-color-text)"}
-                strokeWidth={1.5}
+                r={14}
+                fill="none"
+                stroke={ring}
+                strokeOpacity={status === "ok" || status === "fail" ? 0.9 : 0.45}
+                strokeWidth={4}
                 pointerEvents="none"
+                className={CURVE_EASE}
               />
-              {!selected && (
-                <text x={cx} y={cy + 18} fontSize={11} textAnchor="middle" fill="var(--amp-color-text)" pointerEvents="none">
-                  {label}
-                </text>
-              )}
-              {selected && interactive && (
-                <g>
-                  {[180, 0].map((angle) => (
+            )}
+            <circle
+              data-main
+              cx={cx}
+              cy={cy}
+              r={9}
+              fill={color}
+              stroke={selected ? "var(--amp-color-text)" : "var(--amp-graph-bg)"}
+              strokeWidth={selected ? 2 : 1.5}
+              style={{ cursor: interactive ? "grab" : "pointer" }}
+              onPointerDown={(e) => beginDragIfActivated(e, ref, "xy")}
+              onContextMenu={(e) => {
+                if (!interactive) return;
+                e.stopPropagation();
+                onStageMenu(ref, e);
+              }}
+            />
+            <text
+              x={cx}
+              y={cy}
+              textAnchor="middle"
+              dominantBaseline="central"
+              pointerEvents="none"
+              style={{ fontSize: 10, fontWeight: 700, fill: "var(--amp-graph-bg)" }}
+            >
+              {label}
+            </text>
+            {selected && interactive && (
+              <g>
+                {[180, 0].map((angle) => (
+                  <ArrowHandle
+                    key={angle}
+                    cx={cx}
+                    cy={cy}
+                    angle={angle}
+                    color={color}
+                    cursor="ew-resize"
+                    onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
+                  />
+                ))}
+                {info.supportsGain &&
+                  [-90, 90].map((angle) => (
                     <ArrowHandle
                       key={angle}
                       cx={cx}
                       cy={cy}
                       angle={angle}
-                      cursor="ew-resize"
-                      onPointerDown={(e) => beginDragIfActivated(e, ref, "x")}
+                      color={color}
+                      cursor="ns-resize"
+                      onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
                     />
                   ))}
-                  {info.supportsGain &&
-                    [-90, 90].map((angle) => (
-                      <ArrowHandle
-                        key={angle}
-                        cx={cx}
-                        cy={cy}
-                        angle={angle}
-                        cursor="ns-resize"
-                        onPointerDown={(e) => beginDragIfActivated(e, ref, "y")}
-                      />
-                    ))}
-                  {info.supportsQ &&
-                    (["qLeft", "qRight"] as const).map((mode, i) => {
-                      const qx = toX(qFreqs[i]);
-                      const qy = stageY(qFreqs[i], cy);
-                      return (
-                        <g
-                          key={mode}
-                          className="group"
-                          style={{ cursor: "ew-resize" }}
-                          onPointerDown={(e) => beginDragIfActivated(e, ref, mode)}
-                        >
-                          <circle cx={qx} cy={qy} r={10} fill="transparent" />
-                          <circle
-                            cx={qx}
-                            cy={qy}
-                            r={4}
-                            fill="var(--amp-graph-stage)"
-                            stroke="var(--amp-color-body)"
-                            strokeWidth={1.5}
-                            className="origin-center transition-transform [transform-box:fill-box] group-hover:scale-125"
-                          />
-                        </g>
-                      );
-                    })}
-                </g>
-              )}
+              </g>
+            )}
             </g>
-          );
-        })}
-      </g>
-    </ZIndexLayer>
+            {selected && interactive && info.supportsQ &&
+                  (["qLeft", "qRight"] as const).map((mode, i) => {
+                    const qx = dots[i].x;
+                    const qy = dots[i].y;
+                    return (
+                      <g
+                        key={mode}
+                        data-q
+                        className="group"
+                        style={{ cursor: "ew-resize" }}
+                        onPointerDown={(e) => beginDragIfActivated(e, ref, mode)}
+                      >
+                        <circle cx={qx} cy={qy} r={10} fill="transparent" />
+                        <circle
+                          cx={qx}
+                          cy={qy}
+                          r={4.5}
+                          fill={color}
+                          stroke="var(--amp-graph-bg)"
+                          strokeWidth={1.5}
+                          className="origin-center [transform-box:fill-box] group-hover:scale-125"
+                        />
+                      </g>
+                    );
+                  })}
+          </g>
+        );
+      })}
+    </g>
   );
 }
 
 /** How far a drag arrow sits from its point's centre. */
-const ARROW_OFFSET = 17;
+const ARROW_OFFSET = 21;
 
 /** One drag arrow beside a selected point: a small triangle pointing away from
  * it (`angle` in degrees, 0 = right), inside a finger-sized hit area. */
@@ -575,12 +636,14 @@ function ArrowHandle({
   cx,
   cy,
   angle,
+  color,
   cursor,
   onPointerDown,
 }: {
   cx: number;
   cy: number;
   angle: number;
+  color: string;
   cursor: string;
   onPointerDown: (event: React.PointerEvent<SVGElement>) => void;
 }) {
@@ -594,25 +657,27 @@ function ArrowHandle({
       <circle cx={ARROW_OFFSET} cy={0} r={10} fill="transparent" />
       <path
         d={`M${ARROW_OFFSET - 4},-5 L${ARROW_OFFSET + 5},0 L${ARROW_OFFSET - 4},5 Z`}
-        fill="var(--accent)"
+        fill={color}
         className="opacity-70 group-hover:opacity-100"
       />
     </g>
   );
 }
 
-/** Frequency-response graph, drawn entirely by Recharts: log-Hz x-axis, dB
- * y-axis, the whole chain's response (from core, see `filterResponse.ts`), the
- * selected stage on its own, and a hover readout. `StageHandles` sits inside
- * the chart for the interaction. The graph has a height of its own (a share of
- * the window, within limits); `ResponsiveContainer` follows the box.
+/** Frequency-response graph on `FrequencyPlot`: the whole chain's response,
+ * the selected stage on its own in its colour, and the handles. A drag keeps
+ * its position in this component's own state and the curves are computed
+ * from it in the same render (`lib/eqResponse.ts`), so the point, its Q dots
+ * and the curve move together every frame, and only this graph re-renders
+ * for it.
  *
  * Memoised, and every prop is stable while nothing about the EQ changes: its
- * dialog re-renders at meter rate, and the chart must not. */
+ * dialog re-renders at meter rate, and the graph must not. */
 const ResponseGraph = memo(function ResponseGraph({
   eq,
   capsByType,
   selectedRef,
+  writeStatus,
   interactive,
   onSelectStage,
   onPreview,
@@ -623,6 +688,7 @@ const ResponseGraph = memo(function ResponseGraph({
   eq: ChannelEq;
   capsByType: Record<EqFilterType, FilterCaps>;
   selectedRef: EqStageRef | null;
+  writeStatus: Record<string, WriteStatus>;
   interactive: boolean;
   onSelectStage: (ref: EqStageRef | null) => void;
   onPreview: (ref: EqStageRef, patch: PreviewPatch) => void;
@@ -631,191 +697,145 @@ const ResponseGraph = memo(function ResponseGraph({
   onResetGain: (ref: EqStageRef) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [dragging, setDragging] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{ ref: EqStageRef; x: number; y: number } | null>(null);
-  const contextMenuAnchorRef = useRef<HTMLDivElement>(null);
+  const openMenu = useContextMenu();
+  // The point being moved, every frame. Only this graph re-renders for it;
+  // the strip and editor row hear about it every `PARENT_PREVIEW_MS`.
+  const [live, setLive] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
+  const lastSent = useRef(0);
+  const previewLive = (ref: EqStageRef, patch: PreviewPatch) => {
+    setLive({ ref, patch });
+    const now = performance.now();
+    if (now - lastSent.current >= PARENT_PREVIEW_MS) {
+      lastSent.current = now;
+      onPreview(ref, patch);
+    }
+  };
+  // The final position goes to the editor before the write, so nothing
+  // shows the last throttled one in between.
+  const commitLive = (ref: EqStageRef, patch: PreviewPatch) => {
+    onPreview(ref, patch);
+    setLive(null);
+    onCommit(ref, patch);
+  };
+  const graphEq = useMemo(() => applyPreview(eq, live), [eq, live]);
+  // Arrow-key nudges preview at once and are written once the keys go quiet,
+  // as a drag is written once on release.
+  const keyNudge = useRef<{ ref: EqStageRef; patch: PreviewPatch; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const flushKeyNudge = () => {
+    const pending = keyNudge.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    keyNudge.current = null;
+    commitLive(pending.ref, pending.patch);
+  };
+  useEffect(() => () => flushKeyNudge(), []);
 
-  const selectedActive = selectedRef !== null && stageInfo(eq, selectedRef, capsByType).active;
-  const curves = useResponseCurves(
-    eq,
-    selectedActive ? selectedRef : null,
-    dragging ? DRAG_CURVE_POINTS : REST_CURVE_POINTS,
+  /** ←/→ move the selected point's frequency by an octave fraction, ↑/↓ its
+   * gain (types with gain only); Shift fine, Ctrl/Cmd coarse, as in the
+   * number fields. Esc deselects. */
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape" && selectedRef) {
+      flushKeyNudge();
+      onSelectStage(null);
+      return;
+    }
+    const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+    const vertical = event.key === "ArrowUp" || event.key === "ArrowDown";
+    if (!interactive || !selectedRef || (!horizontal && !vertical)) return;
+    const info = stageInfo(graphEq, selectedRef, capsByType);
+    if (!info.active || (vertical && !info.supportsGain)) return;
+    event.preventDefault();
+    if (keyNudge.current && !sameStage(keyNudge.current.ref, selectedRef)) flushKeyNudge();
+    const patch: PreviewPatch = { ...keyNudge.current?.patch };
+    const direction = event.key === "ArrowRight" || event.key === "ArrowUp" ? 1 : -1;
+    const size = stepSizeOf(event);
+    if (horizontal) {
+      patch.freqHz = clampToRange(stepped(patch.freqHz ?? info.freqHz, direction, size, 1, "log"), GRAPH_HZ);
+    } else {
+      patch.gainDb = clampToRange(stepped(patch.gainDb ?? info.gainDb, direction, size, 0.1), GRAPH_DB);
+    }
+    if (keyNudge.current) clearTimeout(keyNudge.current.timer);
+    const ref = selectedRef;
+    keyNudge.current = { ref, patch, timer: setTimeout(flushKeyNudge, STEP_COMMIT_DELAY_MS) };
+    previewLive(ref, patch);
+  }
+
+  const selectedActive = selectedRef !== null && stageInfo(graphEq, selectedRef, capsByType).active;
+  const total = useMemo(() => responseCurve(graphEq, null, CURVE_POINTS), [graphEq]);
+  const isolated = useMemo(
+    () => (selectedActive && selectedRef ? responseCurve(graphEq, selectedRef, CURVE_POINTS) : null),
+    [graphEq, selectedActive, selectedRef],
   );
-  // The handles are drawn from the chain the curves were computed for, not the
-  // newer one in `eq`, so a dragged point and its curve move in the same frame.
-  const drawnEq = curves?.eq ?? eq;
-  // The isolated curve of a stage selected a moment ago is not this stage's.
-  const isolated = curves && sameStage(curves.stage, selectedRef) ? curves.isolated : null;
-  // One row per frequency; both curves come from core on the same grid.
-  const data = useMemo(
-    () => (curves?.total ?? []).map((p, i) => ({ f: p.freqHz, total: p.db, stage: isolated?.[i]?.db ?? null })),
-    [curves, isolated],
-  );
-  const stageLabel =
-    selectedRef === null ? null : selectedRef.kind === "band" ? `Band ${selectedRef.bandIndex + 1}` : selectedRef.kind.toUpperCase();
+  const plotCurves = useMemo(() => {
+    const statuses = Object.values(writeStatus);
+    // Pending greys and breathes; a result flashes, then eases back.
+    const look = (status: WriteStatus | undefined, color: string) =>
+      status === "pending"
+        ? { color: "var(--amp-color-dimmed)", className: "eq-write-pending" }
+        : status === "ok"
+          ? { color: "var(--amp-color-green-6)", className: CURVE_EASE }
+          : status === "fail"
+            ? { color: "var(--amp-color-red-6)", className: CURVE_EASE }
+            : { color, className: CURVE_EASE };
+    const overall = statuses.includes("pending") ? "pending" : statuses.includes("fail") ? "fail" : statuses.includes("ok") ? "ok" : undefined;
+    const list: PlotCurve[] = [];
+    if (isolated && selectedRef) {
+      list.push({
+        key: "stage",
+        points: toPlotPoints(isolated),
+        width: 1.5,
+        dash: "5 4",
+        label: stageName(selectedRef),
+        ...look(writeStatus[stageKey(selectedRef)], stageColor(selectedRef)),
+      });
+    }
+    list.push({ key: "total", points: toPlotPoints(total), width: 2.4, label: "Total", ...look(overall, "var(--accent)") });
+    return list;
+  }, [total, isolated, selectedRef, writeStatus]);
+
+  const stageMenu = (ref: EqStageRef, event: React.MouseEvent) => {
+    const info = stageInfo(graphEq, ref, capsByType);
+    openMenu(event, [
+      { label: info.active ? "Bypass" : "Enable", icon: <Power size={14} />, onAction: () => onToggleActive(ref) },
+      { label: "Reset gain", icon: <RotateCcw size={14} />, disabled: !info.supportsGain, onAction: () => onResetGain(ref) },
+    ]);
+  };
 
   return (
     <div
       ref={containerRef}
-      className="h-[clamp(220px,42vh,440px)] shrink-0 overflow-hidden rounded-xl border border-[var(--amp-color-default-border)]"
-      style={{ position: "relative", backgroundColor: "var(--amp-graph-bg)" }}
+      tabIndex={0}
+      aria-label="EQ graph — arrow keys move the selected point"
+      className="shrink-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      onKeyDown={handleKeyDown}
       onPointerDown={(event) => {
+        containerRef.current?.focus({ preventScroll: true });
         // A press on the plot itself (not on a handle) clears the selection.
-        if (
-          event.button === 0 &&
-          event.target instanceof Element &&
-          event.target.closest(".recharts-wrapper") &&
-          !event.target.closest("[data-eq-handle]")
-        ) {
+        if (event.button === 0 && event.target instanceof Element && !event.target.closest("[data-eq-handle]")) {
           onSelectStage(null);
         }
       }}
     >
-      <span
-        className="pointer-events-none absolute left-3 top-2 z-10"
-        style={{ fontSize: 10, color: "var(--amp-color-dimmed)" }}
-      >
-        dB
-      </span>
-      <div style={{ position: "absolute", inset: 12 }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={data}
-            margin={{ top: PLOT_TOP, right: PLOT_RIGHT, bottom: 0, left: 0 }}
-            accessibilityLayer={false}
-          >
-            {/* Minor lines dashed, major lines (on the ticks) solid, as two grids. */}
-            <CartesianGrid
-              vertical={false}
-              horizontalValues={GRAPH_DB_MINOR}
-              stroke="var(--amp-graph-grid-minor)"
-              strokeDasharray="2 4"
-            />
-            <CartesianGrid
-              horizontalValues={GRAPH_DB_TICKS}
-              stroke="var(--amp-graph-grid-major)"
-              verticalFill={[]}
-              vertical={(props: { x1?: number; y1?: number; x2?: number; y2?: number; key?: string }) => (
-                <line
-                  key={props.key}
-                  x1={props.x1}
-                  y1={props.y1}
-                  x2={props.x2}
-                  y2={props.y2}
-                  stroke="var(--amp-graph-grid-minor)"
-                />
-              )}
-            />
-            <XAxis
-              dataKey="f"
-              type="number"
-              scale="log"
-              domain={[GRAPH_MIN_HZ, GRAPH_MAX_HZ]}
-              ticks={GRAPH_FREQ_TICKS}
-              tickFormatter={freqLabel}
-              allowDataOverflow
-              interval={0}
-              height={PLOT_BOTTOM}
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 10, fill: "var(--amp-color-dimmed)" }}
-            />
-            <YAxis
-              type="number"
-              domain={[GRAPH_MIN_DB, GRAPH_MAX_DB]}
-              ticks={GRAPH_DB_TICKS}
-              tickFormatter={(db: number) => (db > 0 ? `+${db}` : String(db))}
-              allowDataOverflow
-              interval={0}
-              width={PLOT_LEFT}
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 10, fill: "var(--amp-color-dimmed)" }}
-            />
-            <Line
-              type="monotone"
-              dataKey="stage"
-              stroke="var(--amp-graph-stage)"
-              strokeWidth={1.4}
-              strokeDasharray="5 4"
-              dot={false}
-              activeDot={{ r: 4, fill: "var(--amp-graph-stage)", stroke: "var(--amp-color-body)", strokeWidth: 2 }}
-              connectNulls
-              isAnimationActive={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="total"
-              stroke="var(--accent)"
-              strokeWidth={2.4}
-              dot={false}
-              activeDot={{ r: 4, fill: "var(--accent)", stroke: "var(--amp-color-body)", strokeWidth: 2 }}
-              isAnimationActive={false}
-            />
-            <StageHandles
-              eq={drawnEq}
-              capsByType={capsByType}
-              selectedRef={selectedRef}
-              stageCurve={isolated}
-              interactive={interactive}
-              onSelectStage={onSelectStage}
-              onPreview={onPreview}
-              onCommit={onCommit}
-              onDraggingChange={setDragging}
-              onStageMenu={(ref, clientX, clientY) => {
-                const rect = containerRef.current?.getBoundingClientRect();
-                setContextMenu({ ref, x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) });
-              }}
-            />
-            <ChartTooltip
-              content={<GraphTooltip stageLabel={stageLabel} />}
-              cursor={{ stroke: "var(--amp-color-text)", strokeWidth: 1, opacity: 0.7 }}
-              active={dragging ? false : undefined}
-              offset={16}
-              wrapperStyle={{ pointerEvents: "none", zIndex: 20 }}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-
-      <div
-        ref={contextMenuAnchorRef}
-        style={{ position: "absolute", left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0, width: 1, height: 1 }}
+      <FrequencyPlot
+        y={EQ_DB_AXIS}
+        curves={plotCurves}
+        ariaLabel="EQ frequency response"
+        className="h-[clamp(220px,42vh,440px)] overflow-hidden rounded-xl border border-[var(--amp-color-default-border)]"
+        overlay={(scale) => (
+          <StageHandles
+            scale={scale}
+            eq={graphEq}
+            capsByType={capsByType}
+            selectedRef={selectedRef}
+            writeStatus={writeStatus}
+            stageCurve={isolated}
+            interactive={interactive}
+            onSelectStage={onSelectStage}
+            onCommit={commitLive}
+            onStageMenu={stageMenu}
+          />
+        )}
       />
-      {/* Slot classes passed explicitly: this menu is anchored to a bare ref
-          rather than a `<Dropdown>` root, and without that root HeroUI's
-          context lookup yields no classes at all — see the note beside
-          `DROPDOWN_SLOTS` in `AmpConfigureView.tsx`. */}
-      <Dropdown.Popover
-        className={DROPDOWN_SLOTS.popover()}
-        triggerRef={contextMenuAnchorRef}
-        isOpen={contextMenu !== null}
-        onOpenChange={(open) => !open && setContextMenu(null)}
-        placement="bottom start"
-      >
-        <Dropdown.Menu
-          className={DROPDOWN_SLOTS.menu()}
-          onAction={(key) => {
-            if (!contextMenu) return;
-            if (key === "toggle") onToggleActive(contextMenu.ref);
-            else if (key === "resetGain") onResetGain(contextMenu.ref);
-            setContextMenu(null);
-          }}
-        >
-          {contextMenu &&
-            (() => {
-              const info = stageInfo(eq, contextMenu.ref, capsByType);
-              return (
-                <>
-                  <Dropdown.Item id="toggle">{info.active ? "Bypass" : "Enable"}</Dropdown.Item>
-                  <Dropdown.Item id="resetGain" isDisabled={!info.supportsGain}>
-                    Reset Gain
-                  </Dropdown.Item>
-                </>
-              );
-            })()}
-        </Dropdown.Menu>
-      </Dropdown.Popover>
     </div>
   );
 });
@@ -855,6 +875,9 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
 
   const [selectedStage, setSelectedStage] = useState<EqStageRef | null>(null);
   const [preview, setPreview] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
+  const [writes, setWrites] = useState<Record<string, StageWrite>>({});
+  const [flash, setFlash] = useState<Record<string, "ok" | "fail">>({});
+  const writeToken = useRef(0);
 
   // Switching channel or direction (Input EQ <-> Output EQ) reuses the same
   // mounted component in some callers — clear transient selection/preview
@@ -862,9 +885,31 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   useEffect(() => {
     setSelectedStage(null);
     setPreview(null);
+    setWrites({});
   }, [channelIndex, direction]);
 
-  const displayEq = useMemo(() => applyPreview(eq, preview), [eq, preview]);
+  const displayEq = useMemo(
+    () => applyPreview(Object.values(writes).reduce((chain, w) => applyPreview(chain, w), eq), preview),
+    [eq, writes, preview],
+  );
+  // An acknowledged write is let go once the amp's own reading shows it.
+  useEffect(() => {
+    setWrites((current) => {
+      const confirmed = Object.keys(current).filter((k) => current[k].acked && writeConfirmed(eq, current[k], eqCapsByType));
+      if (confirmed.length === 0) return current;
+      const next = { ...current };
+      for (const k of confirmed) delete next[k];
+      return next;
+    });
+  }, [eq, writes, eqCapsByType]);
+
+  /** Each stage's write state as the graph shows it — stable while nothing changes. */
+  const writeStatus = useMemo(() => {
+    const status: Record<string, WriteStatus> = { ...flash };
+    for (const [k, w] of Object.entries(writes)) if (!w.acked) status[k] = "pending";
+    return status;
+  }, [writes, flash]);
+  useEffect(() => checkAgainstCore(eq), [eq]);
 
   const freqRange = capability.paramRanges.crossoverFreqHz;
   const gainRange = capability.paramRanges.eqBandGainDb;
@@ -877,9 +922,9 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   async function handleCrossoverChange(
     slot: CrossoverSlotKind,
     patch: Partial<{ filterType: CrossoverFilterType; freqHz: number; active: boolean }>,
-  ) {
-    if (!actions.setCrossoverSlot) return;
-    await actions.setCrossoverSlot(channelIndex, direction, slot, {
+  ): Promise<ActionResult> {
+    if (!actions.setCrossoverSlot) return ACTION_UNAVAILABLE;
+    return actions.setCrossoverSlot(channelIndex, direction, slot, {
       filterType: patch.filterType ?? null,
       freqHz: patch.freqHz ?? null,
       active: patch.active ?? null,
@@ -889,8 +934,8 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   async function handleBandChange(
     bandIndex: number,
     patch: Partial<{ filterType: EqFilterType; freqHz: number; gainDb: number; q: number; active: boolean }>,
-  ) {
-    if (!actions.setEqBand) return;
+  ): Promise<ActionResult> {
+    if (!actions.setEqBand) return ACTION_UNAVAILABLE;
     // A type with a narrower Q range (a shelf) takes the band's Q along,
     // fitted into it — the backend refuses a type change that would leave Q
     // outside the new type's range.
@@ -900,7 +945,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
       const fitted = roundQ(clampToRange(current.q ?? 1, qRangeFor(patch.filterType)));
       if (fitted !== current.q) q = fitted;
     }
-    await actions.setEqBand(channelIndex, direction, bandIndex, {
+    return actions.setEqBand(channelIndex, direction, bandIndex, {
       filterType: patch.filterType ?? null,
       freqHz: patch.freqHz ?? null,
       gainDb: patch.gainDb ?? null,
@@ -918,12 +963,39 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
       const type = ref.kind === "band" ? eq.bands[ref.bandIndex]?.filterType : undefined;
       patch.q = roundQ(clampToRange(proposed.q, type ? qRangeFor(type) : qRange));
     }
-    if (ref.kind === "band") {
-      await handleBandChange(ref.bandIndex, patch);
-    } else {
-      await handleCrossoverChange(ref.kind, patch);
-    }
-    setPreview(null);
+    await write(ref, patch);
+  }
+
+  /** Sends a freq/gain/Q patch and keeps it on screen while it is in flight:
+   * pending until acknowledged, then held until the amp's reading agrees
+   * (green flash), or dropped at once on failure — back to the old value —
+   * with a red flash. */
+  async function write(ref: EqStageRef, patch: PreviewPatch) {
+    const key = stageKey(ref);
+    const token = ++writeToken.current;
+    setWrites((w) => ({ ...w, [key]: { ref, patch, acked: false, token } }));
+    setPreview((p) => (p && sameStage(p.ref, ref) ? null : p));
+    const result = ref.kind === "band" ? await handleBandChange(ref.bandIndex, patch) : await handleCrossoverChange(ref.kind, patch);
+    const settle = (keep: boolean) =>
+      setWrites((w) => {
+        if (w[key]?.token !== token) return w;
+        if (keep) return { ...w, [key]: { ...w[key], acked: true } };
+        const next = { ...w };
+        delete next[key];
+        return next;
+      });
+    settle(result.ok);
+    if (result.ok) window.setTimeout(() => settle(false), WRITE_HOLD_MS);
+    setFlash((f) => ({ ...f, [key]: result.ok ? "ok" : "fail" }));
+    window.setTimeout(
+      () =>
+        setFlash((f) => {
+          const next = { ...f };
+          delete next[key];
+          return next;
+        }),
+      WRITE_FLASH_MS,
+    );
   }
 
   function handleToggleActive(ref: EqStageRef) {
@@ -940,6 +1012,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   // Always call the latest handlers (they close over the current actions and
   // lock state) through callbacks whose identity never changes.
   const handlers = {
+    write,
     band: handleBandChange,
     crossover: handleCrossoverChange,
     commit: handleCommit,
@@ -954,28 +1027,25 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     [],
   );
   const onPreview = useCallback((ref: EqStageRef, patch: PreviewPatch) => setPreview({ ref, patch }), []);
+  const onWrite = useCallback((ref: EqStageRef, patch: PreviewPatch) => void latest.current.write(ref, patch), []);
   const onCommit = useCallback((ref: EqStageRef, patch: PreviewPatch) => void latest.current.commit(ref, patch), []);
   const onToggleActive = useCallback((ref: EqStageRef) => latest.current.toggleActive(ref), []);
   const onResetGain = useCallback((ref: EqStageRef) => latest.current.resetGain(ref), []);
 
+  const hint = interactive
+    ? "Drag a point to move it · Shift for fine · arrow keys nudge the selected point · right-click to bypass"
+    : "Read-only — EQ can't be edited here right now. Select a band to see its own response.";
+
   return (
-    <div className="relative flex w-full min-w-0 flex-col gap-3">
-      {!interactive && (
-        <span
-          style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}
-        >
-          Read-only — EQ can't be edited here right now. Click a band to select it (highlights its column below) and
-          see its isolated response; freq, gain, and Q are display-only.
-        </span>
-      )}
-      {/* Over the graph's top-right corner rather than a row of its own. */}
-      <div className="absolute top-2 right-3 z-10 flex justify-end">
+    <div className="flex w-full min-w-0 flex-col gap-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="min-w-0 flex-1 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">{hint}</span>
         <ClipboardButtons
           actions={actions}
           channelIndex={channelIndex}
           section={direction === "input" ? "inputEq" : "outputEq"}
           label={`${assignment.deviceName ?? "Amp"} · ${
-            direction === "input" ? `In ${channelIndex + 1}` : `Out ${String.fromCharCode(65 + channelIndex)}`
+            direction === "input" ? `In ${channelIndex + 1}` : `Out ${outputLetter(channelIndex)}`
           } EQ`}
         />
       </div>
@@ -983,6 +1053,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
         eq={displayEq}
         capsByType={eqCapsByType}
         selectedRef={selectedStage}
+        writeStatus={writeStatus}
         interactive={interactive}
         onSelectStage={setSelectedStage}
         onPreview={onPreview}
@@ -990,153 +1061,41 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
         onToggleActive={onToggleActive}
         onResetGain={onResetGain}
       />
-      {/* One column per band plus HP/LP. Equal `1fr` columns alone collapse
-       * to unusable slivers on a narrow window (a 10-band EQ would give each
-       * strip ~35px), so each column keeps a floor wide enough for its
-       * `NumberInput`s and the strip scrolls sideways below that. */}
+      {/* One tile per stage, values as text; the selected stage gets the
+       * real controls in the row below. Tiles keep a floor and the row
+       * scrolls sideways below it. */}
       <div className="min-w-0 overflow-x-auto">
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${2 + displayEq.bands.length}, minmax(${STRIP_MIN_WIDTH}px, 1fr))`,
-            gap: 8,
-          }}
-        >
-          <CrossoverStrip
-            label="HP"
-            kind="hp"
-            slot={displayEq.hp}
-            freqMin={freqRange.min}
-            freqMax={freqRange.max}
-            selected={sameStage(selectedStage, { kind: "hp" })}
-            onSelectStage={setSelectedStage}
-            onCrossoverChange={onCrossoverChange}
-          />
-          {displayEq.bands.map((band, i) => (
-            <BandStrip
-              key={i}
-              label={String(i + 1)}
-              index={i}
-              band={band}
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${displayEq.bands.length + 2}, minmax(68px, 1fr))` }}>
+          {stagesOf(displayEq).map((ref) => (
+            <StageTile
+              key={stageKey(ref)}
+              stage={ref}
+              eq={displayEq}
               capsByType={eqCapsByType}
-              freqMin={freqRange.min}
-              freqMax={freqRange.max}
-              gainMin={gainRange.min}
-              gainMax={gainRange.max}
-              qMin={qRangeFor(band.filterType).min}
-              qMax={qRangeFor(band.filterType).max}
-              selected={sameStage(selectedStage, { kind: "band", bandIndex: i })}
-              onSelectStage={setSelectedStage}
-              onBandChange={onBandChange}
+              selected={sameStage(selectedStage, ref)}
+              onSelect={() => setSelectedStage(sameStage(selectedStage, ref) ? null : ref)}
             />
           ))}
-          <CrossoverStrip
-            label="LP"
-            kind="lp"
-            slot={displayEq.lp}
-            freqMin={freqRange.min}
-            freqMax={freqRange.max}
-            selected={sameStage(selectedStage, { kind: "lp" })}
-            onSelectStage={setSelectedStage}
-            onCrossoverChange={onCrossoverChange}
-          />
         </div>
       </div>
-    </div>
-  );
-}
-
-/** Bypass toggle for a crossover slot / band. Was a full-width
- * "Enabled"/"Bypassed" pill, which spent a whole 36px row and a lot of
- * contrast per column on what is a checkbox-weight decision — ten of them
- * across the strip were most of the visual noise. Now a single dot: filled
- * green when engaged, hollow and muted when bypassed. The word survives in
- * the tooltip so nothing is actually lost. */
-function ActiveDotToggle({ active, onClick }: { active: boolean; onClick: () => void }) {
-  return (
-    <Tooltip delay={400}>
-      <Tooltip.Trigger>
-        <button
-          type="button"
-          onClick={onClick}
-          className="flex h-5 w-full cursor-pointer appearance-none items-center justify-center border-0 bg-transparent p-0 font-inherit focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-          aria-pressed={active}
-          aria-label={active ? "Enabled" : "Bypassed"}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: "50%",
-              border: `1px solid ${active ? "var(--amp-color-green-6)" : "var(--amp-color-dimmed)"}`,
-              background: active ? "var(--amp-color-green-6)" : "transparent",
-            }}
-          />
-        </button>
-      </Tooltip.Trigger>
-      <Tooltip.Content showArrow>{active ? "Enabled — click to bypass" : "Bypassed — click to enable"}</Tooltip.Content>
-    </Tooltip>
-  );
-}
-
-/** Holds a row's vertical slot in columns whose filter type has no gain or
- * no Q (and in the crossover columns, which have neither), so every column
- * keeps the same row grid. Renders a faint middot rather than an empty
- * 36px void — the blank spacers read as a rendering fault. */
-function EmptyParamSlot() {
-  return (
-    <div style={{ height: 36 }} className="flex items-center justify-center">
-      <span
-        className="opacity-40"
-        style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}
-      >
-        &middot;
-      </span>
-    </div>
-  );
-}
-
-function StripShell({
-  label,
-  selected,
-  /** Bypassed stages recede so the two or three columns actually shaping the
-   * signal are the ones that read first — previously all ten columns
-   * competed at identical contrast. Selection always wins over dimming, so a
-   * bypassed stage is fully legible the moment you click it, and hover
-   * lifts it too. */
-  dimmed,
-  onSelect,
-  children,
-}: {
-  label: string;
-  selected: boolean;
-  dimmed: boolean;
-  onSelect: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`flex min-w-0 flex-col gap-1 rounded-lg border p-1 transition-opacity duration-150 ${
-        dimmed && !selected ? "opacity-[0.55] hover:opacity-100" : ""
-      }`}
-      style={{
-        borderColor: selected ? "var(--accent)" : "var(--amp-color-default-border)",
-        background: selected ? "var(--accent-soft)" : "color-mix(in srgb, var(--amp-graph-bg) 60%, transparent)",
-        cursor: "pointer",
-      }}
-      onClick={onSelect}
-    >
-      <span
-        style={{
-          fontSize: "var(--amp-font-size-sm)",
-          fontWeight: 700,
-          color: "var(--amp-color-dimmed)",
-          textAlign: "center",
-        }}
-      >
-        {label}
-      </span>
-      {children}
+      {selectedStage ? (
+        <StageEditor
+          stage={selectedStage}
+          eq={displayEq}
+          capsByType={eqCapsByType}
+          freqRange={freqRange}
+          gainRange={gainRange}
+          qRange={selectedStage.kind === "band" ? qRangeFor(displayEq.bands[selectedStage.bandIndex].filterType) : qRange}
+          interactive={interactive}
+          onBandChange={onBandChange}
+          onCrossoverChange={onCrossoverChange}
+          onWrite={onWrite}
+        />
+      ) : (
+        <div className="rounded-lg border border-dashed border-[var(--amp-color-default-border)] px-3 py-2.5 text-center text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
+          Select a band in the graph or above to edit it.
+        </div>
+      )}
     </div>
   );
 }
@@ -1144,127 +1103,167 @@ function StripShell({
 type CrossoverPatch = Partial<{ filterType: CrossoverFilterType; freqHz: number; active: boolean }>;
 type BandPatch = Partial<{ filterType: EqFilterType; freqHz: number; gainDb: number; q: number; active: boolean }>;
 
-// The strips are memoised and take stable callbacks, so a drag — which changes
-// one stage on every pointer event — re-renders that stage's strip and not all
-// ten.
-const CrossoverStrip = memo(function CrossoverStrip({
-  label,
-  kind,
-  slot,
-  freqMin,
-  freqMax,
-  selected,
-  onSelectStage,
-  onCrossoverChange,
-}: {
-  label: string;
-  kind: "hp" | "lp";
-  slot: { filterType: CrossoverFilterType; freqHz: number | null; active: boolean };
-  freqMin: number | null;
-  freqMax: number | null;
-  selected: boolean;
-  onSelectStage: (ref: EqStageRef) => void;
-  onCrossoverChange: (slot: CrossoverSlotKind, patch: CrossoverPatch) => void;
-}) {
-  const onChange = (patch: CrossoverPatch) => onCrossoverChange(kind, patch);
-  return (
-    <StripShell label={label} selected={selected} dimmed={!slot.active} onSelect={() => onSelectStage({ kind })}>
-      <SimpleSelect
-        data={CROSSOVER_FILTER_OPTIONS}
-        value={slot.filterType}
-        onChange={(value) => value && onChange({ filterType: value as CrossoverFilterType })}
-      />
-      <CommitNumberInput
-        suffix=" Hz"
-        min={freqMin ?? undefined}
-        max={freqMax ?? undefined}
-        value={roundFreq(slot.freqHz ?? 0)}
-        onCommit={(value) => onChange({ freqHz: value })}
-      />
-      {/* No gain/Q for crossover slots — Q is implied by filterType, never
-       * user-settable (see CrossoverSlot in filterResponse.ts). */}
-      <EmptyParamSlot />
-      <EmptyParamSlot />
-      <ActiveDotToggle active={slot.active} onClick={() => onChange({ active: !slot.active })} />
-    </StripShell>
-  );
-});
+const formatGain = (db: number) => `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
 
-const BandStrip = memo(function BandStrip({
-  label,
-  index,
-  band,
+/** The stage's filter type as the strip names it. */
+function stageTypeLabel(eq: ChannelEq, ref: EqStageRef): string {
+  if (ref.kind === "band") return EQ_FILTER_LABELS[eq.bands[ref.bandIndex].filterType];
+  return CROSSOVER_FILTER_LABELS[(ref.kind === "hp" ? eq.hp : eq.lp).filterType];
+}
+
+/** One stage of the strip: its colour, name, type and values, as text. A
+ * bypassed stage recedes so the stages shaping the signal read first. */
+function StageTile({
+  stage,
+  eq,
   capsByType,
-  freqMin,
-  freqMax,
-  gainMin,
-  gainMax,
-  qMin,
-  qMax,
   selected,
-  onSelectStage,
-  onBandChange,
+  onSelect,
 }: {
-  label: string;
-  index: number;
-  band: { filterType: EqFilterType; freqHz: number | null; gainDb: number | null; q: number | null; active: boolean };
+  stage: EqStageRef;
+  eq: ChannelEq;
   capsByType: Record<EqFilterType, FilterCaps>;
-  freqMin: number | null;
-  freqMax: number | null;
-  gainMin: number | null;
-  gainMax: number | null;
-  qMin: number | null;
-  qMax: number | null;
   selected: boolean;
-  onSelectStage: (ref: EqStageRef) => void;
-  onBandChange: (bandIndex: number, patch: BandPatch) => void;
+  onSelect: () => void;
 }) {
-  const caps = capsByType[band.filterType];
-  const onChange = (patch: BandPatch) => onBandChange(index, patch);
+  const info = stageInfo(eq, stage, capsByType);
+  const blank = "\u00a0";
   return (
-    <StripShell
-      label={label}
-      selected={selected}
-      dimmed={!band.active}
-      onSelect={() => onSelectStage({ kind: "band", bandIndex: index })}
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className={`flex min-w-0 flex-col gap-0.5 rounded-md border px-2 pt-1.5 pb-2 text-left tabular-nums transition-colors ${
+        selected
+          ? "border-accent bg-accent-soft"
+          : "border-[var(--amp-color-default-border)] hover:bg-[var(--amp-color-default-hover)]"
+      } ${info.active || selected ? "" : "opacity-50"}`}
     >
-      <SimpleSelect
-        data={EQ_FILTER_OPTIONS}
-        value={band.filterType}
-        onChange={(value) => value && onChange({ filterType: value as EqFilterType })}
-      />
-      <CommitNumberInput
-        suffix=" Hz"
-        min={freqMin ?? undefined}
-        max={freqMax ?? undefined}
-        value={roundFreq(band.freqHz ?? 0)}
-        onCommit={(value) => onChange({ freqHz: value })}
-      />
-      {caps.supportsGain ? (
-        <CommitNumberInput
-          suffix=" dB"
-          step={0.5}
-          min={gainMin ?? undefined}
-          max={gainMax ?? undefined}
-          value={roundGain(band.gainDb ?? 0)}
-          onCommit={(value) => onChange({ gainDb: value })}
-        />
-      ) : (
-        <EmptyParamSlot />
-      )}
-      {caps.supportsQ ? (
-        <CommitNumberInput
-          suffix=" Q"
-          step={0.1}
-          min={qMin ?? undefined}
-          max={qMax ?? undefined}
-          value={roundQ(band.q ?? 1)}
-          onCommit={(value) => onChange({ q: value })}
-        />
-      ) : (
-        <EmptyParamSlot />
-      )}
-      <ActiveDotToggle active={band.active} onClick={() => onChange({ active: !band.active })} />
-    </StripShell>
+      <span className="flex items-center gap-1.5">
+        <span className="size-2 shrink-0 rounded-full" style={{ background: stageColor(stage) }} />
+        <span className="text-[length:var(--amp-font-size-sm)] font-semibold">
+          {stage.kind === "band" ? stage.bandIndex + 1 : stage.kind.toUpperCase()}
+        </span>
+      </span>
+      <span className="truncate text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
+        {info.active ? stageTypeLabel(eq, stage) : "Bypassed"}
+      </span>
+      <span className="text-[length:var(--amp-font-size-xs)]">{freqText(info.freqHz)}</span>
+      <span className="text-[length:var(--amp-font-size-xs)]">{info.supportsGain ? formatGain(info.gainDb) : blank}</span>
+      <span className="text-[length:var(--amp-font-size-xs)]">{info.supportsQ ? `Q ${info.q.toFixed(2)}` : blank}</span>
+    </button>
   );
-});
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex w-[136px] flex-col gap-1">
+      <span className="text-[length:var(--amp-font-size-xs)] font-medium text-[var(--amp-color-dimmed)]">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/** The selected stage's real controls: type, frequency, gain and Q where the
+ * type has them, and whether it is engaged. */
+function StageEditor({
+  stage,
+  eq,
+  capsByType,
+  freqRange,
+  gainRange,
+  qRange,
+  interactive,
+  onBandChange,
+  onCrossoverChange,
+  onWrite,
+}: {
+  stage: EqStageRef;
+  eq: ChannelEq;
+  capsByType: Record<EqFilterType, FilterCaps>;
+  freqRange: ParamRange;
+  gainRange: ParamRange;
+  qRange: ParamRange;
+  interactive: boolean;
+  onBandChange: (bandIndex: number, patch: BandPatch) => void;
+  onCrossoverChange: (slot: CrossoverSlotKind, patch: CrossoverPatch) => void;
+  /** Freq/gain/Q: held on screen while written, like a drag. */
+  onWrite: (ref: EqStageRef, patch: PreviewPatch) => void;
+}) {
+  const info = stageInfo(eq, stage, capsByType);
+  const change = (patch: BandPatch) =>
+    stage.kind === "band" ? onBandChange(stage.bandIndex, patch) : onCrossoverChange(stage.kind, patch as CrossoverPatch);
+  return (
+    <div
+      className="flex min-w-0 flex-wrap items-end gap-3 rounded-lg border px-3 py-2.5"
+      style={{ borderColor: stageColor(stage), background: "var(--amp-graph-bg)" }}
+    >
+      <div className="flex h-8 w-[88px] items-center gap-2">
+        <span className="size-2.5 shrink-0 rounded-full" style={{ background: stageColor(stage) }} />
+        <span className="font-semibold">{stageName(stage)}</span>
+      </div>
+      <Field label="Type">
+        {stage.kind === "band" ? (
+          <SimpleSelect
+            data={EQ_FILTER_OPTIONS}
+            value={eq.bands[stage.bandIndex].filterType}
+            onChange={(value) => value && change({ filterType: value as EqFilterType })}
+          />
+        ) : (
+          <SimpleSelect
+            data={CROSSOVER_FILTER_OPTIONS}
+            value={(stage.kind === "hp" ? eq.hp : eq.lp).filterType}
+            onChange={(value) => value && onCrossoverChange(stage.kind as CrossoverSlotKind, { filterType: value as CrossoverFilterType })}
+          />
+        )}
+      </Field>
+      <Field label="Frequency">
+        <CommitNumberInput
+          aria-label={`${stageName(stage)} frequency`}
+          suffix=" Hz"
+          scale="log"
+          min={freqRange.min ?? undefined}
+          max={freqRange.max ?? undefined}
+          value={roundFreq(info.freqHz)}
+          onCommit={(value) => onWrite(stage, { freqHz: value })}
+        />
+      </Field>
+      {info.supportsGain && (
+        <Field label="Gain">
+          <CommitNumberInput
+            aria-label={`${stageName(stage)} gain`}
+            suffix=" dB"
+            step={0.1}
+            min={gainRange.min ?? undefined}
+            max={gainRange.max ?? undefined}
+            value={info.gainDb}
+            onCommit={(value) => onWrite(stage, { gainDb: value })}
+          />
+        </Field>
+      )}
+      {info.supportsQ && (
+        <Field label="Q">
+          <CommitNumberInput
+            aria-label={`${stageName(stage)} Q`}
+            step={0.01}
+            min={qRange.min ?? undefined}
+            max={qRange.max ?? undefined}
+            value={info.q}
+            onCommit={(value) => onWrite(stage, { q: value })}
+          />
+        </Field>
+      )}
+      <div className="flex-1" />
+      <Switch isSelected={info.active} isDisabled={!interactive} onChange={(active) => change({ active })}>
+        {/* `Switch.Content` is the actual checkable element — see the note at
+            the noise-gate switch in `AmpConfigureView`. */}
+        <Switch.Content>
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+          <span className="text-[length:var(--amp-font-size-sm)]">Active</span>
+        </Switch.Content>
+      </Switch>
+    </div>
+  );
+}

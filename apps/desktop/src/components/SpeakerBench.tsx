@@ -4,6 +4,7 @@ import { MoreHorizontal } from "lucide-react";
 import type { AmpAssignment, ChannelSpeakerState, ProjectSpeaker, SpeakerLibraryEntry } from "../lib/bindings";
 import { speakerFields, speakerName } from "../lib/speakers";
 import { Hint } from "./Hint";
+import { outputLetter } from "../lib/channelTelemetry";
 
 const DROPDOWN_SLOTS = dropdownVariants();
 export const MUTED = "text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]";
@@ -16,10 +17,6 @@ export interface OutputRow {
   bridged: boolean;
 }
 
-function letter(channelIndex: number): string {
-  return String.fromCharCode(65 + channelIndex);
-}
-
 export function outputRows(assignment: AmpAssignment): OutputRow[] {
   const channels = [...assignment.channels].sort((a, b) => a.channelIndex - b.channelIndex);
   const bridged = new Set(channels.filter((c) => c.outputBridged && c.channelIndex % 2 === 0).map((c) => c.channelIndex));
@@ -29,7 +26,7 @@ export function outputRows(assignment: AmpAssignment): OutputRow[] {
       const pair = bridged.has(c.channelIndex) && c.channelIndex + 1 < channels.length;
       return {
         leader: c.channelIndex,
-        label: pair ? `${letter(c.channelIndex)}+${letter(c.channelIndex + 1)}` : letter(c.channelIndex),
+        label: pair ? `${outputLetter(c.channelIndex)}+${outputLetter(c.channelIndex + 1)}` : outputLetter(c.channelIndex),
         bridged: pair,
       };
     });

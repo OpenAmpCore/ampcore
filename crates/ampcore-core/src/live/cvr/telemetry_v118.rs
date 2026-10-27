@@ -140,6 +140,8 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         .map(|(&v, &a)| if a > 0.0 { (v / a).round() } else { 0.0 })
         .collect();
 
+    let output_power_va = fields.output_voltages.iter().zip(fields.output_currents.iter()).map(|(&v, &a)| v * a).collect();
+
     // Reference is an explicit, honest 1.0V — NOT a calibrated ADC full-scale
     // value (this device's real full-scale voltage isn't known here), so this
     // is "dB relative to 1V", not true dBFS despite the field name. See
@@ -172,6 +174,7 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         output_voltages: fields.output_voltages,
         output_currents: fields.output_currents,
         output_impedance,
+        output_power_va,
         output_level_db,
         rated_rms_voltage: None,
         output_states: fields.output_states,

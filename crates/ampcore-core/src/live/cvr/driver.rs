@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::data::amp_model::AmpProtocol;
-use crate::data::capability::cvr::rated_rms_voltage_from_firmware_string;
+use crate::data::capability::cvr::{amp_gain_range_db, amp_sensitivity_v, rated_rms_voltage_from_firmware_string};
 use crate::data::common::now_millis;
 use crate::live::dsp::voltage_to_db;
 use crate::live::state::{DiscoveredDevice, DriverHandle, LiveEventSink};
@@ -707,7 +707,12 @@ pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -
         return Err(format!("no known device for ip {}", ip));
     };
     match channel_config::parse_channel_config(device.firmware_family.as_deref(), body, device.output_channels) {
-        Some(cfg) => {
+        Some(mut cfg) => {
+            for channel in &mut cfg.channels {
+                channel.amp_gain_range_db = amp_gain_range_db(device.gain_max, channel.power_mode);
+                channel.amp_sensitivity_v =
+                    channel.amp_gain_db.and_then(|g| amp_sensitivity_v(f64::from(g), device.gain_max, channel.power_mode));
+            }
             sink.set_channel_config(device.id, cfg.clone());
             Ok(cfg)
         }

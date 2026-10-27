@@ -209,21 +209,67 @@ pub fn composite_db(eq: &ChannelEq, freq_hz: f64) -> f64 {
     crossover_db(&eq.hp, true, freq_hz) + eq.bands.iter().map(|b| band_db(b, freq_hz)).sum::<f64>() + crossover_db(&eq.lp, false, freq_hz)
 }
 
+/// `n` log-spaced frequencies over 20 Hz-20 kHz — the one axis every curve
+/// here is sampled on, so curves can be summed point by point.
+fn log_sweep(points: u32) -> impl Iterator<Item = f64> {
+    let n = points.max(2);
+    let (lo, hi) = (20f64.log10(), 20000f64.log10());
+    (0..n).map(move |i| 10f64.powf(lo + (hi - lo) * i as f64 / (n - 1) as f64))
+}
+
 /// `points` log-spaced samples over 20 Hz-20 kHz. `stage: None` is the whole
 /// chain; `Some` isolates one stage (the graph's "what is this band doing"
 /// overlay). A band index past the end is flat.
 pub fn response_curve(eq: &ChannelEq, stage: Option<EqStageRef>, points: u32) -> Vec<ResponsePoint> {
-    let n = points.max(2);
-    let (lo, hi) = (20f64.log10(), 20000f64.log10());
-    (0..n)
-        .map(|i| {
-            let freq_hz = 10f64.powf(lo + (hi - lo) * i as f64 / (n - 1) as f64);
+    log_sweep(points)
+        .map(|freq_hz| {
             let db = match stage {
                 None => composite_db(eq, freq_hz),
                 Some(EqStageRef::Hp) => crossover_db(&eq.hp, true, freq_hz),
                 Some(EqStageRef::Lp) => crossover_db(&eq.lp, false, freq_hz),
                 Some(EqStageRef::Band { band_index }) => eq.bands.get(band_index as usize).map_or(0.0, |b| band_db(b, freq_hz)),
             };
+            ResponsePoint { freq_hz, db }
+        })
+        .collect()
+}
+
+/// The whole chain and, with a `stage`, that stage alone — what the EQ graph
+/// draws each frame, in one call.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseCurves {
+    pub total: Vec<ResponsePoint>,
+    pub isolated: Option<Vec<ResponsePoint>>,
+}
+
+pub fn response_curves(eq: &ChannelEq, stage: Option<EqStageRef>, points: u32) -> ResponseCurves {
+    ResponseCurves {
+        total: response_curve(eq, None, points),
+        isolated: stage.map(|stage| response_curve(eq, Some(stage), points)),
+    }
+}
+
+/// Magnitude response of an FIR filter from its taps — the DTFT `|H(e^jw)|`
+/// evaluated directly at each log-spaced frequency (an FFT's linear bins would
+/// be coarsest exactly where a log axis is densest). Zero taps are skipped: the
+/// array is zero-padded, and an empty filter is a unit impulse. A null is
+/// floored at `floor_db` rather than -inf.
+pub fn fir_response_curve(taps: &[f64], sample_rate_hz: f64, floor_db: f64, points: u32) -> Vec<ResponsePoint> {
+    log_sweep(points)
+        .map(|freq_hz| {
+            let w = 2.0 * std::f64::consts::PI * freq_hz / sample_rate_hz;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, &tap) in taps.iter().enumerate() {
+                if tap == 0.0 {
+                    continue;
+                }
+                let angle = w * n as f64;
+                re += tap * angle.cos();
+                im -= tap * angle.sin();
+            }
+            let magnitude = re.hypot(im);
+            let db = if magnitude > 0.0 { (20.0 * magnitude.log10()).max(floor_db) } else { floor_db };
             ResponsePoint { freq_hz, db }
         })
         .collect()
@@ -256,6 +302,14 @@ mod tests {
         assert!(close(composite_db(&eq, 1000.0), 6.0));
         // Isolating another band stays flat.
         assert!(response_curve(&eq, Some(EqStageRef::Band { band_index: 0 }), 10).iter().all(|p| p.db == 0.0));
+    }
+
+    #[test]
+    fn unit_impulse_fir_is_flat_and_nulls_hit_the_floor() {
+        let mut taps = vec![0.0; 512];
+        taps[0] = 1.0;
+        assert!(fir_response_curve(&taps, 48000.0, -60.0, 50).iter().all(|p| close(p.db, 0.0)));
+        assert!(fir_response_curve(&[0.0; 4], 48000.0, -60.0, 5).iter().all(|p| p.db == -60.0));
     }
 
     #[test]

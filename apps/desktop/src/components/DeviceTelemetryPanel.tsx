@@ -4,6 +4,7 @@ import type { ChannelConfig, ChannelConfigSnapshot, ChannelEq, DiscoveredDevice,
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { InputClipPill } from "./InputClipPill";
 import { CHANNEL_STATE_LABEL } from "../lib/channelState";
+import { outputLetter } from "../lib/channelTelemetry";
 
 interface DeviceTelemetryPanelProps {
   device: DiscoveredDevice;
@@ -90,7 +91,7 @@ function EqTable({ label, eq }: { label: string; eq: ChannelEq }) {
 }
 
 function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
-  const label = String.fromCharCode(65 + channel.channelIndex);
+  const label = outputLetter(channel.channelIndex);
   return (
     <div>
       <div style={{ fontWeight: 600, fontSize: "var(--amp-font-size-sm)", marginBottom: 8 }}>
@@ -339,7 +340,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                       const stateRaw = telemetry.outputStates[i] ?? null;
                       return (
                         <tr key={i}>
-                          <td className="p-1 font-mono font-semibold">{String.fromCharCode(65 + i)}</td>
+                          <td className="p-1 font-mono font-semibold">{outputLetter(i)}</td>
                           <td className="p-1 font-mono">{voltage.toFixed(1)}</td>
                           <td className="p-1 font-mono">{current.toFixed(2)}</td>
                           <td className="p-1 font-mono">{impedance.toFixed(0)}</td>

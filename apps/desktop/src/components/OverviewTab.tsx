@@ -5,13 +5,14 @@ import type { ConfigurableTabProps } from "./AmpConfigureView";
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { MultiSelect } from "./MultiSelect";
+import { SECTION_TITLE } from "./fieldClasses";
 import { SimpleSelect } from "./SimpleSelect";
 import { StatToggle } from "./StatTiles";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
 import type { ActionResult } from "../lib/actionResult";
 import type { AmpChannel, AmpChannelState, DiscoveredDevice, SourceChannelCount, SourceKind } from "../lib/bindings";
-import { channelTelemetry, type ChannelTelemetry } from "../lib/channelTelemetry";
+import { channelTelemetry, type ChannelTelemetry, outputLetter } from "../lib/channelTelemetry";
 import { channelStateTone } from "../lib/channelState";
 import { usePreference } from "../lib/preferences";
 
@@ -37,9 +38,12 @@ const STRIP_H = 200;
 /** How far inside its box a vertical HeroUI slider's thumb stops at either
  * end: the slider grid's 0.5rem row gap plus the track's 0.75rem transparent
  * border (`@heroui/styles` slider.css). The fader scale is inset to match, so
- * a label sits level with the thumb at that value. */
+ * a label sits level with the thumb at that value.
+ * ponytail: copied from @heroui/styles 3.2.5's vertical slider (`gap-2` +
+ * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
+ * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
-/** A value row: the dB/Gain/SEN fields and the V/A/W/°C readouts. */
+/** A value row: the dB/Gain/SEN fields and the V/A/VA/°C readouts. */
 const ROW_H = 30;
 /** A column's channel number or letter. */
 const HEADER_H = 18;
@@ -50,9 +54,6 @@ const SIDE_W = 44;
 const LEGEND_W = 56;
 const GAP = 8;
 const LED_ROW_H = 16;
-
-const SECTION_TITLE =
-  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
 
 /** The level meters' scale — the same −60..0 the Input / Output tab's
  * horizontal meters use (`LEVEL_MARKS` there): 1 V on inputs, rated output
@@ -113,37 +114,32 @@ const fmt = (value: number | null, digits: number) => (value === null ? "—" : 
 
 interface OutputTotals {
   currentA: number | null;
-  powerW: number | null;
+  powerVa: number | null;
 }
 
-/** One output's power as V × A — apparent power: the heartbeat carries no
- * phase, so a reactive speaker load takes somewhat less real power. */
-function outputPowerW({ outputVoltage, outputCurrent }: ChannelTelemetry): number | null {
-  return outputVoltage === null || outputCurrent === null ? null : outputVoltage * outputCurrent;
-}
-
-/** What the outputs deliver between them: summed current and power. There is
+/** What the outputs deliver between them: summed current and apparent power
+ * (`ChannelTelemetry.outputPowerVa`). There is
  * no mains reading, so this is the load side, not what the amp draws from the
  * wall. `null` when no output has a reading. */
 function outputTotals(readings: ChannelTelemetry[]): OutputTotals {
   let currentA: number | null = null;
-  let powerW: number | null = null;
+  let powerVa: number | null = null;
   for (const reading of readings) {
     if (reading.outputCurrent === null) continue;
     currentA = (currentA ?? 0) + reading.outputCurrent;
-    const power = outputPowerW(reading);
-    if (power !== null) powerW = (powerW ?? 0) + power;
+    if (reading.outputPowerVa !== null) powerVa = (powerVa ?? 0) + reading.outputPowerVa;
   }
-  return { currentA, powerW };
+  return { currentA, powerVa };
 }
-
-const letterOf = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-1.5">
       <h3 className={SECTION_TITLE}>{title}</h3>
-      <div className="flex rounded-xl border border-[var(--amp-color-default-border)] p-3" style={{ gap: GAP }}>
+      <div
+        className="flex min-w-0 overflow-x-auto rounded-xl border border-[var(--amp-color-default-border)] p-3"
+        style={{ gap: GAP }}
+      >
         {children}
       </div>
     </section>
@@ -298,7 +294,7 @@ function VolumeStrip({
   useEffect(() => {
     setGainDraft(gain.gainDb);
   }, [gain.gainDb]);
-  const letter = letterOf(channel.channelIndex);
+  const letter = outputLetter(channel.channelIndex);
 
   // A refused write leaves the amp's value where it was, so the effects above
   // never fire; without the reset the fader and fields would keep showing a
@@ -346,8 +342,7 @@ function VolumeStrip({
         value={drag}
         min={min}
         max={max}
-        step={0.5}
-        format={(value) => value.toFixed(1)}
+        step={0.1}
         onCommit={commit}
       />
       {/* Editable only with a write path, a reading to start from, and a
@@ -359,7 +354,6 @@ function VolumeStrip({
           min={gain.range.min}
           max={gain.range.max}
           step={1}
-          showStepper
           format={(value) => value.toFixed(1)}
           onCommit={commitGain}
         />
@@ -471,7 +465,7 @@ function OutputStrip({
 
   return (
     <Column>
-      <ChannelHeader>{letterOf(channel.channelIndex)}</ChannelHeader>
+      <ChannelHeader>{outputLetter(channel.channelIndex)}</ChannelHeader>
       {/* The vendor's A/B button: which inputs this output mixes. One click in
        * the list toggles one crosspoint, so the change is always one write. */}
       <MultiSelect
@@ -510,7 +504,7 @@ function OutputStrip({
       />
       <ValueCell value={fmt(reading.outputVoltage, 1)} />
       <ValueCell value={fmt(reading.outputCurrent, 1)} />
-      <ValueCell value={fmt(outputPowerW(reading), 0)} />
+      <ValueCell value={fmt(reading.outputPowerVa, 0)} />
       <ValueCell value={fmt(reading.temperatureC, 0)} />
     </Column>
   );
@@ -549,7 +543,7 @@ function InfoBar({
       <InfoItem label="Firmware">{device.firmwareVersion || "—"}</InfoItem>
       <InfoItem label="Preset">{presetName || "—"}</InfoItem>
       <InfoItem label="Total">
-        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerW, 0)} W`}
+        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerVa, 0)} VA`}
       </InfoItem>
       <InfoItem label="PSU">{psuTempC === null ? "—" : `${psuTempC.toFixed(0)} °C`}</InfoItem>
       <InfoItem label="Status">
@@ -688,7 +682,7 @@ export function OverviewTab({
                 <SideText>A</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
-                <SideText>W</SideText>
+                <SideText>VA</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
                 <SideText>°C</SideText>
@@ -710,7 +704,7 @@ export function OverviewTab({
               />
             ))}
             {/* Legend for the LED column, bottom-aligned with it; below it,
-             * the A and W rows' totals under a label in the V row, where a
+             * the A and VA rows' totals under a label in the V row, where a
              * sum would mean nothing. */}
             <Column width={LEGEND_W}>
               <Cell height={HEADER_H} />
@@ -727,7 +721,7 @@ export function OverviewTab({
                 <SideText>Total</SideText>
               </Cell>
               <ValueCell value={fmt(totals.currentA, 1)} />
-              <ValueCell value={fmt(totals.powerW, 0)} />
+              <ValueCell value={fmt(totals.powerVa, 0)} />
             </Column>
           </Section>
         </div>

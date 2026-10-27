@@ -17,6 +17,9 @@ export interface ChannelTelemetry {
   outputLevelDb: number | null;
   outputVoltage: number | null;
   outputCurrent: number | null;
+  /** V × A, from core — apparent power (VA), not real watts: the heartbeat
+   * carries no phase. */
+  outputPowerVa: number | null;
   temperatureC: number | null;
   /** Limiter gain reduction, as a non-positive dB value (the wire carries
    * the magnitude; the reference implementation negates it the same way).
@@ -42,6 +45,7 @@ const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
   outputLevelDb: null,
   outputVoltage: null,
   outputCurrent: null,
+  outputPowerVa: null,
   temperatureC: null,
   gainReductionDb: null,
   outputState: null,
@@ -99,6 +103,7 @@ export function channelTelemetry(
       voltageToDb(outputVoltage, telemetry.ratedRmsVoltage ?? ratedRmsVoltage),
     outputVoltage,
     outputCurrent: at(telemetry.outputCurrents, channelIndex),
+    outputPowerVa: at(telemetry.outputPowerVa, channelIndex),
     // `temperatures` is 5 long: [0-3] per-channel, [4] PSU — a channel index
     // past 3 has no reading of its own rather than borrowing the PSU's.
     temperatureC: channelIndex < 4 ? at(telemetry.temperatures, channelIndex) : null,
@@ -250,3 +255,6 @@ export function buildLimiterThresholdVisuals(
 
   return { zones, marks };
 }
+
+/** An output's letter — outputs are lettered A, B, C…, inputs numbered. */
+export const outputLetter = (channelIndex: number) => String.fromCharCode(65 + channelIndex);

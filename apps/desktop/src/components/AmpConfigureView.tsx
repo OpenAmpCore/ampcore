@@ -40,7 +40,7 @@ import {
 import { CommitNumberInput } from "./CommitNumberInput";
 import { useConfirm } from "./ConfirmDialog";
 import { SimpleSelect } from "./SimpleSelect";
-import { FIELD_INPUT } from "./fieldClasses";
+import { FIELD_INPUT, SECTION_TITLE } from "./fieldClasses";
 import { EqEditor } from "./EqEditor";
 import {
   FingerprintInspector,
@@ -89,6 +89,7 @@ import {
   buildLimiterThresholdVisuals,
   channelTelemetry,
   FALLBACK_LIMITER,
+  outputLetter,
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import {
@@ -363,7 +364,6 @@ function SourcePicker({
                   max={paramRanges.sourceDelayMs.max ?? 30}
                   step={0.01}
                   suffix="ms"
-                  showStepper
                   onCommit={(delayMs) => void feedback.track(onTrimChange(sc.kind, trim.trimDb ?? 0, delayMs))}
                 />
               </EditorRow>
@@ -374,7 +374,6 @@ function SourcePicker({
                   max={trimRange(sc.kind).max ?? 18}
                   step={0.1}
                   suffix="dB"
-                  showStepper
                   onCommit={(trimDb) => void feedback.track(onTrimChange(sc.kind, trimDb, trim.delayMs ?? 0))}
                 />
               </EditorRow>
@@ -415,11 +414,11 @@ function SourcePicker({
             <EditorRow label="Threshold">
               <CommitNumberInput
                 value={backupPriority.thresholdDb}
+                integer
                 min={paramRanges.backupThresholdDb.min ?? -80}
                 max={paramRanges.backupThresholdDb.max ?? 0}
                 step={1}
                 suffix="dB"
-                showStepper
                 onCommit={(thresholdDb) =>
                   void feedback.track(
                     onBackupChange(primaryCode, complementOf(primaryCode), backupPriority.enabled, thresholdDb),
@@ -931,7 +930,7 @@ function InputChannelRow({
                 value={delayInMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
-                step={0.5}
+                step={0.01}
                 suffix=" ms"
                 onCommit={(value) => void delayFeedback.track(onDelayChange(value))}
               />
@@ -1057,7 +1056,7 @@ function OutputChannelRow({
   return (
     <div>
       <RenameableLabel
-        defaultLabel={`Out${String.fromCharCode(65 + channel.channelIndex)}`}
+        defaultLabel={`Out${outputLetter(channel.channelIndex)}`}
         name={channel.outputName}
         maxLength={nameMaxLength}
         onRename={onRename}
@@ -1171,7 +1170,7 @@ function OutputChannelRow({
                 value={volumeDb}
                 min={volumeMin ?? undefined}
                 max={volumeMax ?? undefined}
-                step={0.5}
+                step={0.1}
                 suffix=" dB"
                 onCommit={(value) => void volumeFeedback.track(onChange("volume", value))}
               />
@@ -1209,7 +1208,7 @@ function OutputChannelRow({
                 value={trimDb}
                 min={trimMin ?? undefined}
                 max={trimMax ?? undefined}
-                step={0.5}
+                step={0.1}
                 suffix=" dB"
                 onCommit={(value) => void trimFeedback.track(onChange("trim", value))}
               />
@@ -1261,7 +1260,7 @@ function OutputChannelRow({
                 value={delayMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
-                step={0.5}
+                step={0.01}
                 suffix=" ms"
                 onCommit={(value) => void delayFeedback.track(onChange("delay", value))}
               />
@@ -1501,9 +1500,6 @@ function BridgePairSidebar({
   );
 }
 
-const SECTION_TITLE =
-  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
-
 /** One titled card of the Main tab. Both cards span the pane; `maxWidth` caps
  * the rows inside at their natural one-line width (see `INPUT_ROW_MAX_WIDTH`). */
 function MainSection({ title, maxWidth, children }: { title: string; maxWidth: number; children: ReactNode }) {
@@ -1558,7 +1554,7 @@ function ChannelEditorModal({
   const compact = useIsCompact();
   const isInput = target?.kind === "inputEq";
   const channel = assignment.channels.find((c) => c.channelIndex === target?.channelIndex) ?? assignment.channels[0];
-  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : String.fromCharCode(65 + channelIndex));
+  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : outputLetter(channelIndex));
   const channels = isInput
     ? assignment.channels
     : assignment.channels.filter(
@@ -1601,6 +1597,7 @@ function ChannelEditorModal({
                       channelIndex={channel.channelIndex}
                       label={label(channel.channelIndex)}
                       capability={capability}
+                      eq={channel.outputEq}
                       bypassed={channel.firBypassed ?? false}
                       stored={channel.fir}
                       onBypassChange={(next) => actions.setChannelFirBypass(channel.channelIndex, next)}
@@ -1734,7 +1731,7 @@ function MainTab({
   }
 
   const letterLabel = (c: AmpAssignment["channels"][number]) =>
-    String.fromCharCode(65 + c.channelIndex);
+    outputLetter(c.channelIndex);
 
   // Fixed adjacent pairing (0,1), (2,3), … — mirrors the old app's bridging
   // convention. A trailing unpaired channel (odd total count) has no
@@ -1958,7 +1955,7 @@ function MatrixCrosspointCell({
               value={gainDb}
               min={min ?? undefined}
               max={max ?? undefined}
-              step={0.5}
+              step={0.1}
               suffix=" dB"
               onCommit={(value) => void feedback.track(onGainChange(value))}
             />
@@ -2236,7 +2233,7 @@ function RoutingTab({
                           transition: "color 150ms ease",
                         }}
                       >
-                        {String.fromCharCode(65 + channel.channelIndex)}
+                        {outputLetter(channel.channelIndex)}
                       </span>
                     </div>
                     <ChannelLevelMeter
@@ -2944,9 +2941,7 @@ export function AmpConfigureView({
   const speakerStates = useSpeakerStates(projectSource?.project, projectSource?.assignment.id, speakerLibrary);
   const telemetry = live?.telemetry;
   const ampGains = live
-    ? Array.from({ length: liveChannelCount }, (_, i) =>
-        ampGainReading(live.channelConfig, i, live.device.gainMax),
-      )
+    ? Array.from({ length: liveChannelCount }, (_, i) => ampGainReading(live.channelConfig, i))
     : undefined;
   const deviceId = live?.device.id;
   const firmwareFamily = live?.device.firmwareFamily;

@@ -10,9 +10,10 @@ type CommitNumberInputProps = {
   /** Appended after the number, inside the field (e.g. " Hz", " dB"). */
   suffix?: string;
   className?: string;
-  /** Opt-in up/down arrows. Off by default so existing callers keep the
-   * plain field — see the stepper note in the component doc. */
-  showStepper?: boolean;
+  /** `"log"` steps by fractions of an octave instead of adding `step` — for
+   * frequencies, where 1 Hz is nothing at 10 kHz and a lot at 20 Hz. Values
+   * stay whole Hz. */
+  scale?: "linear" | "log";
   /** Whole numbers only: a committed value is rounded — before clamping, so
    * the result still respects `min`/`max` — and touch keyboards get a
    * digits-only pad. */
@@ -20,7 +21,8 @@ type CommitNumberInputProps = {
   disabled?: boolean;
   /** How a number is shown in the field. Pass the same rounding the caller
    * applies to `value`, so a committed number is shown at that precision
-   * rather than as typed. */
+   * rather than as typed. Defaults to one decimal more than `step`, enough
+   * for a fine step and short of f32 noise (0.00999999977). */
   format?: (value: number) => string;
   /** For a field with no visible `<label>` of its own. */
   "aria-label"?: string;
@@ -30,11 +32,52 @@ type CommitNumberInputProps = {
 
 /** How long after the last arrow press the stepped value is committed. Long
  * enough that clicking up five times is one write rather than five. */
-const STEP_COMMIT_DELAY_MS = 400;
+export const STEP_COMMIT_DELAY_MS = 400;
+
+/** First repeat of a held arrow, then each repeat a little faster down to
+ * the floor. */
+const REPEAT_DELAY_MS = 400;
+const REPEAT_START_MS = 100;
+const REPEAT_MIN_MS = 30;
+
+/** Octaves per step on a `scale="log"` field: 1/12, fine 1/48, coarse 1/3. */
+const LOG_STEP_OCTAVES = 1 / 12;
 
 /** `0.01` → 2, so repeated steps don't drift into 0.30000000000000004. */
 function decimalsOf(step: number) {
   return (String(step).split(".")[1] ?? "").length;
+}
+
+/** How far one step reaches: Shift is fine, Ctrl/Cmd (or PageUp/PageDown)
+ * coarse — the audio-software convention. */
+type StepSize = "fine" | "normal" | "coarse";
+
+export function stepSizeOf(event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): StepSize {
+  if (event.shiftKey) return "fine";
+  if (event.ctrlKey || event.metaKey) return "coarse";
+  return "normal";
+}
+
+/** `base` moved one step up or down. Linear steps are `step` ÷10 / ×10
+ * (never below 1 on an integer field); log steps are octave fractions,
+ * rounded to whole numbers and always moving at least 1. */
+export function stepped(
+  base: number,
+  direction: 1 | -1,
+  size: StepSize,
+  step: number,
+  scale: "linear" | "log" = "linear",
+  integer = false,
+): number {
+  if (scale === "log") {
+    const octaves = LOG_STEP_OCTAVES * (size === "fine" ? 0.25 : size === "coarse" ? 4 : 1);
+    const next = Math.round(base * 2 ** (direction * octaves));
+    return next === Math.round(base) ? next + direction : next;
+  }
+  let increment = Number((step * (size === "fine" ? 0.1 : size === "coarse" ? 10 : 1)).toPrecision(12));
+  if (integer) increment = Math.max(1, Math.round(increment));
+  // Keep the field's own precision too: a coarse step of 1 from 1.23 is 2.23.
+  return Number((base + direction * increment).toFixed(Math.max(decimalsOf(increment), decimalsOf(step) + 1)));
 }
 
 /**
@@ -54,10 +97,12 @@ function decimalsOf(step: number) {
  *
  * Escape reverts to the last upstream value without committing.
  *
- * `showStepper` adds arrows for values that are tedious to type (a 0.01 ms
- * source delay). They hold to the same one-write discipline: each press only
- * moves the local draft and (re)starts a `STEP_COMMIT_DELAY_MS` timer, so a
- * burst of presses still commits once, with the final value. While that timer
+ * Every field steps — arrow buttons (held to repeat), ↑/↓, PageUp/PageDown
+ * and the wheel while focused — with Shift for a fine step and Ctrl/Cmd for
+ * a coarse one (`stepped`). They hold to the same one-write discipline: each
+ * step only moves the local draft and (re)starts a `STEP_COMMIT_DELAY_MS`
+ * timer, so a burst of presses or a held arrow still commits once, with the
+ * final value. While that timer
  * is pending the upstream re-sync is suspended for the same reason it is
  * during typing — a poll landing mid-step would otherwise yank the draft back.
  *
@@ -71,27 +116,37 @@ export function CommitNumberInput({
   value,
   min,
   max,
-  step,
+  step = 1,
   suffix,
   className,
-  showStepper,
-  integer,
+  scale = "linear",
+  integer = false,
   disabled,
-  format = String,
+  format = integer || scale === "log"
+    ? (n: number) => String(Math.round(n))
+    : (n: number) => String(Number(n.toFixed(decimalsOf(step) + 1))),
   "aria-label": ariaLabel,
   onCommit,
 }: CommitNumberInputProps) {
-  const [draft, setDraft] = useState<string>(format(value));
+  const [draft, setDraftState] = useState<string>(format(value));
+  // Read by a held arrow's repeats, whose closure would see a stale `draft`.
+  const draftRef = useRef(draft);
+  const setDraft = (text: string) => {
+    draftRef.current = text;
+    setDraftState(text);
+  };
+  const input = useRef<HTMLInputElement>(null);
   const focused = useRef(false);
   const cancelled = useRef(false);
   const stepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const repeatTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const clearStepTimer = () => {
-    if (stepTimer.current !== null) {
-      clearTimeout(stepTimer.current);
-      stepTimer.current = null;
-    }
+  const clear = (timer: typeof stepTimer) => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
   };
+  const clearStepTimer = () => clear(stepTimer);
+  const stopRepeat = () => clear(repeatTimer);
 
   // Re-sync from upstream only while the field is NOT being edited. Without
   // this guard the ~200ms config poll would overwrite whatever the user is
@@ -100,7 +155,13 @@ export function CommitNumberInput({
     if (!focused.current && stepTimer.current === null) setDraft(format(value));
   }, [value]);
 
-  useEffect(() => clearStepTimer, []);
+  useEffect(
+    () => () => {
+      clearStepTimer();
+      stopRepeat();
+    },
+    [],
+  );
 
   const clamp = (n: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, n));
 
@@ -128,11 +189,11 @@ export function CommitNumberInput({
     setDraft(format(value));
   };
 
-  const nudge = (direction: 1 | -1) => {
-    const increment = step ?? 1;
-    const parsed = Number.parseFloat(draft);
+  const nudge = (direction: 1 | -1, size: StepSize) => {
+    if (disabled) return;
+    const parsed = Number.parseFloat(draftRef.current);
     const base = Number.isFinite(parsed) ? parsed : value;
-    const next = clamp(Number((base + direction * increment).toFixed(decimalsOf(increment))));
+    const next = clamp(stepped(base, direction, size, step, scale, integer));
     setDraft(format(next));
     clearStepTimer();
     stepTimer.current = setTimeout(() => {
@@ -141,7 +202,38 @@ export function CommitNumberInput({
     }, STEP_COMMIT_DELAY_MS);
   };
 
-  const stepperWidth = showStepper ? 15 : 0;
+  // Pressing an arrow steps once; holding it repeats, faster the longer it
+  // is held. Every repeat goes through `nudge`, so a hold still commits once.
+  const startRepeat = (direction: 1 | -1, size: StepSize) => {
+    stopRepeat();
+    nudge(direction, size);
+    let interval = REPEAT_START_MS;
+    const repeat = () => {
+      nudge(direction, size);
+      interval = Math.max(REPEAT_MIN_MS, interval * 0.9);
+      repeatTimer.current = setTimeout(repeat, interval);
+    };
+    repeatTimer.current = setTimeout(repeat, REPEAT_DELAY_MS);
+  };
+
+  // The wheel steps only while the field has focus, so scrolling the page
+  // past a field never changes it. A native listener, since React's wheel
+  // handler is passive and can't stop the page scrolling instead.
+  const wheelStep = useRef(nudge);
+  wheelStep.current = nudge;
+  useEffect(() => {
+    const element = input.current;
+    if (!element) return;
+    const onWheel = (event: WheelEvent) => {
+      if (document.activeElement !== element || event.deltaY === 0) return;
+      event.preventDefault();
+      wheelStep.current(event.deltaY < 0 ? 1 : -1, stepSizeOf(event));
+    };
+    element.addEventListener("wheel", onWheel, { passive: false });
+    return () => element.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const stepperWidth = 18;
 
   const suffixStyle: CSSProperties = {
     position: "absolute",
@@ -163,7 +255,8 @@ export function CommitNumberInput({
         disabled={disabled}
         step={step}
         className={`${FIELD_INPUT} ${className ?? ""}`}
-        style={{ paddingRight: suffix || showStepper ? `${(suffix?.length ?? 0) * 7 + 12 + stepperWidth}px` : undefined }}
+        ref={input}
+        style={{ paddingRight: `${(suffix?.length ?? 0) * 7 + 12 + stepperWidth}px` }}
         onChange={(event) => setDraft(event.currentTarget.value)}
         onFocus={() => {
           focused.current = true;
@@ -188,36 +281,44 @@ export function CommitNumberInput({
           } else if (event.key === "Escape") {
             cancelled.current = true;
             event.currentTarget.blur();
-          } else if (showStepper && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+          } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
             // The field is `type="text"`, so arrows would otherwise just move
             // the caret. Same coalescing as the buttons.
             event.preventDefault();
-            nudge(event.key === "ArrowUp" ? 1 : -1);
+            nudge(event.key === "ArrowUp" ? 1 : -1, stepSizeOf(event));
+          } else if (event.key === "PageUp" || event.key === "PageDown") {
+            event.preventDefault();
+            nudge(event.key === "PageUp" ? 1 : -1, "coarse");
           }
         }}
       />
       {suffix && <span style={suffixStyle}>{suffix}</span>}
-      {showStepper && (
-        <div className="absolute top-px right-px bottom-px flex w-[15px] flex-col justify-center">
-          {([1, -1] as const).map((direction) => (
-            <button
-              key={direction}
-              type="button"
-              tabIndex={-1}
-              disabled={disabled}
-              aria-label={direction === 1 ? "Increase" : "Decrease"}
-              // Keeps focus (and therefore the draft) in the input: letting
-              // the button take focus would blur-commit the typed value and
-              // then commit the step, i.e. two writes for one gesture.
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => nudge(direction)}
-              className="flex flex-1 items-center justify-center text-[var(--amp-color-dimmed)] hover:text-[var(--amp-color-text)]"
-            >
-              {direction === 1 ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="absolute top-px right-px bottom-px flex flex-col" style={{ width: stepperWidth }}>
+        {([1, -1] as const).map((direction) => (
+          <button
+            key={direction}
+            type="button"
+            tabIndex={-1}
+            disabled={disabled}
+            aria-label={direction === 1 ? "Increase" : "Decrease"}
+            // Keeps focus (and therefore the draft) in the input: letting
+            // the button take focus would blur-commit the typed value and
+            // then commit the step, i.e. two writes for one gesture.
+            onMouseDown={(event) => event.preventDefault()}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              startRepeat(direction, stepSizeOf(event));
+            }}
+            onPointerUp={stopRepeat}
+            onPointerCancel={stopRepeat}
+            onLostPointerCapture={stopRepeat}
+            className="flex min-h-0 flex-1 items-center justify-center rounded-xs text-[var(--amp-color-dimmed)] hover:bg-[var(--amp-color-default)] hover:text-[var(--amp-color-text)] disabled:opacity-40"
+          >
+            {direction === 1 ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

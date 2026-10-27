@@ -235,6 +235,27 @@
   }
 }
 
+/* An EQ write in flight: the curve (and the stage's handle) breathe until
+   the amp acknowledges it. */
+@keyframes eq-write-pending {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.eq-write-pending {
+  animation: eq-write-pending 1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .eq-write-pending {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
 @keyframes merge-pulse {
   from {
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--amp-color-green-filled) 55%, transparent);
