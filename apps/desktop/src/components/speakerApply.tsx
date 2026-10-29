@@ -3,6 +3,7 @@ import { toast } from "@heroui/react";
 import { commands, type FitRow, type SpeakerItem, type SpeakerLibraryEntry } from "../lib/bindings";
 import type { useConfirm } from "./ConfirmDialog";
 import { MUTED } from "./SpeakerBench";
+import { outputLetter } from "../lib/channelTelemetry";
 
 /** One output of one project amp to set up from a library way. */
 export interface FitItem {
@@ -91,7 +92,7 @@ export async function confirmFit({
 /** The question before bridging or unbridging the pair led by output
  * `leader` — the Output tab's own wording (`handleBridgeToggle`). */
 export function bridgeConfirm(leader: number, bridged: boolean): Parameters<ReturnType<typeof useConfirm>["confirm"]>[0] {
-  const [a, b] = [String.fromCharCode(65 + leader), String.fromCharCode(66 + leader)];
+  const [a, b] = [outputLetter(leader), outputLetter(leader + 1)];
   return bridged
     ? {
         title: `Bridge outputs ${a} and ${b}?`,

@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use super::super::amp_model::{AmpDspTopology, AmpModelCatalogEntry, SourceChannelCount};
-use super::{AmpCapability, ParamRange, PowerMode, SourceKind};
+use super::super::validation::AmpLimits;
+use super::{AmpCapability, LiveCapability, ParamRange, PowerMode, SourceKind};
 
 /// Fixed EQ structure on every CVR channel, both directions (input/output):
 /// band 0 = HP crossover, bands 1-8 = parametric, band 9 = LP crossover.
@@ -33,6 +34,16 @@ pub struct CvrFirmwareCapability {
     pub fir_filters: bool,
     pub noise_gate_threshold: bool,
     pub extended_delay: bool,
+    /// Whether this app writes to the amp at all: exactly 1.1.8 or 1.1.9, the
+    /// firmware its encoders were checked against. `firmware_family` buckets
+    /// everything below 119 as "1.1.8" and everything above as "1.1.9" so
+    /// those amps can still be *read*, but a bucket is not evidence that a
+    /// 1.1.6 or 1.2.0 amp takes the same packets.
+    pub writes_verified: bool,
+    /// The FIR buffer (FC=43): taps it holds and the rate they run at.
+    /// Constant across the line; carried here so no frontend hardcodes them.
+    pub fir_max_taps: u32,
+    pub fir_sample_rate_hz: u32,
 }
 
 impl CvrFirmwareCapability {
@@ -45,6 +56,9 @@ impl CvrFirmwareCapability {
             fir_filters: at_least(VNUM_118),
             noise_gate_threshold: at_least(VNUM_119),
             extended_delay: at_least(VNUM_119),
+            writes_verified: matches!(v_num, Some(VNUM_118 | VNUM_119)),
+            fir_max_taps: crate::live::cvr::fir::FIR_MAX_TAPS as u32,
+            fir_sample_rate_hz: crate::live::cvr::fir::FIR_SAMPLE_RATE_HZ,
         }
     }
 }
@@ -358,9 +372,73 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
     }
 }
 
+/// `resolve_live` for a CVR amp: everything comes from the firmware string,
+/// rated voltage included.
+pub fn resolve_live(firmware_version: &str) -> LiveCapability {
+    let firmware = CvrFirmwareCapability::from_version(Some(firmware_version));
+    LiveCapability {
+        firmware,
+        limits: AmpLimits {
+            ranges: cvr_param_ranges(&firmware),
+            rated_rms_voltage: rated_rms_voltage_from_firmware_string(firmware_version),
+        },
+    }
+}
+
+/// How far either side of `amp_gain_base_dbv` the vendor app lets the gain be
+/// set: `MainVolGain::setMaxMinGain` makes the bounds `base - 6` and `base + 6`.
+pub const AMP_GAIN_SPAN_DB: f64 = 6.0;
+
+/// The level, in dBV, an output's gain is set against — its full rated output
+/// in the current power mode. Low-impedance mode uses discovery's `gain_max`
+/// (a DSP-2004 reports 42, its 126.5 V rating); the constant-voltage modes use
+/// their line voltage, 70.7 V ≈ 37 dBV and 100 V = 40 dBV. That is the vendor's
+/// `MainVolGain::setMaxMinGain`, which branches on `CPCR` — a field its sync
+/// parse fills from the DZ_DY power mode.
+///
+/// `None` when the base is unknown: a power mode the parser didn't recognize,
+/// or low-ohm on an amp that reports no `gain_max`.
+pub fn amp_gain_base_dbv(gain_max: u32, power_mode: Option<PowerMode>) -> Option<f64> {
+    match power_mode? {
+        PowerMode::LowOhm => (gain_max > 0).then_some(f64::from(gain_max)),
+        PowerMode::V70 => Some(37.0),
+        PowerMode::V100 => Some(40.0),
+    }
+}
+
+/// The dB an output's gain may be set to: `amp_gain_base_dbv` ±
+/// `AMP_GAIN_SPAN_DB`. This is the vendor UI's span, not a known firmware
+/// limit — an amp can hold a gain outside it, set some other way.
+pub fn amp_gain_range_db(gain_max: u32, power_mode: Option<PowerMode>) -> Option<ParamRange> {
+    amp_gain_base_dbv(gain_max, power_mode).map(|base| ParamRange { min: base - AMP_GAIN_SPAN_DB, max: base + AMP_GAIN_SPAN_DB })
+}
+
+/// The input level (Vrms) that drives an output at `gain_db` to its full
+/// rated output — the vendor's "SEN", `MainVolGain::getSEN4Gain`:
+/// `10^((base − gain) / 20)`.
+pub fn amp_sensitivity_v(gain_db: f64, gain_max: u32, power_mode: Option<PowerMode>) -> Option<f64> {
+    amp_gain_base_dbv(gain_max, power_mode).map(|base| 10f64.powf((base - gain_db) / 20.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base follows the power mode, as the vendor's `CPCR` switch does;
+    /// an unknown base yields no range rather than a guessed one.
+    #[test]
+    fn amp_gain_range_follows_power_mode() {
+        let range = |gain_max, mode| amp_gain_range_db(gain_max, mode).map(|r| (r.min, r.max));
+        assert_eq!(range(42, Some(PowerMode::LowOhm)), Some((36.0, 48.0)));
+        assert_eq!(range(42, Some(PowerMode::V70)), Some((31.0, 43.0)));
+        assert_eq!(range(42, Some(PowerMode::V100)), Some((34.0, 46.0)));
+        // Constant-voltage modes don't need `gain_max` at all.
+        assert_eq!(range(0, Some(PowerMode::V70)), Some((31.0, 43.0)));
+        assert_eq!(range(0, Some(PowerMode::LowOhm)), None);
+        assert_eq!(range(42, None), None);
+        // Gain equal to the base: full output at 1 V in.
+        assert_eq!(amp_sensitivity_v(42.0, 42, Some(PowerMode::LowOhm)), Some(1.0));
+    }
 
     fn ranges(fw: Option<&str>) -> AmpParamRanges {
         cvr_param_ranges(&CvrFirmwareCapability::from_version(fw))

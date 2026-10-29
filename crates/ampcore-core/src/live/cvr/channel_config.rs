@@ -10,7 +10,7 @@
 use serde::Serialize;
 use specta::Type;
 
-use crate::data::capability::PowerMode;
+use crate::data::capability::{ParamRange, PowerMode};
 use crate::data::project::{BackupPriority, ChannelEq, ChannelSource, Limiter, MatrixCrosspoint};
 
 /// The parts of one EQ chain's wire body this app's model has no home for,
@@ -83,6 +83,12 @@ pub struct ChannelConfig {
     /// `None` for a value that isn't positive — no power amp has 0 dB of
     /// gain, so that is the field left unfilled, not a reading.
     pub amp_gain_db: Option<f32>,
+    /// What `amp_gain_db` may be set to (`capability::cvr::amp_gain_range_db`)
+    /// and the input sensitivity it implies (`amp_sensitivity_v`). Both
+    /// depend on discovery's `gain_max`, which the parser doesn't see, so it
+    /// leaves them `None` and `driver.rs` fills them in.
+    pub amp_gain_range_db: Option<ParamRange>,
+    pub amp_sensitivity_v: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

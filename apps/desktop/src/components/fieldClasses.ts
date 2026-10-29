@@ -10,3 +10,7 @@ export const FIELD_INPUT =
   "w-full rounded-md border border-field-border bg-field px-2 py-1 text-sm text-field-foreground " +
   "outline-none placeholder:text-field-placeholder hover:border-field-border-hover " +
   "focus:border-field-border-focus disabled:opacity-(--disabled-opacity)";
+
+/** A titled card's small uppercase heading (Input / Output and Overview tabs). */
+export const SECTION_TITLE =
+  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";

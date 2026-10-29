@@ -4,20 +4,20 @@ import { Volume2, VolumeX } from "lucide-react";
 import type { ConfigurableTabProps } from "./AmpConfigureView";
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { CommitNumberInput } from "./CommitNumberInput";
-import { MultiSelect } from "./MultiSelect";
-import { SimpleSelect } from "./SimpleSelect";
+import { SECTION_TITLE } from "./fieldClasses";
+import { Hint } from "./Hint";
 import { StatToggle } from "./StatTiles";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
 import type { ActionResult } from "../lib/actionResult";
-import type { AmpChannel, AmpChannelState, DiscoveredDevice, SourceChannelCount, SourceKind } from "../lib/bindings";
-import { channelTelemetry, type ChannelTelemetry } from "../lib/channelTelemetry";
+import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../lib/bindings";
+import { channelTelemetry, type ChannelTelemetry, outputLetter } from "../lib/channelTelemetry";
 import { channelStateTone } from "../lib/channelState";
 import { usePreference } from "../lib/preferences";
 
 /* The vendor app's Main page, rebuilt from this app's own parts: every
- * channel's level, gain and routing on one screen for quick adjustments,
- * with the detailed per-channel editors left to the Input / Output tab.
+ * channel's level and gain on one screen for quick adjustments, with routing
+ * left to the Matrix tab and the per-channel editors to the Input / Output tab.
  *
  * Three cards side by side, as on the vendor page — Volume, Source, Output —
  * each a row of fixed-width channel columns between a label column and (for
@@ -29,20 +29,21 @@ import { usePreference } from "../lib/preferences";
 /** Every channel column is the strip tile's own width, so the Mute toggle
  * fills its column exactly and the three cards read as one grid. */
 const COLUMN_W = 72;
-/** The Source card's columns are wider: a select has to fit "Dante" beside
- * its chevron. */
-const SOURCE_COLUMN_W = 84;
-/** Faders and meters share one height, so their ends line up across cards. */
+/** Faders and meters share one height and all start right under the header,
+ * so their ends line up across cards. */
 const STRIP_H = 200;
 /** How far inside its box a vertical HeroUI slider's thumb stops at either
  * end: the slider grid's 0.5rem row gap plus the track's 0.75rem transparent
  * border (`@heroui/styles` slider.css). The fader scale is inset to match, so
- * a label sits level with the thumb at that value. */
+ * a label sits level with the thumb at that value.
+ * ponytail: copied from @heroui/styles 3.2.5's vertical slider (`gap-2` +
+ * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
+ * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
-/** A value row: the dB/Gain/SEN fields and the V/A/W/°C readouts. */
+/** A value row: the dB/Gain/SEN fields and the V/A/VA/°C readouts. */
 const ROW_H = 30;
-/** A column's channel number or letter. */
-const HEADER_H = 18;
+/** A column's channel number or letter, with its name under it. */
+const HEADER_H = 36;
 /** `StatToggle`'s fixed height — the Mute row. */
 const TOGGLE_H = 52;
 /** Label/scale columns, and the Output card's LED legend. */
@@ -50,9 +51,6 @@ const SIDE_W = 44;
 const LEGEND_W = 56;
 const GAP = 8;
 const LED_ROW_H = 16;
-
-const SECTION_TITLE =
-  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
 
 /** The level meters' scale — the same −60..0 the Input / Output tab's
  * horizontal meters use (`LEVEL_MARKS` there): 1 V on inputs, rated output
@@ -113,37 +111,34 @@ const fmt = (value: number | null, digits: number) => (value === null ? "—" : 
 
 interface OutputTotals {
   currentA: number | null;
-  powerW: number | null;
+  powerVa: number | null;
 }
 
-/** One output's power as V × A — apparent power: the heartbeat carries no
- * phase, so a reactive speaker load takes somewhat less real power. */
-function outputPowerW({ outputVoltage, outputCurrent }: ChannelTelemetry): number | null {
-  return outputVoltage === null || outputCurrent === null ? null : outputVoltage * outputCurrent;
-}
-
-/** What the outputs deliver between them: summed current and power. There is
+/** What the outputs deliver between them: summed current and apparent power
+ * (`ChannelTelemetry.outputPowerVa`). There is
  * no mains reading, so this is the load side, not what the amp draws from the
  * wall. `null` when no output has a reading. */
 function outputTotals(readings: ChannelTelemetry[]): OutputTotals {
   let currentA: number | null = null;
-  let powerW: number | null = null;
+  let powerVa: number | null = null;
   for (const reading of readings) {
     if (reading.outputCurrent === null) continue;
     currentA = (currentA ?? 0) + reading.outputCurrent;
-    const power = outputPowerW(reading);
-    if (power !== null) powerW = (powerW ?? 0) + power;
+    if (reading.outputPowerVa !== null) powerVa = (powerVa ?? 0) + reading.outputPowerVa;
   }
-  return { currentA, powerW };
+  return { currentA, powerVa };
 }
-
-const letterOf = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-1.5">
       <h3 className={SECTION_TITLE}>{title}</h3>
-      <div className="flex rounded-xl border border-[var(--amp-color-default-border)] p-3" style={{ gap: GAP }}>
+      {/* `flex-1`: the card row stretches its sections, so every card ends on
+       * the same bottom edge. */}
+      <div
+        className="flex min-w-0 flex-1 overflow-x-auto rounded-xl border border-[var(--amp-color-default-border)] p-3"
+        style={{ gap: GAP }}
+      >
         {children}
       </div>
     </section>
@@ -184,15 +179,26 @@ function SideText({ children }: { children: ReactNode }) {
   );
 }
 
-function ChannelHeader({ children }: { children: ReactNode }) {
+function ChannelHeader({ label, name }: { label: string; name: string }) {
   return (
-    <Cell height={HEADER_H}>
+    <div className="flex min-w-0 flex-col items-center justify-center" style={{ height: HEADER_H }}>
       <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 600, color: "var(--amp-color-dimmed)" }}>
-        {children}
+        {label}
       </span>
-    </Cell>
+      <Hint text={name} className="w-full min-w-0">
+        <span className="block truncate text-center text-[length:var(--amp-font-size-xs)]">{name}</span>
+      </Hint>
+    </div>
   );
 }
+
+/** The name the amp holds for an input, or its default label. */
+const inputName = (channel: AmpChannel) => channel.inputName?.trim() || `In${channel.channelIndex + 1}`;
+
+/** Same for an output, without the legacy `_XXXX` speaker-hash suffix (core's
+ * `split_hash_suffix`). */
+const outputName = (channel: AmpChannel) =>
+  channel.outputName?.trim().replace(/_[0-9a-fA-F]{4}$/, "") || `Out${outputLetter(channel.channelIndex)}`;
 
 /** A passive value, recessed like `StatReadout` but one row high. */
 function ValueCell({ value }: { value: string }) {
@@ -298,7 +304,7 @@ function VolumeStrip({
   useEffect(() => {
     setGainDraft(gain.gainDb);
   }, [gain.gainDb]);
-  const letter = letterOf(channel.channelIndex);
+  const letter = outputLetter(channel.channelIndex);
 
   // A refused write leaves the amp's value where it was, so the effects above
   // never fire; without the reset the fader and fields would keep showing a
@@ -321,7 +327,7 @@ function VolumeStrip({
 
   return (
     <Column>
-      <ChannelHeader>{letter}</ChannelHeader>
+      <ChannelHeader label={letter} name={outputName(channel)} />
       <Cell height={STRIP_H}>
         <Slider
           orientation="vertical"
@@ -346,8 +352,7 @@ function VolumeStrip({
         value={drag}
         min={min}
         max={max}
-        step={0.5}
-        format={(value) => value.toFixed(1)}
+        step={0.1}
         onCommit={commit}
       />
       {/* Editable only with a write path, a reading to start from, and a
@@ -359,7 +364,6 @@ function VolumeStrip({
           min={gain.range.min}
           max={gain.range.max}
           step={1}
-          showStepper
           format={(value) => value.toFixed(1)}
           onCommit={commitGain}
         />
@@ -371,69 +375,18 @@ function VolumeStrip({
   );
 }
 
-interface SourceOption {
-  value: string;
-  label: string;
-  kind: SourceKind;
-  index: number;
-  /** Wired 1:1 to the channel, so it matches whatever index the amp reports. */
-  fixed: boolean;
-}
-
-/** The inputs a channel can take, as the vendor's In1…In4 buttons offer them.
- * A patchable kind (Analog) lists every physical input; a fixed one (Dante)
- * is wired 1:1 to this channel — the same rule as the Matrix tab's
- * `SourcePicker`. Backup is a failover state, not a choice, so it is left out. */
-function sourceOptions(sourceCounts: SourceChannelCount[], channelIndex: number): SourceOption[] {
-  const options: SourceOption[] = [];
-  for (const sc of sourceCounts) {
-    if (sc.kind === "backup") continue;
-    const prefix = sc.kind === "analog" ? "In" : "Dante ";
-    const indices = sc.patchable ? Array.from({ length: sc.channelCount }, (_, i) => i) : [channelIndex];
-    for (const index of indices) {
-      options.push({
-        value: `${sc.kind}:${index}`,
-        label: sc.patchable ? `${prefix}${index + 1}` : sc.kind === "analog" ? "Analog" : "Dante",
-        kind: sc.kind,
-        index,
-        fixed: !sc.patchable,
-      });
-    }
-  }
-  return options;
-}
-
 function SourceStrip({
   channel,
-  options,
   reading,
   peakHold,
-  onSelect,
 }: {
   channel: AmpChannel;
-  options: SourceOption[];
   reading: ChannelTelemetry;
   peakHold: boolean;
-  onSelect?: (kind: SourceKind, index: number) => Promise<ActionResult>;
 }) {
-  const current = options.find(
-    (o) => o.kind === channel.source.kind && (o.fixed || o.index === channel.source.index),
-  );
-
   return (
-    <Column width={SOURCE_COLUMN_W}>
-      <ChannelHeader>{channel.channelIndex + 1}</ChannelHeader>
-      <SimpleSelect
-        data={options.map(({ value, label }) => ({ value, label }))}
-        value={current?.value ?? null}
-        placeholder={channel.source.kind === "backup" ? "Backup" : channel.source.kind === "aes3" ? "AES3" : "—"}
-        disabled={!onSelect}
-        style={{ width: SOURCE_COLUMN_W }}
-        onChange={(value) => {
-          const option = options.find((o) => o.value === value);
-          if (option && onSelect) void onSelect(option.kind, option.index);
-        }}
-      />
+    <Column>
+      <ChannelHeader label={String(channel.channelIndex + 1)} name={inputName(channel)} />
       <Cell height={STRIP_H}>
         <LevelMeter levelDb={reading.inputDbv} peakHold={peakHold} disabled={channel.inputMuted ?? false} />
       </Cell>
@@ -447,22 +400,15 @@ function SourceStrip({
 function OutputStrip({
   channel,
   reading,
-  sourceCount,
   peakHold,
-  onRoute,
   onMute,
 }: {
   channel: AmpChannel;
   reading: ChannelTelemetry;
-  sourceCount: number;
   peakHold: boolean;
-  onRoute?: (sourceIndex: number, active: boolean) => Promise<ActionResult>;
   onMute: () => Promise<ActionResult>;
 }) {
   const muted = channel.outputMuted ?? false;
-  const routed = Array.from({ length: sourceCount }, (_, i) => i).filter(
-    (i) => channel.matrixCrosspoints?.find((c) => c.sourceIndex === i)?.active ?? false,
-  );
   const status: OutputStatus = {
     state: reading.outputState,
     hiZ: channel.powerMode === "v70" || channel.powerMode === "v100",
@@ -471,24 +417,7 @@ function OutputStrip({
 
   return (
     <Column>
-      <ChannelHeader>{letterOf(channel.channelIndex)}</ChannelHeader>
-      {/* The vendor's A/B button: which inputs this output mixes. One click in
-       * the list toggles one crosspoint, so the change is always one write. */}
-      <MultiSelect
-        data={Array.from({ length: sourceCount }, (_, i) => ({ value: String(i), label: `Input ${i + 1}` }))}
-        values={routed.map(String)}
-        summary={routed.length === sourceCount && sourceCount > 2 ? "All" : routed.map((i) => i + 1).join("+")}
-        emptyLabel="Off"
-        disabled={!onRoute}
-        style={{ width: COLUMN_W }}
-        onChange={(next) => {
-          if (!onRoute) return;
-          for (let i = 0; i < sourceCount; i++) {
-            const active = next.includes(String(i));
-            if (active !== routed.includes(i)) void onRoute(i, active);
-          }
-        }}
-      />
+      <ChannelHeader label={outputLetter(channel.channelIndex)} name={outputName(channel)} />
       <Cell height={STRIP_H}>
         <div className="flex h-full items-end gap-2.5">
           <LevelMeter levelDb={reading.outputLevelDb} peakHold={peakHold} disabled={muted} />
@@ -510,7 +439,7 @@ function OutputStrip({
       />
       <ValueCell value={fmt(reading.outputVoltage, 1)} />
       <ValueCell value={fmt(reading.outputCurrent, 1)} />
-      <ValueCell value={fmt(outputPowerW(reading), 0)} />
+      <ValueCell value={fmt(reading.outputPowerVa, 0)} />
       <ValueCell value={fmt(reading.temperatureC, 0)} />
     </Column>
   );
@@ -549,7 +478,7 @@ function InfoBar({
       <InfoItem label="Firmware">{device.firmwareVersion || "—"}</InfoItem>
       <InfoItem label="Preset">{presetName || "—"}</InfoItem>
       <InfoItem label="Total">
-        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerW, 0)} W`}
+        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerVa, 0)} VA`}
       </InfoItem>
       <InfoItem label="PSU">{psuTempC === null ? "—" : `${psuTempC.toFixed(0)} °C`}</InfoItem>
       <InfoItem label="Status">
@@ -579,13 +508,12 @@ export function OverviewTab({
   const volumeMin = capability.paramRanges.outputVolumeDb.min ?? -80;
   const volumeMax = capability.paramRanges.outputVolumeDb.max ?? 18;
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
-  const sourceCount = capability.topology.matrixInputCount;
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const readings = channels.map((c) => channelTelemetry(telemetry, c.channelIndex, ratedRmsVoltage));
   const psuTempC = telemetry?.temperatures[4] ?? null;
   const totals = outputTotals(readings);
 
-  const { setChannelAmpGain, setChannelSource, setMatrixCrosspoint } = actions;
+  const { setChannelAmpGain } = actions;
 
   return (
     <div className="h-full min-h-0 overflow-auto">
@@ -601,7 +529,7 @@ export function OverviewTab({
             totals={totals}
           />
         )}
-        <div className="flex flex-wrap items-start gap-4" style={{ justifyContent: "safe center" }}>
+        <div className="flex flex-wrap items-stretch gap-4" style={{ justifyContent: "safe center" }}>
           <Section title="Volume">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
@@ -653,7 +581,6 @@ export function OverviewTab({
           <Section title="Source">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
-              <Cell height={ROW_H} />
               <Scale min={METER_FLOOR_DB} max={0} marks={METER_MARKS} />
               <Cell height={LED_ROW_H} align="end">
                 <SideText>Clip</SideText>
@@ -663,12 +590,8 @@ export function OverviewTab({
               <SourceStrip
                 key={channel.channelIndex}
                 channel={channel}
-                options={sourceOptions(capability.topology.sourceCounts, channel.channelIndex)}
                 reading={readings[i]}
                 peakHold={peakHoldSurfaces.includes("input")}
-                onSelect={
-                  setChannelSource ? (kind, index) => setChannelSource(channel.channelIndex, kind, index) : undefined
-                }
               />
             ))}
           </Section>
@@ -676,9 +599,6 @@ export function OverviewTab({
           <Section title="Output">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
-              <Cell height={ROW_H} align="end">
-                <SideText>Route</SideText>
-              </Cell>
               <Scale min={METER_FLOOR_DB} max={0} marks={METER_MARKS} />
               <Cell height={TOGGLE_H} />
               <Cell height={ROW_H} align="end">
@@ -688,7 +608,7 @@ export function OverviewTab({
                 <SideText>A</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
-                <SideText>W</SideText>
+                <SideText>VA</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
                 <SideText>°C</SideText>
@@ -699,22 +619,15 @@ export function OverviewTab({
                 key={channel.channelIndex}
                 channel={channel}
                 reading={readings[i]}
-                sourceCount={sourceCount}
                 peakHold={peakHoldSurfaces.includes("output")}
-                onRoute={
-                  setMatrixCrosspoint
-                    ? (sourceIndex, active) => setMatrixCrosspoint(channel.channelIndex, sourceIndex, null, active)
-                    : undefined
-                }
                 onMute={() => actions.setChannelOutputMute(channel.channelIndex, !(channel.outputMuted ?? false))}
               />
             ))}
             {/* Legend for the LED column, bottom-aligned with it; below it,
-             * the A and W rows' totals under a label in the V row, where a
+             * the A and VA rows' totals under a label in the V row, where a
              * sum would mean nothing. */}
             <Column width={LEGEND_W}>
               <Cell height={HEADER_H} />
-              <Cell height={ROW_H} />
               <div className="flex flex-col justify-end" style={{ height: STRIP_H }}>
                 {STATUS_LEDS.map((led) => (
                   <Cell key={led.label} height={LED_ROW_H} align="start">
@@ -727,7 +640,7 @@ export function OverviewTab({
                 <SideText>Total</SideText>
               </Cell>
               <ValueCell value={fmt(totals.currentA, 1)} />
-              <ValueCell value={fmt(totals.powerW, 0)} />
+              <ValueCell value={fmt(totals.powerVa, 0)} />
             </Column>
           </Section>
         </div>

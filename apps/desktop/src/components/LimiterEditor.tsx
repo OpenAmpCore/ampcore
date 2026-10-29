@@ -7,6 +7,7 @@ import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } f
 import {
   buildLimiterThresholdVisuals,
   FALLBACK_LIMITER,
+  outputLetter,
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
@@ -190,7 +191,7 @@ export function LimiterEditor({
   const voltageMultiplier = isBridged ? 2 : 1;
   const effectiveOhms = isBridged ? (leaderChannel?.ohms ?? 8) : ohms;
   const partnerIndex = channelIndex === pairLeaderIndex ? pairFollowerIndex : pairLeaderIndex;
-  const partnerLetter = String.fromCharCode(65 + partnerIndex);
+  const partnerLetter = outputLetter(partnerIndex);
 
   function toDisplay(raw: number) {
     return raw * voltageMultiplier;
@@ -261,7 +262,7 @@ export function LimiterEditor({
             actions={actions}
             channelIndex={channelIndex}
             section={section}
-            label={`${assignment.deviceName ?? "Amp"} · Out ${String.fromCharCode(65 + channelIndex)} ${
+            label={`${assignment.deviceName ?? "Amp"} · Out ${outputLetter(channelIndex)} ${
               section === "rmsLimiter" ? "RMS" : "Peak"
             } limiter`}
           />
@@ -651,6 +652,7 @@ function LimiterNumberField({
         value={displayValue}
         min={min}
         max={max}
+        step={integer ? 1 : 0.1}
         suffix={suffix}
         integer={integer}
         disabled={disabled || !onCommit}

@@ -40,7 +40,7 @@ import {
 import { CommitNumberInput } from "./CommitNumberInput";
 import { useConfirm } from "./ConfirmDialog";
 import { SimpleSelect } from "./SimpleSelect";
-import { FIELD_INPUT } from "./fieldClasses";
+import { FIELD_INPUT, SECTION_TITLE } from "./fieldClasses";
 import { EqEditor } from "./EqEditor";
 import {
   FingerprintInspector,
@@ -89,6 +89,7 @@ import {
   buildLimiterThresholdVisuals,
   channelTelemetry,
   FALLBACK_LIMITER,
+  outputLetter,
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import {
@@ -356,28 +357,34 @@ function SourcePicker({
                   </div>
                 )}
               </div>
-              <EditorRow label="Delay">
-                <CommitNumberInput
-                  value={trim.delayMs ?? 0}
-                  min={paramRanges.sourceDelayMs.min ?? 0}
-                  max={paramRanges.sourceDelayMs.max ?? 30}
-                  step={0.01}
-                  suffix="ms"
-                  showStepper
-                  onCommit={(delayMs) => void feedback.track(onTrimChange(sc.kind, trim.trimDb ?? 0, delayMs))}
-                />
-              </EditorRow>
-              <EditorRow label="Trim">
-                <CommitNumberInput
-                  value={trim.trimDb ?? 0}
-                  min={trimRange(sc.kind).min ?? -18}
-                  max={trimRange(sc.kind).max ?? 18}
-                  step={0.1}
-                  suffix="dB"
-                  showStepper
-                  onCommit={(trimDb) => void feedback.track(onTrimChange(sc.kind, trimDb, trim.delayMs ?? 0))}
-                />
-              </EditorRow>
+              {/* The vendor's per-source "gain/delay matching" (FC=62): a
+               * hardware preset recalls which source is used, not these. */}
+              <div
+                className="flex flex-col gap-1.5 rounded-md border border-dashed p-1.5"
+                style={{ borderColor: "var(--amp-color-orange-6)" }}
+              >
+                <EditorRow label="Delay">
+                  <CommitNumberInput
+                    value={trim.delayMs ?? 0}
+                    min={paramRanges.sourceDelayMs.min ?? 0}
+                    max={paramRanges.sourceDelayMs.max ?? 30}
+                    step={0.01}
+                    suffix="ms"
+                    onCommit={(delayMs) => void feedback.track(onTrimChange(sc.kind, trim.trimDb ?? 0, delayMs))}
+                  />
+                </EditorRow>
+                <EditorRow label="Trim">
+                  <CommitNumberInput
+                    value={trim.trimDb ?? 0}
+                    min={trimRange(sc.kind).min ?? -18}
+                    max={trimRange(sc.kind).max ?? 18}
+                    step={0.1}
+                    suffix="dB"
+                    onCommit={(trimDb) => void feedback.track(onTrimChange(sc.kind, trimDb, trim.delayMs ?? 0))}
+                  />
+                </EditorRow>
+                <span style={{ fontSize: 10, color: "var(--amp-color-orange-6)" }}>Not in hardware presets.</span>
+              </div>
             </div>
           );
         })}
@@ -415,11 +422,11 @@ function SourcePicker({
             <EditorRow label="Threshold">
               <CommitNumberInput
                 value={backupPriority.thresholdDb}
+                integer
                 min={paramRanges.backupThresholdDb.min ?? -80}
                 max={paramRanges.backupThresholdDb.max ?? 0}
                 step={1}
                 suffix="dB"
-                showStepper
                 onCommit={(thresholdDb) =>
                   void feedback.track(
                     onBackupChange(primaryCode, complementOf(primaryCode), backupPriority.enabled, thresholdDb),
@@ -931,7 +938,7 @@ function InputChannelRow({
                 value={delayInMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
-                step={0.5}
+                step={0.01}
                 suffix=" ms"
                 onCommit={(value) => void delayFeedback.track(onDelayChange(value))}
               />
@@ -1057,7 +1064,7 @@ function OutputChannelRow({
   return (
     <div>
       <RenameableLabel
-        defaultLabel={`Out${String.fromCharCode(65 + channel.channelIndex)}`}
+        defaultLabel={`Out${outputLetter(channel.channelIndex)}`}
         name={channel.outputName}
         maxLength={nameMaxLength}
         onRename={onRename}
@@ -1171,7 +1178,7 @@ function OutputChannelRow({
                 value={volumeDb}
                 min={volumeMin ?? undefined}
                 max={volumeMax ?? undefined}
-                step={0.5}
+                step={0.1}
                 suffix=" dB"
                 onCommit={(value) => void volumeFeedback.track(onChange("volume", value))}
               />
@@ -1209,7 +1216,7 @@ function OutputChannelRow({
                 value={trimDb}
                 min={trimMin ?? undefined}
                 max={trimMax ?? undefined}
-                step={0.5}
+                step={0.1}
                 suffix=" dB"
                 onCommit={(value) => void trimFeedback.track(onChange("trim", value))}
               />
@@ -1261,7 +1268,7 @@ function OutputChannelRow({
                 value={delayMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
-                step={0.5}
+                step={0.01}
                 suffix=" ms"
                 onCommit={(value) => void delayFeedback.track(onChange("delay", value))}
               />
@@ -1501,15 +1508,26 @@ function BridgePairSidebar({
   );
 }
 
-const SECTION_TITLE =
-  "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
-
 /** One titled card of the Main tab. Both cards span the pane; `maxWidth` caps
  * the rows inside at their natural one-line width (see `INPUT_ROW_MAX_WIDTH`). */
-function MainSection({ title, maxWidth, children }: { title: string; maxWidth: number; children: ReactNode }) {
+function MainSection({
+  title,
+  maxWidth,
+  actions,
+  children,
+}: {
+  title: string;
+  maxWidth: number;
+  /** Small buttons beside the title, acting on the whole card. */
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="flex min-w-0 flex-col gap-1.5">
-      <h3 className={SECTION_TITLE}>{title}</h3>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <h3 className={SECTION_TITLE}>{title}</h3>
+        {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+      </div>
       <div className="min-w-0 rounded-xl border border-[var(--amp-color-default-border)] p-3">
         <div className="flex w-full min-w-0 flex-col gap-4" style={{ maxWidth }}>
           {children}
@@ -1558,7 +1576,7 @@ function ChannelEditorModal({
   const compact = useIsCompact();
   const isInput = target?.kind === "inputEq";
   const channel = assignment.channels.find((c) => c.channelIndex === target?.channelIndex) ?? assignment.channels[0];
-  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : String.fromCharCode(65 + channelIndex));
+  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : outputLetter(channelIndex));
   const channels = isInput
     ? assignment.channels
     : assignment.channels.filter(
@@ -1601,6 +1619,7 @@ function ChannelEditorModal({
                       channelIndex={channel.channelIndex}
                       label={label(channel.channelIndex)}
                       capability={capability}
+                      eq={channel.outputEq}
                       bypassed={channel.firBypassed ?? false}
                       stored={channel.fir}
                       onBypassChange={(next) => actions.setChannelFirBypass(channel.channelIndex, next)}
@@ -1734,7 +1753,7 @@ function MainTab({
   }
 
   const letterLabel = (c: AmpAssignment["channels"][number]) =>
-    String.fromCharCode(65 + c.channelIndex);
+    outputLetter(c.channelIndex);
 
   // Fixed adjacent pairing (0,1), (2,3), … — mirrors the old app's bridging
   // convention. A trailing unpaired channel (odd total count) has no
@@ -1923,8 +1942,10 @@ function MatrixCrosspointCell({
         onMouseLeave={() => onHoverChange(false)}
       >
         <StatEditorTile
-          value={active ? `${gainDb.toFixed(1)} dB` : "Mute"}
-          label={active ? "Active" : "Bypassed"}
+          // An unrouted cell stays quiet, so the active routes are what the
+          // eye lands on.
+          value={active ? `${gainDb.toFixed(1)} dB` : <span style={{ color: "var(--amp-color-dimmed)", fontWeight: 400 }}>—</span>}
+          label={active ? "On" : "Off"}
           // An active crosspoint is routing engaged, which is what the
           // accent colour means on every other tile.
           modified={active}
@@ -1958,7 +1979,7 @@ function MatrixCrosspointCell({
               value={gainDb}
               min={min ?? undefined}
               max={max ?? undefined}
-              step={0.5}
+              step={0.1}
               suffix=" dB"
               onCommit={(value) => void feedback.track(onGainChange(value))}
             />
@@ -2056,207 +2077,222 @@ function RoutingTab({
     return actions.setMatrixCrosspoint(channelIndex, sourceIndex, null, active);
   }
 
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const isFollower = (channelIndex: number) =>
+    channelIndex % 2 === 1 && (assignment.channels[channelIndex - 1]?.outputBridged ?? false);
+  const crosspointAt = (channel: AmpAssignment["channels"][number], sourceIndex: number) =>
+    channel.matrixCrosspoints?.find((c) => c.sourceIndex === sourceIndex) ?? { sourceIndex, gainDb: 0, active: false };
+
+  /** Sets every crosspoint's on/off to `want(output, input)`, writing only the
+   * cells that change. Sequential, and stops at the first failure (whose toast
+   * the action layer already shows). */
+  async function applyMatrix(
+    title: string,
+    description: string,
+    want: (channelIndex: number, sourceIndex: number) => boolean,
+  ) {
+    const set = actions.setMatrixCrosspoint;
+    if (!set || !(await confirm({ title, description, confirmLabel: "Apply" }))) return;
+    setBulkBusy(true);
+    try {
+      for (const channel of assignment.channels) {
+        if (isFollower(channel.channelIndex)) continue;
+        for (let sourceIndex = 0; sourceIndex < sourceCount; sourceIndex++) {
+          const active = want(channel.channelIndex, sourceIndex);
+          if (crosspointAt(channel, sourceIndex).active === active) continue;
+          if (!(await set(channel.channelIndex, sourceIndex, null, active)).ok) return;
+        }
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  /** A row or column header, lit while a cell on its line is hovered. */
+  const headerTone = (highlighted: boolean) =>
+    `rounded-md px-1.5 py-1 transition-colors duration-150 ${
+      highlighted ? "bg-accent-soft text-[var(--amp-color-text)]" : "text-[var(--amp-color-dimmed)]"
+    }`;
+
   return (
-    <CenteredScrollPane>
-      <div className="flex min-w-0 flex-col items-center gap-4">
-        <span style={{ fontWeight: 600 }}>Routing</span>
-        {/* The matrix has an irreducible width (one tile-wide column per source),
-         * so it stays a fixed grid and scrolls sideways inside its own
-         * scroll container on a narrow window rather than squeezing columns to
-         * illegibility. `max-w-full`/`min-w-0` is what stops that intrinsic
-         * width from instead pushing the whole page wider than the window. */}
-        <div className="min-w-0 max-w-full overflow-auto">
-          <div
-            style={{
-              display: "grid",
-              // Crosspoint columns match `StatEditorTile`'s default 72px, and
-              // the Source column matches `SOURCE_TILE_WIDTH`, so every cell
-              // fills its column exactly.
-              gridTemplateColumns: `20px ${SOURCE_TILE_WIDTH}px 28px repeat(${sourceCount}, 72px) minmax(150px, 230px)`,
-              alignItems: "center",
-              columnGap: 12,
-              rowGap: 8,
-              // Without these the grid always takes its max-content width, so
-              // the meter column sits at its 230px max even when that pushes
-              // the row a few px past the pane and raises a scrollbar over
-              // what looks like plenty of free space. `width: 100%` lets the
-              // one flexible track give way first; `max-content` stops the
-              // grid stretching past its natural size on a wide window. Once
-              // every track is at its floor the container still scrolls,
-              // which is the intended behaviour for the matrix.
-              width: "100%",
-              maxWidth: "max-content",
-            }}
-          >
-            <div />
-            <div />
-            <div />
-            <span
+    <div className="h-full min-h-0 overflow-auto">
+      {confirmDialog}
+      <div className="mx-auto flex w-full min-w-0 flex-col gap-4 p-4" style={{ maxWidth: 980 }}>
+        <MainSection title="Input sources" maxWidth={760}>
+          {assignment.channels.map((channel) => {
+            const t = channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage);
+            return (
+              <div key={channel.channelIndex} className="flex min-w-0 items-center gap-3">
+                <div className="flex w-[100px] min-w-0 shrink-0 flex-col">
+                  <span className="text-[length:var(--amp-font-size-sm)] font-semibold">
+                    Input {channel.channelIndex + 1}
+                  </span>
+                  {channel.inputName && (
+                    <Hint text={channel.inputName} className="min-w-0">
+                      <span className="block truncate text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
+                        {channel.inputName}
+                      </span>
+                    </Hint>
+                  )}
+                </div>
+                <SourcePicker
+                  source={channel.source}
+                  sourceCounts={sourceCounts}
+                  channelIndex={channel.channelIndex}
+                  sourceTrims={channel.sourceTrims ?? DEFAULT_SOURCE_TRIMS}
+                  backupPriority={channel.backupPriority ?? DEFAULT_BACKUP_PRIORITY}
+                  paramRanges={capability.paramRanges}
+                  onSelect={(kind, index) => handleSourceChange(channel.channelIndex, kind, index)}
+                  onTrimChange={(kind, trimDb, delayMs) =>
+                    handleSourceTrimChange(channel.channelIndex, kind, trimDb, delayMs)
+                  }
+                  onBackupChange={(first, second, enabled, thresholdDb) =>
+                    handleBackupChange(channel.channelIndex, first, second, enabled, thresholdDb)
+                  }
+                />
+                <ChannelLevelMeter
+                  levelDb={t.inputDbv}
+                  disabled={channel.inputMuted ?? false}
+                  peakHold={peakHoldSurfaces.includes("input")}
+                />
+                <InputClipPill clipping={t.inputClipping} raw={t.inputStateRaw} />
+              </div>
+            );
+          })}
+        </MainSection>
+
+        <MainSection
+          title="Matrix"
+          maxWidth={980}
+          actions={
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                isDisabled={!actions.setMatrixCrosspoint || bulkBusy}
+                onPress={() =>
+                  void applyMatrix(
+                    "Route straight through?",
+                    "Each output gets only its own input (1 to A, 2 to B, …). Gains are kept.",
+                    (channelIndex, sourceIndex) => channelIndex === sourceIndex,
+                  )
+                }
+              >
+                Straight
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                isDisabled={!actions.setMatrixCrosspoint || bulkBusy}
+                onPress={() =>
+                  void applyMatrix(
+                    "Clear the matrix?",
+                    "Every crosspoint is switched off, so no output receives any input. Gains are kept.",
+                    () => false,
+                  )
+                }
+              >
+                Clear all
+              </Button>
+            </>
+          }
+        >
+          {/* The matrix has an irreducible width (one tile-wide column per source),
+           * so it scrolls sideways in its own container on a narrow window rather
+           * than squeezing columns to illegibility. */}
+          <div className="min-w-0 max-w-full overflow-auto">
+            <div
               style={{
-                fontSize: "var(--amp-font-size-xs)",
-                color: "var(--amp-color-dimmed)",
-                textAlign: "center",
-                fontWeight: 600,
-                gridColumn: `span ${sourceCount}`,
+                display: "grid",
+                // Crosspoint columns match `StatEditorTile`'s default 72px.
+                gridTemplateColumns: `minmax(90px, 140px) repeat(${sourceCount}, 72px) minmax(150px, 1fr)`,
+                alignItems: "center",
+                columnGap: 12,
+                rowGap: 10,
+                // `width: 100%` lets the meter track give way first; once every
+                // track is at its floor the container scrolls.
+                width: "100%",
               }}
             >
-              Input
-            </span>
-            <div />
-
-            <div />
-            <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}>
-              Source
-            </span>
-            <div />
-            {Array.from({ length: sourceCount }).map((_, i) => {
-              const highlighted = hoveredCell?.sourceIndex === i;
-              return (
-                <div key={i} className="flex flex-col items-center gap-1.5">
-                  <span
-                    style={{
-                      fontSize: "var(--amp-font-size-sm)",
-                      textAlign: "center",
-                      color: highlighted
-                        ? "var(--amp-color-text)"
-                        : "var(--amp-color-dimmed)",
-                      transition: "color 150ms ease",
-                    }}
-                  >
-                    {i + 1}
-                  </span>
+              <span className={`${SECTION_TITLE} self-end pb-1`}>Out \ In</span>
+              {Array.from({ length: sourceCount }).map((_, i) => {
+                const name = assignment.channels[i]?.inputName;
+                return (
                   <div
-                    style={{
-                      width: 20,
-                      height: 2,
-                      borderRadius: 1,
-                      backgroundColor: "var(--amp-color-text)",
-                      opacity: highlighted ? 1 : 0,
-                      transition: "opacity 150ms ease",
-                    }}
-                  />
-                </div>
-              );
-            })}
-            <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", textAlign: "center" }}>
-              Output
-            </span>
+                    key={i}
+                    className={`flex min-w-0 flex-col items-center ${headerTone(hoveredCell?.sourceIndex === i)}`}
+                  >
+                    <span className="text-[length:var(--amp-font-size-sm)] font-semibold">{i + 1}</span>
+                    {name ? (
+                      <Hint text={name} className="w-full min-w-0">
+                        <span className="block truncate text-center text-[length:var(--amp-font-size-xs)]">{name}</span>
+                      </Hint>
+                    ) : (
+                      <span className="text-[length:var(--amp-font-size-xs)]">In{i + 1}</span>
+                    )}
+                  </div>
+                );
+              })}
+              <span className={`${SECTION_TITLE} self-end pb-1`}>Level</span>
+              <div
+                className="h-px bg-[var(--amp-color-default-border)]"
+                style={{ gridColumn: `1 / span ${sourceCount + 2}` }}
+              />
 
-            {assignment.channels.map((channel) => {
-              const highlighted =
-                hoveredCell?.channelIndex === channel.channelIndex;
-              return (
-                <Fragment key={channel.channelIndex}>
-                  <span style={{ fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" }}>
-                    {channel.channelIndex + 1}
-                  </span>
-                  <SourcePicker
-                    source={channel.source}
-                    sourceCounts={sourceCounts}
-                    channelIndex={channel.channelIndex}
-                    sourceTrims={channel.sourceTrims ?? DEFAULT_SOURCE_TRIMS}
-                    backupPriority={channel.backupPriority ?? DEFAULT_BACKUP_PRIORITY}
-                    paramRanges={capability.paramRanges}
-                    onSelect={(kind, index) =>
-                      handleSourceChange(channel.channelIndex, kind, index)
-                    }
-                    onTrimChange={(kind, trimDb, delayMs) =>
-                      handleSourceTrimChange(channel.channelIndex, kind, trimDb, delayMs)
-                    }
-                    onBackupChange={(first, second, enabled, thresholdDb) =>
-                      handleBackupChange(channel.channelIndex, first, second, enabled, thresholdDb)
-                    }
-                  />
-                  <div />
-                  {/* Indexed by column (sourceCount), not by the raw stored
-                   * array — keeps the grid's column count authoritative even
-                   * if a project's stored crosspoints haven't been
-                   * reconciled to the current topology yet. */}
-                  {Array.from({ length: sourceCount }).map((_, sourceIndex) => {
-                    const crosspoint = channel.matrixCrosspoints?.find(
-                      (c) => c.sourceIndex === sourceIndex,
-                    ) ?? {
-                      sourceIndex,
-                      gainDb: 0,
-                      active: false,
-                    };
-                    return (
-                      <MatrixCrosspointCell
-                        key={sourceIndex}
-                        active={crosspoint.active}
-                        gainDb={crosspoint.gainDb ?? 0}
-                        min={min}
-                        max={max}
-                        onGainChange={(value) =>
-                          handleGainChange(
-                            channel.channelIndex,
-                            sourceIndex,
-                            value,
-                          )
-                        }
-                        onActiveChange={(value) =>
-                          handleActiveChange(
-                            channel.channelIndex,
-                            sourceIndex,
-                            value,
-                          )
-                        }
-                        onHoverChange={(hovering) =>
-                          setHoveredCell(
-                            hovering
-                              ? {
-                                  channelIndex: channel.channelIndex,
-                                  sourceIndex,
-                                }
-                              : null,
-                          )
-                        }
-                      />
-                    );
-                  })}
-                  <div className="flex flex-nowrap items-center gap-2">
-                    <div className="flex flex-nowrap items-center gap-2">
-                      <div
-                        style={{
-                          width: 2,
-                          height: 20,
-                          borderRadius: 1,
-                          backgroundColor: "var(--amp-color-text)",
-                          opacity: highlighted ? 1 : 0,
-                          transition: "opacity 150ms ease",
-                        }}
-                      />
-                      <span
-                        style={{
-                          fontSize: "var(--amp-font-size-sm)",
-                          fontWeight: 600,
-                          color: highlighted
-                            ? "var(--amp-color-text)"
-                            : "var(--amp-color-dimmed)",
-                          transition: "color 150ms ease",
-                        }}
-                      >
-                        {String.fromCharCode(65 + channel.channelIndex)}
+              {assignment.channels.map((channel) => {
+                const follower = isFollower(channel.channelIndex);
+                const highlighted = hoveredCell?.channelIndex === channel.channelIndex;
+                // A bridged follower mirrors its leader, as on the Input / Output tab.
+                const dim = follower
+                  ? { opacity: 0.4, pointerEvents: "none" as const, filter: "grayscale(1)" }
+                  : undefined;
+                return (
+                  <Fragment key={channel.channelIndex}>
+                    <div className={`flex min-w-0 flex-col ${headerTone(highlighted)}`} style={dim}>
+                      <span className="text-[length:var(--amp-font-size-sm)] font-semibold">
+                        Output {outputLetter(channel.channelIndex)}
+                      </span>
+                      <span className="block truncate text-[length:var(--amp-font-size-xs)]">
+                        {follower ? `Bridged to ${outputLetter(channel.channelIndex - 1)}` : (channel.outputName ?? "")}
                       </span>
                     </div>
-                    <ChannelLevelMeter
-                      levelDb={
-                        channelTelemetry(
-                          telemetry,
-                          channel.channelIndex,
-                          ratedRmsVoltage,
-                        ).outputLevelDb
-                      }
-                      peakHold={peakHoldSurfaces.includes("output")}
-                    />
-                  </div>
-                </Fragment>
-              );
-            })}
+                    {/* Indexed by column (sourceCount), not by the raw stored
+                     * array — keeps the grid's column count authoritative even
+                     * if a project's stored crosspoints haven't been
+                     * reconciled to the current topology yet. */}
+                    {Array.from({ length: sourceCount }).map((_, sourceIndex) => {
+                      const crosspoint = crosspointAt(channel, sourceIndex);
+                      return (
+                        <div key={sourceIndex} className="flex justify-center" style={dim}>
+                          <MatrixCrosspointCell
+                            active={crosspoint.active}
+                            gainDb={crosspoint.gainDb ?? 0}
+                            min={min}
+                            max={max}
+                            onGainChange={(value) => handleGainChange(channel.channelIndex, sourceIndex, value)}
+                            onActiveChange={(value) => handleActiveChange(channel.channelIndex, sourceIndex, value)}
+                            onHoverChange={(hovering) =>
+                              setHoveredCell(hovering ? { channelIndex: channel.channelIndex, sourceIndex } : null)
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                    <div className="flex min-w-0" style={dim}>
+                      <ChannelLevelMeter
+                        levelDb={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage).outputLevelDb}
+                        peakHold={peakHoldSurfaces.includes("output")}
+                      />
+                    </div>
+                  </Fragment>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </MainSection>
       </div>
-    </CenteredScrollPane>
+    </div>
   );
 }
 
@@ -2944,9 +2980,7 @@ export function AmpConfigureView({
   const speakerStates = useSpeakerStates(projectSource?.project, projectSource?.assignment.id, speakerLibrary);
   const telemetry = live?.telemetry;
   const ampGains = live
-    ? Array.from({ length: liveChannelCount }, (_, i) =>
-        ampGainReading(live.channelConfig, i, live.device.gainMax),
-      )
+    ? Array.from({ length: liveChannelCount }, (_, i) => ampGainReading(live.channelConfig, i))
     : undefined;
   const deviceId = live?.device.id;
   const firmwareFamily = live?.device.firmwareFamily;

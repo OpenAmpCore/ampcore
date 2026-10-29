@@ -80,6 +80,19 @@
   --amp-graph-stage: #b58900;
   --amp-graph-tip-bg: rgba(255, 255, 255, 0.97);
   --amp-graph-tip-border: rgba(0, 0, 0, 0.18);
+  /* One colour per EQ stage — HP, bands 1-8, LP — shared by its handle, its
+     isolated curve and its strip tile, so graph and strip read as one. Never
+     the accent (that is the summed curve and the selection). */
+  --amp-band-0: #6c737b;
+  --amp-band-1: #d93d42;
+  --amp-band-2: #e0640f;
+  --amp-band-3: #b88a00;
+  --amp-band-4: #2f9e44;
+  --amp-band-5: #0c8f80;
+  --amp-band-6: #1c7ed6;
+  --amp-band-7: #7b4cc0;
+  --amp-band-8: #c2367f;
+  --amp-band-9: #6c737b;
   --amp-color-default: var(--amp-color-white);
   --amp-color-default-hover: var(--amp-color-gray-0);
   --amp-color-default-border: var(--amp-color-gray-4);
@@ -119,6 +132,17 @@
   --amp-graph-stage: #efea80;
   --amp-graph-tip-bg: rgba(28, 30, 32, 0.97);
   --amp-graph-tip-border: rgba(243, 246, 241, 0.24);
+  /* See the light block; lifted for a dark plot. */
+  --amp-band-0: #a0a7ad;
+  --amp-band-1: #ff6b6f;
+  --amp-band-2: #ff8f40;
+  --amp-band-3: #ffc53d;
+  --amp-band-4: #5bd36f;
+  --amp-band-5: #2fd3c0;
+  --amp-band-6: #4dabff;
+  --amp-band-7: #b18cf0;
+  --amp-band-8: #f06bb4;
+  --amp-band-9: #a0a7ad;
   --amp-color-default: var(--amp-color-dark-6);
   --amp-color-default-hover: var(--amp-color-dark-5);
   --amp-color-default-border: var(--amp-color-dark-4);

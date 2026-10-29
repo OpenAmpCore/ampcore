@@ -21,6 +21,9 @@ pub struct Telemetry {
     pub output_voltages: Vec<f32>,
     pub output_currents: Vec<f32>,
     pub output_impedance: Vec<f32>,
+    /// V × A per output — apparent power (VA). The heartbeat carries no
+    /// phase, so a reactive speaker load takes somewhat less real power.
+    pub output_power_va: Vec<f32>,
     /// dB relative to the device's rated RMS output voltage (`0dB` = rated
     /// max output) — `None` per-channel until `driver.rs` fills it in, since
     /// the wire-format adapters (`telemetry_v118`) only see

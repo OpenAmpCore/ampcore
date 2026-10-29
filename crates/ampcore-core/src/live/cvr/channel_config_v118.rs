@@ -355,6 +355,8 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         backup_priority,
         noise_gate_threshold_dbu: None, // 1.1.8 stores none
         amp_gain_db,
+        amp_gain_range_db: None,
+        amp_sensitivity_v: None,
     }
 }
 
