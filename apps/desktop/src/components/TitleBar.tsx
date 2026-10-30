@@ -1,9 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, Dropdown, Popover } from "@heroui/react";
-import { Copy, Minus, Palette, Square, X } from "lucide-react";
+import { Bug, Copy, Minus, Palette, Square, X } from "lucide-react";
 import { useIsTight } from "../lib/breakpoints";
 import { AppearanceControls } from "./AppearanceControls";
+import { BugReportModal } from "./BugReportModal";
+import { Hint } from "./Hint";
 
 const appWindow = getCurrentWindow();
 
@@ -28,6 +30,7 @@ export function TitleBar({
   centerContent,
 }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
+  const [bugReportOpen, setBugReportOpen] = useState(false);
   const tight = useIsTight();
 
   useEffect(() => {
@@ -98,6 +101,12 @@ export function TitleBar({
         {/* Appearance sits left of the window buttons: it's app chrome, not an
             OS control, and keeping it out of that group avoids a mis-click on
             Close. The same controls also live in Settings → Appearance. */}
+        <Hint text="Report a bug">
+          <Button isIconOnly variant="ghost" size="sm" aria-label="Report a bug" onPress={() => setBugReportOpen(true)}>
+            <Bug size={16} />
+          </Button>
+        </Hint>
+        <BugReportModal isOpen={bugReportOpen} onClose={() => setBugReportOpen(false)} />
         <Popover>
           <Button isIconOnly variant="ghost" size="sm" aria-label="Appearance">
             <Palette size={16} />

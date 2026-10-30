@@ -12,6 +12,7 @@ use commands::amp_links::{
 };
 use commands::amp_push::{projects_plan_amp_push, projects_push_amp_to_live};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
+use commands::bug_report::bug_report_send;
 use commands::capability::{amp_capability_resolve, eq_response_curves, fir_response_curve};
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::files::save_text_file;
@@ -174,6 +175,7 @@ pub fn run() {
             live_control_set_standby,
             live_control_set_device_name,
             web_server_set,
+            bug_report_send,
         ]);
 
     #[cfg(debug_assertions)]
