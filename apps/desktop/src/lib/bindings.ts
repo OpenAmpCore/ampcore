@@ -276,6 +276,9 @@ export const commands = {
 	/**  Soft-delete — see `AmpModelCatalogEntry.archived` for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
+	liveControlListAdapters: () => __TAURI_INVOKE<NetworkAdapter[]>("live_control_list_adapters"),
+	/**  `None` uses every adapter. The driver follows within a discovery cycle. */
+	liveControlSetAdapter: (name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_adapter", { name })),
 	/**
 	 *  Declares which devices one live consumer needs the heavy polls (heartbeat,
 	 *  FC=27, FC=50) for. Devices no consumer has asked for get discovery alone.
@@ -1954,6 +1957,15 @@ export type MatrixCrosspoint = {
 	sourceIndex: number,
 	gainDb: number | null,
 	active: boolean,
+};
+
+/**
+ *  One IPv4 network adapter of this machine. Self-assigned (169.254.x.x)
+ *  addresses count: an amp cabled straight to the computer lives on one.
+ */
+export type NetworkAdapter = {
+	name: string,
+	ip: string,
 };
 
 export type OutputFit = {

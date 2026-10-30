@@ -29,6 +29,8 @@ const DEFAULTS = {
   /** The built-in web server (`web_server.rs`): off until asked for. */
   webServerEnabled: false,
   webServerPort: 8642,
+  /** Adapter name the amps are reached through; empty means all of them. */
+  networkAdapter: "",
   /** Load (Ω) per amp MAC and channel for amps edited outside a project; a
    * project amp keeps its own in the project file. */
   liveLoadOhms: {} as Record<string, Record<string, number>>,

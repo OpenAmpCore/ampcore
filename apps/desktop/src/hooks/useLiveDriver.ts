@@ -1,5 +1,17 @@
 import { useEffect } from "react";
+import { toast } from "@heroui/react";
 import { commands } from "../lib/bindings";
+import { getPreference } from "../lib/preferences";
+
+/** Starts the driver, telling the user when it can't (its UDP port is held by
+ * another program). */
+export async function startLiveDriver() {
+  await commands.liveControlSetAdapter(getPreference("networkAdapter") || null);
+  const result = await commands.liveControlStart();
+  if (result.status === "error") {
+    toast.danger("Can't reach the network", { description: result.error.message, timeout: 0 });
+  }
+}
 
 /** Starts the live driver — discovery, plus the machinery the heavy polls run
  * on — the first time any live-aware view mounts. Call it from every surface
@@ -14,6 +26,6 @@ import { commands } from "../lib/bindings";
  * polls is a separate concern, owned by `useLivePolling`. */
 export function useLiveDriver() {
   useEffect(() => {
-    void commands.liveControlStart();
+    void startLiveDriver();
   }, []);
 }

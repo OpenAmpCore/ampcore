@@ -30,7 +30,7 @@ use commands::live_control::{
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_channel_amp_gain,
     live_control_set_crossover_slot,
     live_control_set_eq_band, live_control_set_fir_bypass, live_control_set_channel_fir_data, live_control_clear_channel_fir_data,
-    live_control_set_output_mute, live_control_start, live_control_stop, live_control_set_poll_subscription,
+    live_control_list_adapters, live_control_set_adapter, live_control_set_output_mute, live_control_start, live_control_stop, live_control_set_poll_subscription,
     live_control_set_rotary_lock, live_control_set_standby, live_control_set_device_name,
     live_control_set_source_trim, live_control_set_backup_priority,
 };
@@ -115,6 +115,8 @@ pub fn run() {
             amp_models_update,
             amp_models_archive,
             live_control_start,
+            live_control_list_adapters,
+            live_control_set_adapter,
             live_control_set_poll_subscription,
             live_control_stop,
             live_control_list_devices,

@@ -4,9 +4,11 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Button, Chip, Modal, Spinner, Switch, toast } from "@heroui/react";
 import { Copy } from "lucide-react";
-import { commands } from "../lib/bindings";
+import { commands, type NetworkAdapter } from "../lib/bindings";
+import { startLiveDriver } from "../hooks/useLiveDriver";
 import { setPreference, usePreference } from "../lib/preferences";
 import { MultiSelect } from "./MultiSelect";
+import { SimpleSelect } from "./SimpleSelect";
 import { FIELD_INPUT } from "./fieldClasses";
 
 const PEAK_HOLD_OPTIONS = [
@@ -67,6 +69,46 @@ function SettingRow({ label, children }: { label: string; children: ReactNode })
   );
 }
 
+const ALL_ADAPTERS = "all";
+
+/** Which network adapter the amps are reached through. The driver follows the
+ * choice within a discovery cycle (1 s), and only then knows if it could open
+ * the port there, hence the wait before asking. A chosen adapter that is gone
+ * stays listed, so the setting doesn't silently change while it is unplugged. */
+function NetworkAdapterSetting({ opened }: { opened: boolean }) {
+  const selected = usePreference("networkAdapter");
+  const [adapters, setAdapters] = useState<NetworkAdapter[]>([]);
+
+  useEffect(() => {
+    if (!opened) return;
+    // A freshly plugged adapter only gets its address some seconds later.
+    const refresh = () => void commands.liveControlListAdapters().then(setAdapters);
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    return () => clearInterval(timer);
+  }, [opened]);
+
+  const options = adapters.map((a) => ({ value: a.name, label: `${a.name} (${a.ip})` }));
+  if (selected && !adapters.some((a) => a.name === selected)) {
+    options.push({ value: selected, label: `${selected} (not connected)` });
+  }
+
+  return (
+    <SettingRow label="Network adapter for amps">
+      <div className="w-64 min-w-0 shrink">
+        <SimpleSelect
+          data={[{ value: ALL_ADAPTERS, label: "All adapters" }, ...options]}
+          value={selected || ALL_ADAPTERS}
+          onChange={(value) => {
+            setPreference("networkAdapter", !value || value === ALL_ADAPTERS ? "" : value);
+            setTimeout(() => void startLiveDriver(), 1500);
+          }}
+        />
+      </div>
+    </SettingRow>
+  );
+}
+
 /** The built-in web server: its switch, port, and the addresses other devices
  * open. The backend owns the server; this asks it for the wanted state when
  * the modal opens and whenever the switch or port changes, and takes the
@@ -102,6 +144,7 @@ function WebServerSettings({ opened }: { opened: boolean }) {
 
   return (
     <SettingsSection title="Network">
+      <NetworkAdapterSetting opened={opened} />
       <SettingRow label="Web server — open AmpCore's page from other devices on this network">
         <Switch
           isSelected={enabled}

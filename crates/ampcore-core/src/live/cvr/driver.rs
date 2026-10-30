@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
@@ -166,7 +168,127 @@ impl DeviceStats {
     }
 }
 
-/// Spawns the CVR driver task on `runtime` and returns immediately.
+/// One socket bound to one adapter's address, and the task feeding its
+/// datagrams into the driver loop.
+struct AdapterSocket {
+    socket: Arc<UdpSocket>,
+    broadcast: Ipv4Addr,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for AdapterSocket {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+type Inbound = (Ipv4Addr, SocketAddr, Vec<u8>);
+
+/// The driver's sockets, one per adapter in use. Bound to the adapter's address
+/// as the vendor app does, because a single 0.0.0.0 socket leaves the choice of
+/// adapter to the OS routing table.
+struct AdapterSockets {
+    open: BTreeMap<Ipv4Addr, AdapterSocket>,
+    /// Which local socket each amp last answered on, so that traffic to it
+    /// leaves the same way.
+    routes: HashMap<String, Ipv4Addr>,
+    inbound: mpsc::UnboundedSender<Inbound>,
+}
+
+impl AdapterSockets {
+    /// Opens and closes sockets to match the adapters in use now: hot-plugged
+    /// adapters, changed addresses and a changed selection all land here, and a
+    /// bind that failed is retried. Returns what failed. Needs a tokio context.
+    fn reconcile(&mut self, selected: Option<&str>) -> Option<String> {
+        let wanted = wanted_adapters(selected);
+        self.open.retain(|ip, _| wanted.iter().any(|(_, wanted_ip, _)| wanted_ip == ip));
+        self.routes.retain(|_, local| self.open.contains_key(local));
+        let mut errors = Vec::new();
+        for (name, ip, broadcast) in wanted {
+            if self.open.contains_key(&ip) {
+                continue;
+            }
+            match bind_adapter(ip) {
+                Ok(socket) => {
+                    let reader = tokio::spawn(read_socket(socket.clone(), ip, self.inbound.clone()));
+                    self.open.insert(ip, AdapterSocket { socket, broadcast, reader });
+                }
+                Err(e) => errors.push(format!(
+                    "Couldn't open UDP port {PC_LISTEN_PORT} on {name}. Another program, such as the amp vendor's software or a second AmpCore, may be using it. ({e})"
+                )),
+            }
+        }
+        (!errors.is_empty()).then(|| errors.join(" "))
+    }
+
+    /// Sends to one amp through the socket it last answered on. An amp not heard
+    /// from yet (a device list that outlived a driver restart) goes through the
+    /// first socket; its next discovery reply corrects that.
+    async fn send(&self, packet: &[u8], ip: &str) -> std::io::Result<usize> {
+        let socket = self.routes.get(ip).and_then(|local| self.open.get(local)).or_else(|| self.open.values().next());
+        match socket {
+            Some(s) => s.socket.send_to(packet, (ip, AMP_PORT)).await,
+            None => Err(std::io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    /// Both broadcasts on every socket: an amp on a subnet other than the
+    /// adapter's only hears the limited one, which is all the vendor app sends.
+    /// Failures are routine on a disconnected adapter.
+    async fn broadcast(&self, packet: &[u8]) {
+        for s in self.open.values() {
+            let _ = s.socket.send_to(packet, (s.broadcast, AMP_PORT)).await;
+            let _ = s.socket.send_to(packet, (Ipv4Addr::BROADCAST, AMP_PORT)).await;
+        }
+    }
+}
+
+fn bind_adapter(ip: Ipv4Addr) -> std::io::Result<Arc<UdpSocket>> {
+    let socket = std::net::UdpSocket::bind((ip, PC_LISTEN_PORT))?;
+    socket.set_broadcast(true)?;
+    socket.set_nonblocking(true)?;
+    Ok(Arc::new(UdpSocket::from_std(socket)?))
+}
+
+/// `(name, address, broadcast)` of each socket to hold. `selected` is an adapter
+/// name; `None` is all of them. A selected adapter that is gone means no sockets
+/// rather than some other adapter. Mobile keeps the single wildcard socket, as
+/// does a machine with no adapters at all, so that one joining is still seen.
+fn wanted_adapters(selected: Option<&str>) -> Vec<(String, Ipv4Addr, Ipv4Addr)> {
+    let wildcard = || vec![("this device".to_string(), Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST)];
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return wildcard();
+    }
+    let adapters = network_adapters();
+    if adapters.is_empty() && selected.is_none() {
+        return wildcard();
+    }
+    adapters
+        .into_iter()
+        .filter(|(adapter, ..)| selected.map_or(true, |name| name == adapter.name))
+        .map(|(adapter, ip, broadcast)| (adapter.name, ip, broadcast))
+        .collect()
+}
+
+async fn read_socket(socket: Arc<UdpSocket>, local: Ipv4Addr, inbound: mpsc::UnboundedSender<Inbound>) {
+    let mut buf = [0u8; 2048];
+    loop {
+        match socket.recv_from(&mut buf).await {
+            Ok((len, addr)) => {
+                if inbound.send((local, addr, buf[..len].to_vec())).is_err() {
+                    return;
+                }
+            }
+            // Windows reports an ICMP "port unreachable" as a failed receive.
+            // The socket is fine, but don't spin if it isn't.
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+}
+
+/// Binds the driver's sockets, spawns the CVR driver task on `runtime` and
+/// returns immediately. The first bind happens here rather than in the task, so
+/// `LiveDeviceState::start` can report it; the task retries whatever failed.
 ///
 /// `runtime` is threaded in explicitly (rather than calling `tokio::spawn`)
 /// because this is called from a synchronous command handler that isn't
@@ -176,20 +298,27 @@ pub fn start(sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHan
     let (stop_tx, stop_rx) = oneshot::channel();
     let (request_tx, request_rx) = mpsc::unbounded_channel();
     let (write_tx, write_rx) = mpsc::unbounded_channel();
+    let (inbound, inbound_rx) = mpsc::unbounded_channel();
+    let mut net = AdapterSockets { open: BTreeMap::new(), routes: HashMap::new(), inbound };
     {
         let mut inner = sink.state.lock().unwrap();
+        let _context = runtime.enter();
+        inner.socket_error = net.reconcile(inner.adapter.as_deref());
         inner.request_tx = Some(request_tx);
         inner.write_tx = Some(write_tx);
     }
     runtime.spawn(async move {
-        if let Err(e) = run(sink, stop_rx, request_rx, write_rx, AmpProtocol::CvrUdp.slug(), "CVR").await {
+        if let Err(e) = run(net, inbound_rx, sink, stop_rx, request_rx, write_rx, AmpProtocol::CvrUdp.slug(), "CVR").await {
             eprintln!("[cvr driver] exited with error: {e}");
         }
     });
     DriverHandle { stop_tx }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
+    mut net: AdapterSockets,
+    mut inbound_rx: mpsc::UnboundedReceiver<Inbound>,
     sink: LiveEventSink,
     mut stop_rx: oneshot::Receiver<()>,
     mut request_rx: mpsc::UnboundedReceiver<RequestSpec>,
@@ -197,9 +326,6 @@ async fn run(
     protocol_slug: &'static str,
     brand: &'static str,
 ) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(("0.0.0.0", PC_LISTEN_PORT)).await?;
-    socket.set_broadcast(true)?;
-
     let mut discovery_tick = tokio::time::interval(DISCOVERY_INTERVAL);
     let mut heartbeat_tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
@@ -219,7 +345,6 @@ async fn run(
     let mut reassembler = FragmentReassembler::default();
     let mut registry = RequestRegistry::default();
     let mut writes = WriteRegistry::default();
-    let mut buf = [0u8; 2048];
 
     loop {
         // `biased;` makes branch order *priority* order instead of tokio's
@@ -244,7 +369,7 @@ async fn run(
             // and `WriteRegistry` serializes them per device on its own.
             Some(spec) = write_rx.recv() => {
                 for t in writes.submit(spec, Instant::now()) {
-                    let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&t.packet, t.ip.as_str()).await;
                 }
             }
 
@@ -265,7 +390,7 @@ async fn run(
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
                     }
-                    let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&packet, ip.as_str()).await;
                 }
             }
 
@@ -276,18 +401,19 @@ async fn run(
                     deliver_resolved(r, &sink);
                 }
                 for t in retransmits {
-                    let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&t.packet, t.ip.as_str()).await;
                 }
                 for t in writes.poll_deadlines(now) {
-                    let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&t.packet, t.ip.as_str()).await;
                 }
                 reassembler.sweep(super::request::FRAGMENT_MAX_AGE_MS);
             }
 
-            recv = socket.recv_from(&mut buf) => {
-                if let Ok((len, addr)) = recv {
+            recv = inbound_rx.recv() => {
+                if let Some((local, addr, data)) = recv {
                     let ip = addr.ip().to_string();
-                    let raw = &buf[..len];
+                    net.routes.insert(ip.clone(), local);
+                    let raw = &data[..];
 
                     let Some(nd) = parse_network_data_header(raw) else { continue };
                     if nd.data_flag != NETWORK_DATA_FLAG {
@@ -311,7 +437,7 @@ async fn run(
                         // `1/0`, 1.1.9 `0/450`) — which is why `on_ack`
                         // correlates by IP rather than by any header field.
                         for t in writes.on_ack(&ip, Instant::now()) {
-                            let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                            let _ = net.send(&t.packet, t.ip.as_str()).await;
                         }
                         continue;
                     }
@@ -319,7 +445,7 @@ async fn run(
                     // Must fire before reassembly, for every physical
                     // fragment, not just the logical frame it belongs to.
                     if let Some(ack) = build_ack_packet(raw) {
-                        let _ = socket.send_to(&ack, (ip.as_str(), AMP_PORT)).await;
+                        let _ = net.send(&ack, ip.as_str()).await;
                     }
 
                     match reassembler.accept(&ip, &nd, raw) {
@@ -427,7 +553,7 @@ async fn run(
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
                     }
-                    let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&packet, ip.as_str()).await;
                 }
             }
 
@@ -506,7 +632,7 @@ async fn run(
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
                     }
-                    match socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await {
+                    match net.send(&packet, ip.as_str()).await {
                         Ok(n) => {
                             if wire_log_enabled() {
                                 println!("[cvr driver] FC=50 poll -> {ip} pair {pair} ({n} bytes sent)");
@@ -538,12 +664,16 @@ async fn run(
                 };
                 let query = build_heartbeat_query();
                 for (id, ip) in targets {
-                    let _ = socket.send_to(&query, (ip.as_str(), AMP_PORT)).await;
+                    let _ = net.send(&query, ip.as_str()).await;
                     stats.entry(id).or_default().sent += 1;
                 }
             }
 
             _ = discovery_tick.tick() => {
+                {
+                    let mut inner = sink.state.lock().unwrap();
+                    inner.socket_error = net.reconcile(inner.adapter.as_deref());
+                }
                 // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
                 // `mark_stale_offline` is deliberately inside the gate too: we
                 // cannot judge liveness while we are choosing not to poll, and
@@ -555,9 +685,7 @@ async fn run(
                 last_discovery_at = now;
 
                 let query = build_basic_info_query();
-                for addr in directed_broadcast_addresses() {
-                    let _ = socket.send_to(&query, (addr, AMP_PORT)).await;
-                }
+                net.broadcast(&query).await;
 
                 // The gate above can hold this arm off for a long stretch (a
                 // fader drag keeps a write pending almost continuously), and
@@ -930,5 +1058,37 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
             Some(device.id)
         }
         _ => None, // out of scope this pass
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use crate::live::state::{EventEmitter, LiveDeviceState, LiveEvent};
+
+    struct NoEmit;
+    impl EventEmitter for NoEmit {
+        fn emit(&self, _event: LiveEvent) {}
+    }
+
+    #[test]
+    fn start_reports_a_taken_port() {
+        // Bound to the adapter's address, as the vendor app does. Windows lets a
+        // specific bind coexist with someone else's 0.0.0.0, so that is no clash.
+        // Already taken (a running AmpCore) serves the test just as well.
+        let (_, ip, _) = wanted_adapters(None).remove(0);
+        let _held = std::net::UdpSocket::bind((ip, PC_LISTEN_PORT)).ok();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let state = LiveDeviceState::new();
+        let sink = LiveEventSink { emitter: Arc::new(NoEmit), state: state.0.clone() };
+
+        let error = state.start(sink, runtime.handle()).expect_err("bind should fail");
+
+        assert!(error.message.contains("45454"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_selected_adapter_that_is_gone_opens_nothing() {
+        assert!(wanted_adapters(Some("no such adapter")).is_empty());
     }
 }
