@@ -29,6 +29,9 @@ const DEFAULTS = {
   /** The built-in web server (`web_server.rs`): off until asked for. */
   webServerEnabled: false,
   webServerPort: 8642,
+  /** Load (Ω) per amp MAC and channel for amps edited outside a project; a
+   * project amp keeps its own in the project file. */
+  liveLoadOhms: {} as Record<string, Record<string, number>>,
 };
 
 type Preferences = typeof DEFAULTS;
@@ -59,7 +62,7 @@ function read<K extends PreferenceKey>(key: K): Preferences[K] {
     const parsed: unknown = JSON.parse(raw);
     const valid = Array.isArray(fallback)
       ? Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
-      : typeof parsed === typeof fallback;
+      : parsed !== null && typeof parsed === typeof fallback;
     if (valid) return parsed as Preferences[K];
   } catch {
     // Private mode / blocked site data / corrupt JSON — fall through.

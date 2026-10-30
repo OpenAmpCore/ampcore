@@ -25,9 +25,10 @@ import { actionFailed, toActionResult, type ActionResult } from "./actionResult"
  * caller can react to the outcome (e.g. a tile's `visualValidation`) without
  * try/catch. Callers that don't care can keep ignoring the return value.
  *
- * As of the 1.1.8 Tier-A pass the only member Direct Edit mode still leaves
- * undefined is `setChannelOhms` — a Project-only concept; the Load field
- * renders disabled when it is absent rather than sitting inert. Every other member has a live wire command. FIR is partly
+ * Every member has a live wire command except `setChannelOhms`: Load is local,
+ * stored in the project file or, outside a project, in `liveLoadOhms`, and it
+ * never reaches the amp. The Load field renders disabled when it is absent
+ * (an edit-locked amp) rather than sitting inert. FIR is partly
  * here: its bypass flag (FC=44) is an ordinary action on both sources, and so
  * are `setChannelFirData`/`clearChannelFirData` (Import/Clear coefficients) —
  * Direct Edit writes the amp (FC=43), Project mode stores `AmpChannel.fir`,

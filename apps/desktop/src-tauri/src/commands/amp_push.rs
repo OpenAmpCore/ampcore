@@ -9,7 +9,7 @@
 //! first failed write and reports which stage, rather than pretending to be a
 //! transaction: planning again resumes from whatever is still different.
 //!
-//! See `data/amp_push.rs` for what is planned, in what order, and why three
+//! See `data/amp_push.rs` for what is planned, in what order, and why two
 //! device-determined fields flow the other way instead.
 
 use std::time::Duration;
@@ -97,7 +97,7 @@ pub struct AmpPushResult {
     /// True only when every stage was written *and* the two fingerprints
     /// matched afterwards.
     pub pushed: bool,
-    /// The saved project. Always `Some` on a result: the three device facts
+    /// The saved project. Always `Some` on a result: the two device facts
     /// are re-read and saved even when no write was needed, so the caller can
     /// use it unconditionally. `Option` only so the shape matches
     /// `AmpMergeResult`, whose pull can legitimately save nothing.
@@ -395,8 +395,8 @@ async fn wait_for_fresh_snapshot(
 /// and pushing again re-plans against the amp's new state, so a retry picks up
 /// where this left off instead of redoing the work that landed.
 ///
-/// Three hashed fields travel the other way instead of being written (load and
-/// the two rated max voltages) — see `data/amp_push.rs`.
+/// Two hashed fields travel the other way instead of being written (the
+/// rated max voltages) — see `data/amp_push.rs`.
 #[tauri::command]
 #[specta::specta]
 pub async fn projects_push_amp_to_live(
@@ -573,7 +573,7 @@ async fn push_polled(
         }
 
         // Whether or not every write landed, the amp's state has moved and
-        // the three device facts are read from it — so the project is
+        // the two device facts are read from it — so the project is
         // reconciled and saved either way. A push that failed halfway still
         // leaves the plan describing the hardware it is linked to.
         //

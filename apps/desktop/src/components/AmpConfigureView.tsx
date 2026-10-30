@@ -2818,12 +2818,19 @@ export function AmpConfigureView({
   const liveChannelCount = live
     ? live.device.outputChannels || DEFAULT_CHANNEL_COUNT
     : DEFAULT_CHANNEL_COUNT;
+  // Load is local, so it never comes from the reading once it has been set: a
+  // project amp shows its project's, any other live amp this machine's.
+  const liveLoadOhms = usePreference("liveLoadOhms");
   const assignment: AmpAssignment | undefined = live
     ? buildLiveAssignmentViewModel(
         live.device,
         live.channelConfig,
         liveChannelCount,
         liveBridge,
+        (channelIndex) =>
+          source?.kind === "project"
+            ? source.assignment.channels.find((c) => c.channelIndex === channelIndex)?.ohms ?? undefined
+            : liveLoadOhms[live.device.mac]?.[channelIndex],
       )
     : source?.kind === "project"
       ? source.assignment
@@ -2892,7 +2899,17 @@ export function AmpConfigureView({
   }
 
   const actions: ConfigureActions | undefined = live
-    ? createLiveConfigureActions(live.device.id)
+    ? {
+        ...createLiveConfigureActions(live.device.id, live.device.mac),
+        // A followed project amp writes the amp, but its Load is the project's.
+        ...(source?.kind === "project" && {
+          setChannelOhms: createProjectConfigureActions(
+            source.project.id,
+            source.assignment.id,
+            source.onProjectUpdate,
+          ).setChannelOhms,
+        }),
+      }
     : source?.kind === "project"
       ? locked
         ? lockConfigureActions(LOCKED_MESSAGE)

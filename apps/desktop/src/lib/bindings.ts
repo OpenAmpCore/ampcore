@@ -688,8 +688,8 @@ export const commands = {
 	 *  and pushing again re-plans against the amp's new state, so a retry picks up
 	 *  where this left off instead of redoing the work that landed.
 	 * 
-	 *  Three hashed fields travel the other way instead of being written (load and
-	 *  the two rated max voltages) — see `data/amp_push.rs`.
+	 *  Two hashed fields travel the other way instead of being written (the
+	 *  rated max voltages) — see `data/amp_push.rs`.
 	 */
 	projectsPushAmpToLive: (projectId: string, assignmentId: string) => typedError<AmpPushResult, AppError>(__TAURI_INVOKE("projects_push_amp_to_live", { projectId, assignmentId })),
 	/**
@@ -1226,7 +1226,7 @@ export type AmpPushResult = {
 	 */
 	pushed: boolean,
 	/**
-	 *  The saved project. Always `Some` on a result: the three device facts
+	 *  The saved project. Always `Some` on a result: the two device facts
 	 *  are re-read and saved even when no write was needed, so the caller can
 	 *  use it unconditionally. `Option` only so the shape matches
 	 *  `AmpMergeResult`, whose pull can legitimately save nothing.
@@ -2178,7 +2178,6 @@ export type SpeakerCanonical = {
 	phaseInverted: boolean,
 	/**  `None` only for a live channel whose power-mode byte is unmapped. */
 	powerMode: PowerMode | null,
-	loadOhms: number | null,
 	firBypassed: boolean,
 };
 

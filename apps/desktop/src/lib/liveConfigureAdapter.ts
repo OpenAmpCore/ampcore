@@ -13,25 +13,32 @@ import {
 } from "./bindings";
 import { ACTION_OK, actionFailed, type ActionResult } from "./actionResult";
 import type { ConfigureActions } from "./configureActions";
+import { getPreference, setPreference } from "./preferences";
 import { showRollingNotification } from "./rollingNotification";
 
 /** Maps one polled `ChannelConfig` onto the shape `AmpConfigureView`'s tabs
  * already expect (`AmpAssignment["channels"][number]`) — most fields are a
  * direct passthrough since `ChannelEq`/`Limiter`/`MatrixCrosspoint`/
  * `ChannelSource` are literally the same Rust types on both sides (see
- * `channel_config.rs`). `ohms` is the amp's own `loadOhms`.
+ * `channel_config.rs`). `ohms` is the local Load when one was set, else the
+ * amp's own `loadOhms`.
  * `noiseGateThresholdDbu` is read back on 1.1.9 only (1.1.8 stores none, so it
  * gets a placeholder). The read-back matters: a gate toggle resends it, so a placeholder would
  * overwrite the amp's real threshold.
  * `channelIndex` with no config yet (poll still pending) synthesizes an
  * all-default channel rather than leaving a hole for callers to crash on. */
-function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
+function mapLiveChannel(
+  config: ChannelConfig | undefined,
+  channelIndex: number,
+  bridged: boolean,
+  localOhms: number | undefined,
+): AmpChannel {
   if (!config) {
-    return { channelIndex, ohms: 8, source: { kind: "analog", index: channelIndex } };
+    return { channelIndex, ohms: localOhms ?? 8, source: { kind: "analog", index: channelIndex } };
   }
   return {
     channelIndex: config.channelIndex,
-    ohms: config.loadOhms ?? 8,
+    ohms: localOhms ?? config.loadOhms ?? 8,
     // A channel always has a source, and the 1.1.8/1.1.9 parsers decode every
     // code (AES3 included, as a read-only kind), so this fallback is
     // unreachable today; it only keeps the type honest.
@@ -74,7 +81,8 @@ export function buildLiveAssignmentViewModel(
   device: DiscoveredDevice,
   snapshot: ChannelConfigSnapshot | undefined,
   channelCount: number,
-  bridge?: DeviceBridgeSnapshot,
+  bridge: DeviceBridgeSnapshot | undefined,
+  localOhms: (channelIndex: number) => number | undefined,
 ): AmpAssignment {
   // Bridge state comes from the FC=50 poll, not the FC=27 snapshot — see
   // `live/cvr/bridge.rs`. Indexed by pair, so channels 0/1 both read pair 0
@@ -86,6 +94,7 @@ export function buildLiveAssignmentViewModel(
       snapshot?.channels.find((c) => c.channelIndex === i),
       i,
       bridge?.bridged?.[Math.floor(i / 2)] ?? false,
+      localOhms(i),
     ),
   );
   return {
@@ -179,8 +188,15 @@ function notifySuccess(label: string, ack: LiveWriteAck): void {
  *
  * Both failure modes therefore reach `reportWrite`: a write the backend
  * refused to build or send, and one the device never acknowledged. */
-export function createLiveConfigureActions(deviceId: string): ConfigureActions {
+export function createLiveConfigureActions(deviceId: string, mac: string): ConfigureActions {
   return {
+    /** The one member that never touches the amp: Load only converts volts to
+     * watts in the limiter editor, so it stays on this machine. */
+    async setChannelOhms(channelIndex, ohms) {
+      const all = getPreference("liveLoadOhms");
+      setPreference("liveLoadOhms", { ...all, [mac]: { ...all[mac], [channelIndex]: ohms } });
+      return ACTION_OK;
+    },
     async setChannelDelayIn(channelIndex, delayInMs) {
       return reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
     },

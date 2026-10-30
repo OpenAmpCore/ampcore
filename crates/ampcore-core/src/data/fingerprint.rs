@@ -11,7 +11,7 @@
 //! - **`speakerHash`** (per output channel): CRC-16/XModem, 4 hex chars, over
 //!   output-side speaker processing — output EQ (HP, parametric
 //!   bands, LP), RMS + peak limiter (incl. auto/max), output delay, polarity,
-//!   power mode, load and FIR bypass. Short enough to embed in the
+//!   power mode and FIR bypass. Short enough to embed in the
 //!   16-byte output name as `Name_XXXX`, the same convention (and CRC variant,
 //!   not byte layout) as the prior web app's `speaker-sync-hash.ts`.
 //! - **`ampHash`**: FNV-1a 64, 16 hex chars, over the amp's identity (model,
@@ -117,7 +117,10 @@ use crate::live::state::DiscoveredDevice;
 /// 11: noise-gate threshold added (1.1.9+ only, while the gate is on).
 ///
 /// 12: FIR taps added to the speaker hash.
-pub const FINGERPRINT_VERSION: u8 = 12;
+///
+/// 13: load removed from the speaker hash — it is a local value that only
+/// converts volts to watts in the limiter editor, never the amp's.
+pub const FINGERPRINT_VERSION: u8 = 13;
 
 /// `_XXXX` — separator plus 4 hex chars appended to an output name.
 pub const HASH_SUFFIX_LEN: usize = 5;
@@ -130,7 +133,6 @@ pub(crate) const Q_STEPS: f64 = 1000.0; // 0.001
 pub(crate) const DELAY_STEPS: f64 = 100.0; // 0.01 ms
 pub(crate) const VOLT_STEPS: f64 = 100.0; // 0.01 V
 pub(crate) const WHOLE_STEPS: f64 = 1.0; // limiter ms / release multiplier (u16/u8 on the wire)
-pub(crate) const OHM_STEPS: f64 = 10.0; // 0.1 Ω
 
 /// Byte written for an absent optional value.
 const NONE_TAG: u8 = 0xFF;
@@ -262,7 +264,6 @@ pub struct SpeakerCanonical {
     pub phase_inverted: bool,
     /// `None` only for a live channel whose power-mode byte is unmapped.
     pub power_mode: Option<PowerMode>,
-    pub load_ohms: f64,
     pub fir_bypassed: bool,
 }
 
@@ -411,7 +412,6 @@ struct ChannelInput<'a> {
     fir_bypassed: bool,
     /// `None` = a live output not read yet.
     fir: Option<FirInput<'a>>,
-    load_ohms: f64,
     source_trims: SourceTrims,
     backup_priority: BackupPriority,
 }
@@ -454,7 +454,6 @@ impl<'a> ChannelInput<'a> {
             } else {
                 NO_FIR
             }),
-            load_ohms: channel.ohms,
             source_trims: channel.source_trims,
             backup_priority: channel.backup_priority,
         }
@@ -484,7 +483,6 @@ impl<'a> ChannelInput<'a> {
             output_muted: config.output_muted,
             fir_bypassed: config.fir_bypassed,
             fir,
-            load_ohms: config.load_ohms as f64,
             source_trims: SourceTrims {
                 analog: SourceTrim { trim_db: config.analog_trim_db as f64, delay_ms: config.analog_delay_ms as f64 },
                 dante: SourceTrim { trim_db: config.dante_trim_db as f64, delay_ms: config.dante_delay_ms as f64 },
@@ -796,7 +794,6 @@ fn canonical_speaker(input: &ChannelInput) -> SpeakerCanonical {
         delay_out_ms: round_to_step(input.delay_out_ms, DELAY_STEPS),
         phase_inverted: input.output_phase_inverted,
         power_mode: input.power_mode,
-        load_ohms: round_to_step(input.load_ohms, OHM_STEPS),
         fir_bypassed: input.fir_bypassed,
     }
 }
@@ -1029,7 +1026,6 @@ fn encode_speaker(h: &mut HashInput, speaker: &SpeakerCanonical) {
     h.i32(steps(speaker.delay_out_ms, DELAY_STEPS));
     h.bool(speaker.phase_inverted);
     h.opt_tag(speaker.power_mode.map(power_mode_tag));
-    h.i32(steps(speaker.load_ohms, OHM_STEPS));
     h.bool(speaker.fir_bypassed);
 }
 
@@ -1277,7 +1273,6 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         push_entry(&mut out, &group, "Polarity", if speaker.phase_inverted { "inverted" } else { "normal" });
         let power_mode = speaker.power_mode.map(|m| format!("{m:?}")).unwrap_or_else(|| "unreadable".to_string());
         push_entry(&mut out, &group, "Power mode", power_mode);
-        push_entry(&mut out, &group, "Load", format!("{:.1} Ω", speaker.load_ohms));
         push_entry(&mut out, &group, "FIR", if speaker.fir_bypassed { "bypassed" } else { "active" });
         let fir = channel.fir.as_ref();
         push_entry(&mut out, &group, "FIR filter", fir.map_or("not read yet".to_string(), |f| f.summary.clone()));
@@ -1448,7 +1443,6 @@ mod tests {
             output_muted: false,
             fir_bypassed: false,
             fir: Some(NO_FIR),
-            load_ohms: 8.0,
             source_trims: SourceTrims::default(),
             backup_priority: BackupPriority::default(),
         }
