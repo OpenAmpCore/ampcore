@@ -15,7 +15,8 @@ export function Hint({
   className?: string;
   children: ReactNode;
 }) {
-  if (!text) return <>{children}</>;
+  // Keeps the wrapper when it carries layout, so a row doesn't reflow with no hint.
+  if (!text) return className ? <div className={className}>{children}</div> : <>{children}</>;
   return (
     <Tooltip delay={300}>
       <Tooltip.Trigger className={className}>{children}</Tooltip.Trigger>

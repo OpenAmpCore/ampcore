@@ -5,26 +5,18 @@ import {
   Alert,
   ButtonGroup,
   Chip,
-  Dropdown,
   Modal,
   Spinner,
   Switch,
   Tabs,
   Tooltip,
-  dropdownVariants,
   popoverVariants,
 } from "@heroui/react";
 import {
   Activity,
-  ArrowUpFromLine,
   Eye,
   FlipVertical2,
-  Bookmark,
-  Gauge,
   GitCompare,
-  Grid3x3,
-  Link2,
-  MoreHorizontal,
   Plug,
   RefreshCw,
   Unplug,
@@ -32,13 +24,19 @@ import {
   ListPlus,
   Lock,
   Radio,
-  SlidersHorizontal,
-  Speaker,
   Volume2,
   VolumeX,
   Waves,
   WifiOff,
 } from "lucide-react";
+import {
+  AmplifierIcon,
+  CabinetIcon,
+  CrosspointMatrixIcon,
+  GangedFadersIcon,
+  MemorySlotsIcon,
+  RackPanelIcon,
+} from "./HardwareIcons";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { useConfirm } from "./ConfirmDialog";
 import { SimpleSelect } from "./SimpleSelect";
@@ -182,17 +180,17 @@ const DEVICE_NAME_MAX_LENGTH = 32;
 const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
 const TABS = [
-  { value: "overview", label: "Overview", icon: Gauge, skeleton: "grid" },
-  { value: "main", label: "Input / Output", icon: SlidersHorizontal, skeleton: "list" },
-  { value: "routing", label: "Matrix", icon: Grid3x3, skeleton: "grid" },
-  { value: "speakers", label: "Speakers", icon: Speaker, skeleton: "list" },
+  { value: "overview", label: "Overview", icon: RackPanelIcon, skeleton: "grid" },
+  { value: "main", label: "Input / Output", icon: AmplifierIcon, skeleton: "list" },
+  { value: "routing", label: "Matrix", icon: CrosspointMatrixIcon, skeleton: "grid" },
+  { value: "speakers", label: "Speakers", icon: CabinetIcon, skeleton: "list" },
   {
     value: "presetConfiguration",
     label: "Preset Configuration",
-    icon: Bookmark,
+    icon: MemorySlotsIcon,
     skeleton: "list",
   },
-  { value: "linking", label: "Channel Linking", icon: Link2, skeleton: "list" },
+  { value: "linking", label: "Channel Linking", icon: GangedFadersIcon, skeleton: "list" },
 ] as const satisfies {
   value: string;
   label: string;
@@ -221,9 +219,8 @@ const SOURCE_LABELS: Record<SourceKind, string> = {
  * this too, so the tile always fills its column exactly. */
 const SOURCE_TILE_WIDTH = 150;
 
-/* HeroUI's overlay parts (`Popover.Content`, `Popover.Dialog`,
- * `Dropdown.Popover`, `Dropdown.Menu`) read their class names off a React
- * context that ONLY the `<Popover>` / `<Dropdown>` root provides. Every
+/* HeroUI's overlay parts (`Popover.Content`, `Popover.Dialog`) read their class
+ * names off a React context that ONLY the `<Popover>` root provides. Every
  * overlay in this file deliberately skips that root and drives the overlay
  * itself with `triggerRef` + `isOpen`, because the roots wrap their child in a
  * `PressResponder`/`role="button"` element — nesting each tile's own
@@ -234,7 +231,6 @@ const SOURCE_TILE_WIDTH = 150;
  * no shadow, no padding. Passing the slot names explicitly is what restores
  * HeroUI's own styling on the standalone pattern. */
 const POPOVER_SLOTS = popoverVariants();
-const DROPDOWN_SLOTS = dropdownVariants();
 
 /** The amp's own source-code space, shared by `FC_SOURCE_SELECT` (11) and the
  * backup priority struct (FC=80) — `BackupPriority.first`/`second` are raw
@@ -2414,16 +2410,10 @@ function isEmptySlot(name: string): boolean {
   return trimmed.length === 0 || trimmed.toLowerCase() === "null";
 }
 
-/** The two controls a preset row carries — Recall, and the ⋯ menu that holds
- * Store — share one look and one box. They are hand-dressed plain buttons
- * rather than a HeroUI `Button` beside a `Dropdown.Trigger`: those two size
- * and style themselves differently, and a pair of controls repeated down
- * every row has to match exactly. */
-const PRESET_ACTION_SIZE = 28;
-const PRESET_ACTION_CLASS =
-  "flex shrink-0 cursor-pointer appearance-none items-center justify-center rounded-md border-0 " +
-  "bg-transparent p-0 text-[var(--amp-color-text)] transition-colors duration-150 " +
-  `hover:bg-[var(--amp-color-gray-light)] ${STAT_TILE_FOCUS}`;
+/** Fixed widths, so a preset row's two buttons form straight columns down the
+ * list. Recall's also holds `ActionFeedbackContent`, which fills its parent. */
+const PRESET_RECALL_WIDTH = 72;
+const PRESET_STORE_WIDTH = 88;
 
 /** The dimmed caption every secondary line in this tab uses. */
 const PRESET_MUTED =
@@ -2431,18 +2421,16 @@ const PRESET_MUTED =
 
 /** One row of the preset list. Kept deliberately thin: with 40 slots, a
  * card per preset put ~80 labelled buttons on screen at once, which read as
- * a wall rather than a list you scan. Both controls are icon-only, and an
- * empty slot renders no Recall control at all rather than a greyed one — on
- * a mostly-empty device that alone removes most of the clutter.
+ * a wall rather than a list you scan. The actions are labelled, because an
+ * icon couldn't say what they do. An empty slot renders no Recall control at all rather than a greyed
+ * one — on a mostly-empty device that alone removes most of the clutter.
  *
  * Store is the destructive half (it overwrites the slot with the amp's
  * current DSP state, and the wire protocol offers no undo), so it never
- * fires from the row at all: it sits behind the ⋯ menu and opens a modal
- * that names the slot, warns when it is about to overwrite, and asks again.
- * Nothing in the resting row is red. Store used to tint itself red on every
- * occupied slot, which on a device with a dozen presets written rendered a
- * solid column of red buttons — at that repetition red stops reading as a
- * warning. It now appears once, on the modal's Overwrite button. */
+ * fires from the row at all: it opens a modal that names the slot, warns when
+ * it is about to overwrite, and asks again. Nothing in the resting row is red:
+ * a solid column of red buttons stops reading as a warning. Red appears once,
+ * on the modal's Overwrite button. */
 function PresetSlotRow({
   slot,
   isActive,
@@ -2456,8 +2444,6 @@ function PresetSlotRow({
 }) {
   const empty = isEmptySlot(slot.name);
   const recallFeedback = useActionFeedback();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTriggerRef = useRef<HTMLDivElement>(null);
 
   function handleRecall() {
     // A second click mid-request would fire the same recall again against a
@@ -2471,7 +2457,7 @@ function PresetSlotRow({
       // Empty slots recede and lift on hover — the same treatment bypassed
       // columns get in the EQ strip, so "present but not doing anything"
       // looks the same everywhere in the app.
-      className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-opacity duration-150 ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
+      className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-opacity duration-150 hover:bg-[var(--amp-color-gray-light)] ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
       style={{
         // The tint alone marks the active row now. This used to add a 2px
         // left accent bar, which made sense while rows were divided by
@@ -2511,83 +2497,35 @@ function PresetSlotRow({
       <div className="flex shrink-0 flex-nowrap items-center gap-1">
         {/* Nothing to recall from an empty slot. The control is omitted
          * rather than disabled, so 29 empty rows do not each carry a dead
-         * button — the spacer keeps ⋯ in one straight column regardless. */}
+         * button — the spacer keeps Store in one straight column regardless. */}
         {empty ? (
-          <div style={{ width: PRESET_ACTION_SIZE }} className="shrink-0" />
+          <div style={{ width: PRESET_RECALL_WIDTH }} className="shrink-0" />
         ) : (
-          <Tooltip delay={400}>
-            {/* `flex` is load-bearing, and so is the `flex` in
-                `PRESET_ACTION_CLASS`. `Tooltip.Trigger` renders a real
-                `<div role="button">`; an *inline-level* child inside it (a
-                plain `<button>`, as the old tile was) sits in a line box
-                whose strut adds descender space underneath, so the wrapper
-                measures taller than the button, and this row's
-                `items-center` then centres that taller box and leaves the
-                button riding visibly high. That is exactly why Recall used
-                to sit a few px above Store, whose `TilePopover` wrapper
-                already carried this fix — see the note there. Either flex
-                box removes the line box; both are set deliberately. */}
-            <Tooltip.Trigger className="flex">
-              {/* Direction is the meaning here: Recall lifts the preset out
-               * of the slot, Store drops the amp's current settings into it.
-               * This deliberately avoids `SquareArrowRightEnter`/`Exit` —
-               * that pair is already the Input/Output tab icons in this same
-               * view, so reusing it read as "Input/Output". */}
-              <button
-                type="button"
-                aria-label={`Recall "${slot.name}"`}
-                aria-busy={recallFeedback.busy || undefined}
-                className={PRESET_ACTION_CLASS}
-                style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
-                onClick={handleRecall}
-              >
-                <ActionFeedbackContent status={recallFeedback.status} size={16}>
-                  <div className="flex h-full items-center justify-center">
-                    <ArrowUpFromLine size={15} />
-                  </div>
-                </ActionFeedbackContent>
-              </button>
-            </Tooltip.Trigger>
-            <Tooltip.Content showArrow>{`Recall "${slot.name}"`}</Tooltip.Content>
-          </Tooltip>
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label={`Recall "${slot.name}"`}
+            aria-busy={recallFeedback.busy || undefined}
+            className="shrink-0 px-0"
+            style={{ width: PRESET_RECALL_WIDTH }}
+            onPress={handleRecall}
+          >
+            <ActionFeedbackContent status={recallFeedback.status} size={16}>
+              {/* The feedback layer is absolute, so it has to centre its own content. */}
+              <div className="flex h-full items-center justify-center">Recall</div>
+            </ActionFeedbackContent>
+          </Button>
         )}
-        {/* The same standalone-overlay pattern `SourcePicker` uses above: no
-            `<Dropdown>` root, so the trigger stays this plain button instead
-            of being wrapped in a second one, and the popover is driven by
-            `triggerRef` + `isOpen`. `flex` on the wrapper for the same strut
-            reason as Recall's tooltip. */}
-        <div ref={menuTriggerRef} className="flex">
-          <button
-            type="button"
-            aria-label={`More actions for slot ${slot.index + 1}`}
-            className={PRESET_ACTION_CLASS}
-            style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            <MoreHorizontal size={16} />
-          </button>
-        </div>
-        <Dropdown.Popover
-          triggerRef={menuTriggerRef}
-          isOpen={menuOpen}
-          onOpenChange={setMenuOpen}
-          placement="bottom end"
-          className={`${DROPDOWN_SLOTS.popover()} min-w-[200px]`}
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={empty ? `Store to slot ${slot.index + 1}` : `Overwrite "${slot.name}"`}
+          className="shrink-0 px-0"
+          style={{ width: PRESET_STORE_WIDTH }}
+          onPress={onRequestStore}
         >
-          <Dropdown.Menu
-            className={DROPDOWN_SLOTS.menu()}
-            onAction={() => {
-              setMenuOpen(false);
-              onRequestStore();
-            }}
-          >
-            {/* `Dropdown.Menu` is a RAC collection: its items have to be
-                direct children or the menu renders empty. */}
-            <Dropdown.Item id="store">
-              {empty ? "Store here…" : "Overwrite with current settings…"}
-            </Dropdown.Item>
-          </Dropdown.Menu>
-        </Dropdown.Popover>
+          {empty ? "Store" : "Overwrite"}
+        </Button>
       </div>
     </div>
   );
@@ -2595,12 +2533,10 @@ function PresetSlotRow({
 
 /** Store's confirmation step. One modal for the whole tab rather than one per
  * row — 40 rows would otherwise each carry an overlay — reseeded from `slot`
- * each time a row's ⋯ menu opens it.
+ * each time a row's Store or Overwrite button opens it.
  *
- * A modal rather than the popover this used to be: it is opened from a menu
- * item now, and that item unmounts as it fires, taking any popover anchored
- * to it along with it. A modal also suits the weight of the action, which is
- * the one thing in this tab that destroys something. */
+ * A modal suits the weight of the action, which is the one thing in this tab
+ * that destroys something. */
 function PresetStoreModal({
   slot,
   onClose,
@@ -2766,6 +2702,7 @@ function PresetConfigurationTab({
     presets?.activePresetName && !isEmptySlot(presets.activePresetName)
       ? presets.activePresetName
       : null;
+  const activeRowVisible = visibleSlots.some((slot) => !isEmptySlot(slot.name) && slot.name === activeName);
 
   function toggleFilter(value: string) {
     setSlotFilter((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
@@ -2810,10 +2747,9 @@ function PresetConfigurationTab({
           </div>
         </div>
 
-        {/* The active preset gets its own line rather than a clause in a
-            run-on status string. Worth stating even though the list marks the
-            active row, since that row can be filtered out of view. */}
-        {slots.length > 0 && (
+        {/* The list's own row says which preset is active, so this line only
+            appears when that row can't: filtered out, or nothing reported. */}
+        {slots.length > 0 && !activeRowVisible && (
           <div className={`flex min-w-0 items-center gap-1.5 ${PRESET_MUTED}`}>
             {activeName ? (
               <>
