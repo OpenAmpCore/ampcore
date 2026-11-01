@@ -237,6 +237,13 @@
 
 /* An EQ write in flight: the curve (and the stage's handle) breathe until
    the amp acknowledges it. */
+/* Tiles a hovered control is linked with (`MainTab`, `channelLinks.ts`). */
+[data-link-hot] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
+}
+
 @keyframes eq-write-pending {
   0%,
   100% {

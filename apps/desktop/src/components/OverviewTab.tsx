@@ -11,7 +11,17 @@ import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
 import type { ActionResult } from "../lib/actionResult";
 import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../lib/bindings";
-import { channelTelemetry, type ChannelTelemetry, outputLetter } from "../lib/channelTelemetry";
+import {
+  channelTelemetry,
+  FALLBACK_LIMITER,
+  outputLetter,
+  OUTPUT_METER_FLOOR_DB,
+  OUTPUT_METER_MARKS,
+  outputMeterScale,
+  rmsCeilingVolts,
+  type ChannelTelemetry,
+  type OutputMeterScale,
+} from "../lib/channelTelemetry";
 import { channelStateTone } from "../lib/channelState";
 import { usePreference } from "../lib/preferences";
 
@@ -52,9 +62,8 @@ const LEGEND_W = 56;
 const GAP = 8;
 const LED_ROW_H = 16;
 
-/** The level meters' scale — the same −60..0 the Input / Output tab's
- * horizontal meters use (`LEVEL_MARKS` there): 1 V on inputs, rated output
- * on outputs. */
+/** The input meters' scale — the same −60..0, re 1 V, the Input / Output tab's
+ * horizontal meters use (`LEVEL_MARKS` there). Outputs use `outputMeterScale`. */
 const METER_FLOOR_DB = -60;
 const METER_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
 
@@ -255,13 +264,25 @@ function Scale({ min, max, marks, inset = 0 }: { min: number; max: number; marks
   );
 }
 
-function LevelMeter({ levelDb, peakHold, disabled }: { levelDb: number | null; peakHold: boolean; disabled?: boolean }) {
+function LevelMeter({
+  level,
+  peakHold,
+  disabled,
+  min = METER_FLOOR_DB,
+  max = 0,
+}: {
+  level: number | null;
+  peakHold: boolean;
+  disabled?: boolean;
+  min?: number;
+  max?: number;
+}) {
   return (
     <VuMeter
       orientation="vertical"
-      min={METER_FLOOR_DB}
-      max={0}
-      value={levelDb ?? METER_FLOOR_DB}
+      min={min}
+      max={max}
+      value={level ?? min}
       gradient={DEFAULT_LEVEL_GRADIENT}
       thickness={14}
       size={STRIP_H}
@@ -388,7 +409,7 @@ function SourceStrip({
     <Column>
       <ChannelHeader label={String(channel.channelIndex + 1)} name={inputName(channel)} />
       <Cell height={STRIP_H}>
-        <LevelMeter levelDb={reading.inputDbv} peakHold={peakHold} disabled={channel.inputMuted ?? false} />
+        <LevelMeter level={reading.inputDbv} peakHold={peakHold} disabled={channel.inputMuted ?? false} />
       </Cell>
       <Cell height={LED_ROW_H}>
         <Led color="var(--amp-color-red-5)" lit={reading.inputClipping === true} label="Clip" />
@@ -401,11 +422,13 @@ function OutputStrip({
   channel,
   reading,
   peakHold,
+  scale,
   onMute,
 }: {
   channel: AmpChannel;
   reading: ChannelTelemetry;
   peakHold: boolean;
+  scale: OutputMeterScale;
   onMute: () => Promise<ActionResult>;
 }) {
   const muted = channel.outputMuted ?? false;
@@ -420,7 +443,13 @@ function OutputStrip({
       <ChannelHeader label={outputLetter(channel.channelIndex)} name={outputName(channel)} />
       <Cell height={STRIP_H}>
         <div className="flex h-full items-end gap-2.5">
-          <LevelMeter levelDb={reading.outputLevelDb} peakHold={peakHold} disabled={muted} />
+          <LevelMeter
+            level={scale.reading(reading)}
+            min={scale.min}
+            max={scale.max}
+            peakHold={peakHold}
+            disabled={muted}
+          />
           <div className="flex flex-col">
             {STATUS_LEDS.map((led) => (
               <Cell key={led.label} height={LED_ROW_H}>
@@ -509,6 +538,19 @@ export function OverviewTab({
   const volumeMax = capability.paramRanges.outputVolumeDb.max ?? 18;
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
+  const outputMeterVolts = usePreference("outputMeterVolts");
+  // One scale column serves every output, so all of them use the highest max.
+  const outScale = outputMeterScale(
+    outputMeterVolts,
+    Math.max(
+      ...channels.map((c) =>
+        rmsCeilingVolts(c.limiter ?? FALLBACK_LIMITER, ratedRmsVoltage, capability.paramRanges.rmsLimiterThresholdVrms.max),
+      ),
+    ),
+    ratedRmsVoltage,
+    OUTPUT_METER_FLOOR_DB,
+    OUTPUT_METER_MARKS,
+  );
   const readings = channels.map((c) => channelTelemetry(telemetry, c.channelIndex, ratedRmsVoltage));
   const psuTempC = telemetry?.temperatures[4] ?? null;
   const totals = outputTotals(readings);
@@ -599,7 +641,7 @@ export function OverviewTab({
           <Section title="Output">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
-              <Scale min={METER_FLOOR_DB} max={0} marks={METER_MARKS} />
+              <Scale min={outScale.min} max={outScale.max} marks={outScale.marks} />
               <Cell height={TOGGLE_H} />
               <Cell height={ROW_H} align="end">
                 <SideText>V</SideText>
@@ -620,6 +662,7 @@ export function OverviewTab({
                 channel={channel}
                 reading={readings[i]}
                 peakHold={peakHoldSurfaces.includes("output")}
+                scale={outScale}
                 onMute={() => actions.setChannelOutputMute(channel.channelIndex, !(channel.outputMuted ?? false))}
               />
             ))}

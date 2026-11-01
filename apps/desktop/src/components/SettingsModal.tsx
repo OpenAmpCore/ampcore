@@ -217,6 +217,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const showSpeakerComparator = usePreference("showSpeakerComparator");
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
+  const outputMeterVolts = usePreference("outputMeterVolts");
 
   useEffect(() => {
     if (!opened) return;
@@ -293,6 +294,19 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                     values={limiterThresholdSurfaces}
                     onChange={(values) => setPreference("limiterThresholdSurfaces", values)}
                   />
+                </SettingRow>
+
+                <SettingRow label="Show output meters in volts">
+                  <Switch
+                    isSelected={outputMeterVolts}
+                    onChange={(isSelected) => setPreference("outputMeterVolts", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
                 </SettingRow>
               </SettingsSection>
 

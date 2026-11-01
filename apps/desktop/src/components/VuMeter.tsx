@@ -206,9 +206,12 @@ export function VuMeter({
                 position: "absolute",
                 background: zone.color,
                 opacity: zone.opacity ?? 1,
+                // Both ends as insets, not offset + length: those two round
+                // separately and could leave a band ending at the top of the
+                // scale a pixel short of the track's edge.
                 ...(horizontal
-                  ? { left: `${start * 100}%`, width: `${span * 100}%`, top: 0, bottom: 0 }
-                  : { bottom: `${start * 100}%`, height: `${span * 100}%`, left: 0, right: 0 }),
+                  ? { left: `${start * 100}%`, right: `${(1 - Math.max(a, b)) * 100}%`, top: 0, bottom: 0 }
+                  : { bottom: `${start * 100}%`, top: `${(1 - Math.max(a, b)) * 100}%`, left: 0, right: 0 }),
               }}
             />
           );

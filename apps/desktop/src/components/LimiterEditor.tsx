@@ -8,6 +8,10 @@ import {
   buildLimiterThresholdVisuals,
   FALLBACK_LIMITER,
   outputLetter,
+  OUTPUT_METER_FLOOR_DB,
+  OUTPUT_METER_MARKS,
+  outputMeterScale,
+  rmsCeilingVolts,
   type ChannelTelemetry,
 } from "../lib/channelTelemetry";
 import { useIsTight } from "../lib/breakpoints";
@@ -18,14 +22,11 @@ const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
 /** Bottom of the Out dB / Limit dB scale. Also the value a `null` reading
  * renders at, so a channel with no telemetry sits unlit on both columns. */
-const LIMITER_METER_FLOOR = -40;
+const LIMITER_METER_FLOOR = OUTPUT_METER_FLOOR_DB;
 
 /** Scale for the Out dB/Limit dB columns. `0` means rated max output on the
  * Out column and *no* gain reduction on the Limit column. */
-const LIMITER_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map((value) => ({
-  value,
-  label: String(value),
-}));
+const LIMITER_METER_MARKS = OUTPUT_METER_MARKS;
 
 /** RMS power into `ohms` from an RMS voltage threshold — `P = V^2 / R`. */
 function rmsPowerWatts(vrms: number, ohms: number): number {
@@ -113,6 +114,7 @@ export function LimiterEditor({
   const ranges = capability.paramRanges;
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
+  const outputMeterVolts = usePreference("outputMeterVolts");
 
   async function patch(fields: {
     rmsEnabled?: boolean;
@@ -163,7 +165,7 @@ export function LimiterEditor({
   // models with no known datasheet), ×√2 for peak; then the generic range.
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const reported = (v: number | null | undefined) => (v != null && Number.isFinite(v) && v > 0 ? v : null);
-  const rmsThresholdMax = reported(limiter.rms.maxVrms) ?? ratedRmsVoltage ?? rmsRange.max ?? 200;
+  const rmsThresholdMax = rmsCeilingVolts(limiter, ratedRmsVoltage, rmsRange.max);
   const peakThresholdMax =
     reported(limiter.peak.maxVp) ??
     (ratedRmsVoltage != null ? ratedRmsVoltage * PEAK_HEADROOM_FACTOR : null) ??
@@ -221,16 +223,23 @@ export function LimiterEditor({
   // Gated on "limiter" in "Enable limiter threshold lines in meters" — off,
   // the Out dB column keeps its plain scale ticks and no bands.
   const showLimiterThresholds = limiterThresholdSurfaces.includes("limiter");
+  const outScale = outputMeterScale(
+    outputMeterVolts,
+    rmsThresholdMax,
+    ratedRmsVoltage,
+    LIMITER_METER_FLOOR,
+    LIMITER_METER_MARKS,
+  );
+  const outReading = outScale.reading(telemetry);
   const { zones: outMeterZones, marks: thresholdMarks } = showLimiterThresholds
     ? buildLimiterThresholdVisuals(
-        rmsThresholdVrms,
-        peakThresholdVp,
-        ratedRmsVoltage,
-        LIMITER_METER_FLOOR,
-        { pixelsPerDb: SLIDER_HEIGHT / (0 - LIMITER_METER_FLOOR) },
+        limiter.rms.enabled ? rmsThresholdVrms : null,
+        limiter.peak.enabled ? peakThresholdVp : null,
+        outScale,
+        { pixelsPerUnit: SLIDER_HEIGHT / (outScale.max - outScale.min) },
       )
     : { zones: [], marks: [] };
-  const outMeterMarks: VuMeterMark[] = [...LIMITER_METER_MARKS, ...thresholdMarks];
+  const outMeterMarks: VuMeterMark[] = [...outScale.marks, ...thresholdMarks];
 
   async function handleOhmsChange(value: number) {
     if (!actions.setChannelOhms) return;
@@ -292,11 +301,17 @@ export function LimiterEditor({
           }}
         />
         <LimiterMeterColumn
-          label="Out dB"
+          label={`Out ${outScale.unit}`}
           gradient
           peakHold={peakHoldSurfaces.includes("limiter")}
-          levelDb={telemetry?.outputLevelDb ?? null}
-          valueText={fmtDb(telemetry?.outputLevelDb ?? null)}
+          min={outScale.min}
+          max={outScale.max}
+          levelDb={outReading}
+          valueText={
+            outScale.unit === "V"
+              ? `${outReading === null ? "—" : outReading.toFixed(1)} / ${Math.round(outScale.max)} V`
+              : fmtDb(outReading)
+          }
           marks={outMeterMarks}
           zones={outMeterZones}
         />
@@ -553,8 +568,12 @@ function LimiterMeterColumn({
   peakHold,
   marks = LIMITER_METER_MARKS,
   zones,
+  min = LIMITER_METER_FLOOR,
+  max = 0,
 }: {
   label: string;
+  min?: number;
+  max?: number;
   gradient?: boolean;
   levelDb: number | null;
   valueText: string;
@@ -570,9 +589,9 @@ function LimiterMeterColumn({
       </span>
       <VuMeter
         orientation="vertical"
-        min={LIMITER_METER_FLOOR}
-        max={0}
-        value={levelDb ?? (fillFrom === "max" ? 0 : LIMITER_METER_FLOOR)}
+        min={min}
+        max={max}
+        value={levelDb ?? (fillFrom === "max" ? max : min)}
         gradient={gradient ? DEFAULT_LEVEL_GRADIENT : undefined}
         thickness={22}
         size={SLIDER_HEIGHT}
