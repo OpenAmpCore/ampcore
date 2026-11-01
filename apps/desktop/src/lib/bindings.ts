@@ -724,7 +724,7 @@ export const commands = {
 	 *  already running changes nothing, so the frontend can call this freely.
 	 */
 	webServerSet: (enabled: boolean, port: number) => typedError<string[], AppError>(__TAURI_INVOKE("web_server_set", { enabled, port })),
-	bugReportSend: (title: string, description: string) => typedError<null, AppError>(__TAURI_INVOKE("bug_report_send", { title, description })),
+	bugReportSend: (title: string, description: string) => typedError<BugReportOutcome, AppError>(__TAURI_INVOKE("bug_report_send", { title, description })),
 };
 
 /* Types */
@@ -1305,6 +1305,10 @@ export type BackupPriorityPatch = {
 	second: number | null,
 	thresholdDb: number | null,
 };
+
+export type BugReportOutcome = "Sent" | 
+/**  Couldn't go out now; the background retry delivers it. */
+"Saved";
 
 export type CanvasPosition = {
 	x: number | null,
@@ -2304,12 +2308,12 @@ export type Telemetry = {
 	temperatures: (number | null)[],
 	outputVoltages: (number | null)[],
 	outputCurrents: (number | null)[],
-	outputImpedance: (number | null)[],
 	/**
-	 *  V × A per output — apparent power (VA). The heartbeat carries no
-	 *  phase, so a reactive speaker load takes somewhat less real power.
+	 *  True where an output has voltage but reports exactly 0 A. The firmware
+	 *  subtracts an offset from measured current and clamps anything under
+	 *  0.1 A to 0, so this means "too low to measure", not "no current".
 	 */
-	outputPowerVa: (number | null)[],
+	outputCurrentBelowRange: boolean[],
 	/**
 	 *  dB relative to the device's rated RMS output voltage (`0dB` = rated
 	 *  max output) — `None` per-channel until `driver.rs` fills it in, since

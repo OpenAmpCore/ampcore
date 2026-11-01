@@ -382,15 +382,16 @@ function DeviceTab({ ctx }: { ctx: AmpCtx }) {
                   <span className="tabular-nums">
                     {[
                       t.outputVoltages[i] !== undefined && `${t.outputVoltages[i].toFixed(1)} V`,
-                      t.outputCurrents[i] !== undefined && `${t.outputCurrents[i].toFixed(2)} A`,
-                      t.outputImpedance[i] !== undefined && `${t.outputImpedance[i].toFixed(1)} Ω`,
+                      t.outputCurrents[i] !== undefined &&
+                        (t.outputCurrentBelowRange[i] ? "Low" : `${t.outputCurrents[i].toFixed(2)} A`),
                     ]
                       .filter(Boolean)
                       .join(" · ") || "—"}
                   </span>
                 }
                 // Limiter gain reduction; 0 means it isn't pulling anything back.
-                subtitle={t.limiters[i] ? `Limiting ${t.limiters[i].toFixed(1)} dB` : undefined}
+                // At 0 V the firmware's reading means nothing, as on desktop.
+                subtitle={t.limiters[i] && t.outputVoltages[i] > 0 ? `Limiting ${t.limiters[i].toFixed(1)} dB` : undefined}
                 onClick={() => openDetail(device.id, "out", i)}
               />
             ))}

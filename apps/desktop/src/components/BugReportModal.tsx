@@ -3,7 +3,8 @@ import { Button, Input, Label, Modal, TextArea, TextField, toast } from "@heroui
 import { commands } from "../lib/bindings";
 
 /** Title and description, sent with `bug_report_send`. Trying to send is the
- * connectivity check: on any failure the dialog stays open with the text in it. */
+ * connectivity check: offline, the backend saves the report and retries on its
+ * own. Any other failure keeps the dialog open with the text in it. */
 export function BugReportModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -20,7 +21,11 @@ export function BugReportModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
       setError(result.error.message);
       return;
     }
-    toast.success("Bug report sent");
+    if (result.data === "Saved") {
+      toast("Saved. It will be sent automatically when this computer is online.");
+    } else {
+      toast.success("Bug report sent");
+    }
     setTitle("");
     setDescription("");
     onClose();

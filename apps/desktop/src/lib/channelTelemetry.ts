@@ -17,9 +17,9 @@ export interface ChannelTelemetry {
   outputLevelDb: number | null;
   outputVoltage: number | null;
   outputCurrent: number | null;
-  /** V × A, from core — apparent power (VA), not real watts: the heartbeat
-   * carries no phase. */
-  outputPowerVa: number | null;
+  /** The output has voltage but its current is too low for the amp to
+   * measure, so `outputCurrent`'s 0 is not a real reading. */
+  outputCurrentBelowRange: boolean;
   temperatureC: number | null;
   /** Limiter gain reduction, as a non-positive dB value (the wire carries
    * the magnitude; the reference implementation negates it the same way).
@@ -45,7 +45,7 @@ const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
   outputLevelDb: null,
   outputVoltage: null,
   outputCurrent: null,
-  outputPowerVa: null,
+  outputCurrentBelowRange: false,
   temperatureC: null,
   gainReductionDb: null,
   outputState: null,
@@ -103,11 +103,14 @@ export function channelTelemetry(
       voltageToDb(outputVoltage, telemetry.ratedRmsVoltage ?? ratedRmsVoltage),
     outputVoltage,
     outputCurrent: at(telemetry.outputCurrents, channelIndex),
-    outputPowerVa: at(telemetry.outputPowerVa, channelIndex),
+    outputCurrentBelowRange: telemetry.outputCurrentBelowRange[channelIndex] ?? false,
     // `temperatures` is 5 long: [0-3] per-channel, [4] PSU — a channel index
     // past 3 has no reading of its own rather than borrowing the PSU's.
     temperatureC: channelIndex < 4 ? at(telemetry.temperatures, channelIndex) : null,
-    gainReductionDb: gr === null ? null : -Math.abs(gr),
+    // The firmware's reading looks like an after/before signal ratio, which
+    // means nothing at noise level, so at 0 V it isn't limiting. The raw value
+    // stays in `telemetry.limiters` for the debug panel.
+    gainReductionDb: gr === null ? null : outputVoltage === 0 ? 0 : -Math.abs(gr),
     outputState: stateAt(telemetry.outputChannelStates, channelIndex),
     outputStateRaw: at(telemetry.outputStates, channelIndex),
     inputClipping: telemetry.inputClipping[channelIndex] ?? null,

@@ -50,7 +50,7 @@ const STRIP_H = 200;
  * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
  * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
-/** A value row: the dB/Gain/SEN fields and the V/A/VA/°C readouts. */
+/** A value row: the dB/Gain/SEN fields and the V/A/°C readouts. */
 const ROW_H = 30;
 /** A column's channel number or letter, with its name under it. */
 const HEADER_H = 36;
@@ -120,22 +120,30 @@ const fmt = (value: number | null, digits: number) => (value === null ? "—" : 
 
 interface OutputTotals {
   currentA: number | null;
-  powerVa: number | null;
+  /** An output's current is too low to measure, so the sum is a lower bound. */
+  belowRange: boolean;
 }
 
-/** What the outputs deliver between them: summed current and apparent power
- * (`ChannelTelemetry.outputPowerVa`). There is
- * no mains reading, so this is the load side, not what the amp draws from the
- * wall. `null` when no output has a reading. */
+/** What the outputs deliver between them: summed current. There is no mains
+ * reading, so this is the load side, not what the amp draws from the wall.
+ * `null` when no output has a reading. */
 function outputTotals(readings: ChannelTelemetry[]): OutputTotals {
   let currentA: number | null = null;
-  let powerVa: number | null = null;
+  let belowRange = false;
   for (const reading of readings) {
     if (reading.outputCurrent === null) continue;
     currentA = (currentA ?? 0) + reading.outputCurrent;
-    if (reading.outputPowerVa !== null) powerVa = (powerVa ?? 0) + reading.outputPowerVa;
+    belowRange ||= reading.outputCurrentBelowRange;
   }
-  return { currentA, powerVa };
+  return { currentA, belowRange };
+}
+
+const LOW_CURRENT = "Low";
+const LOW_CURRENT_HINT = "Current is below what the amp can measure";
+
+function totalCurrentText({ currentA, belowRange }: OutputTotals): string {
+  if (!belowRange) return fmt(currentA, 1);
+  return currentA ? `≥ ${fmt(currentA, 1)}` : LOW_CURRENT;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -210,8 +218,8 @@ const outputName = (channel: AmpChannel) =>
   channel.outputName?.trim().replace(/_[0-9a-fA-F]{4}$/, "") || `Out${outputLetter(channel.channelIndex)}`;
 
 /** A passive value, recessed like `StatReadout` but one row high. */
-function ValueCell({ value }: { value: string }) {
-  return (
+function ValueCell({ value, hint }: { value: string; hint?: string }) {
+  const cell = (
     <div
       className="flex w-full items-center justify-center"
       style={{
@@ -225,6 +233,13 @@ function ValueCell({ value }: { value: string }) {
     >
       {value}
     </div>
+  );
+  return hint ? (
+    <Hint text={hint} className="w-full">
+      {cell}
+    </Hint>
+  ) : (
+    cell
   );
 }
 
@@ -467,8 +482,11 @@ function OutputStrip({
         icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
       />
       <ValueCell value={fmt(reading.outputVoltage, 1)} />
-      <ValueCell value={fmt(reading.outputCurrent, 1)} />
-      <ValueCell value={fmt(reading.outputPowerVa, 0)} />
+      {reading.outputCurrentBelowRange ? (
+        <ValueCell value={LOW_CURRENT} hint={LOW_CURRENT_HINT} />
+      ) : (
+        <ValueCell value={fmt(reading.outputCurrent, 1)} />
+      )}
       <ValueCell value={fmt(reading.temperatureC, 0)} />
     </Column>
   );
@@ -507,7 +525,9 @@ function InfoBar({
       <InfoItem label="Firmware">{device.firmwareVersion || "—"}</InfoItem>
       <InfoItem label="Preset">{presetName || "—"}</InfoItem>
       <InfoItem label="Total">
-        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerVa, 0)} VA`}
+        {totals.currentA === null || (totals.belowRange && !totals.currentA)
+          ? totalCurrentText(totals)
+          : `${totalCurrentText(totals)} A`}
       </InfoItem>
       <InfoItem label="PSU">{psuTempC === null ? "—" : `${psuTempC.toFixed(0)} °C`}</InfoItem>
       <InfoItem label="Status">
@@ -650,9 +670,6 @@ export function OverviewTab({
                 <SideText>A</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
-                <SideText>VA</SideText>
-              </Cell>
-              <Cell height={ROW_H} align="end">
                 <SideText>°C</SideText>
               </Cell>
             </Column>
@@ -667,8 +684,8 @@ export function OverviewTab({
               />
             ))}
             {/* Legend for the LED column, bottom-aligned with it; below it,
-             * the A and VA rows' totals under a label in the V row, where a
-             * sum would mean nothing. */}
+             * the A row's total under a label in the V row, where a sum would
+             * mean nothing. */}
             <Column width={LEGEND_W}>
               <Cell height={HEADER_H} />
               <div className="flex flex-col justify-end" style={{ height: STRIP_H }}>
@@ -682,8 +699,7 @@ export function OverviewTab({
               <Cell height={ROW_H} align="center">
                 <SideText>Total</SideText>
               </Cell>
-              <ValueCell value={fmt(totals.currentA, 1)} />
-              <ValueCell value={fmt(totals.powerVa, 0)} />
+              <ValueCell value={totalCurrentText(totals)} hint={totals.belowRange ? LOW_CURRENT_HINT : undefined} />
             </Column>
           </Section>
         </div>

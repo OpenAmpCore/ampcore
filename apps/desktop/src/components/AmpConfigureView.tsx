@@ -2886,8 +2886,10 @@ function RailTabIcon({ label, Icon }: { label: string; Icon: ComponentType<{ siz
       >
         <Icon size={24} />
       </span>
-      <Tooltip>
-        <Tooltip.Content isOpen={open} triggerRef={ref} placement="right" showArrow>
+      {/* `isOpen` belongs on the root: positioning reads the root's state, so
+          on `Tooltip.Content` it shows the tooltip unpositioned, top-left. */}
+      <Tooltip isOpen={open}>
+        <Tooltip.Content triggerRef={ref} placement="right" showArrow>
           {label}
         </Tooltip.Content>
       </Tooltip>

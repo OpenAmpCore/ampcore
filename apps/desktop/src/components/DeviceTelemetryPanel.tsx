@@ -313,7 +313,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
               <div style={{ fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: DIMMED, marginBottom: 8 }}>
                 Outputs
               </div>
-              {/* Seven columns of monospace readings don't compress; below
+              {/* Six columns of monospace readings don't compress; below
                 * their natural width the table scrolls sideways in place
                 * instead of widening the whole panel. */}
               <div className="overflow-x-auto" style={{ minWidth: 420 }}>
@@ -323,7 +323,6 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                       <th className="p-1 text-left">Ch</th>
                       <th className="p-1 text-left">V</th>
                       <th className="p-1 text-left">A</th>
-                      <th className="p-1 text-left">Ω</th>
                       <th className="p-1 text-left">Level</th>
                       <th className="p-1 text-left">Limiter</th>
                       <th className="p-1 text-left">State</th>
@@ -333,7 +332,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                     {Array.from({ length: outputCount }, (_, i) => {
                       const voltage = telemetry.outputVoltages[i] ?? 0;
                       const current = telemetry.outputCurrents[i] ?? 0;
-                      const impedance = telemetry.outputImpedance[i] ?? 0;
+                      const belowRange = telemetry.outputCurrentBelowRange[i] ?? false;
                       const levelDb = telemetry.outputLevelDb[i] ?? null;
                       const limiter = telemetry.limiters[i] ?? 0;
                       const state = telemetry.outputChannelStates[i] ?? null;
@@ -342,8 +341,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                         <tr key={i}>
                           <td className="p-1 font-mono font-semibold">{outputLetter(i)}</td>
                           <td className="p-1 font-mono">{voltage.toFixed(1)}</td>
-                          <td className="p-1 font-mono">{current.toFixed(2)}</td>
-                          <td className="p-1 font-mono">{impedance.toFixed(0)}</td>
+                          <td className="p-1 font-mono">{belowRange ? "low" : current.toFixed(2)}</td>
                           <td className="p-1 font-mono">{levelDb === null ? "—" : levelDb.toFixed(1)}</td>
                           <td className="p-1 font-mono">{limiter.toFixed(1)}</td>
                           <td className="p-1">
