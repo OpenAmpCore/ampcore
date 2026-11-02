@@ -133,7 +133,7 @@ export interface Telemetry {
   temperatures: number[];
   outputVoltages: number[];
   outputCurrents: number[];
-  outputImpedance: number[];
+  outputCurrentBelowRange: boolean[];
   outputLevelDb: (number | null)[];
   outputChannelStates: (string | null)[];
   inputDbfs: (number | null)[];

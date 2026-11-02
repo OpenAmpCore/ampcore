@@ -5,38 +5,38 @@ import {
   Alert,
   ButtonGroup,
   Chip,
-  Dropdown,
   Modal,
   Spinner,
   Switch,
   Tabs,
   Tooltip,
-  dropdownVariants,
   popoverVariants,
 } from "@heroui/react";
 import {
   Activity,
-  ArrowUpFromLine,
   Eye,
   FlipVertical2,
   GitCompare,
-  LayoutDashboard,
-  MoreHorizontal,
   Plug,
   RefreshCw,
-  Route,
   Unplug,
   ShieldAlert,
   ListPlus,
   Lock,
   Radio,
-  SlidersVertical,
-  Speaker,
   Volume2,
   VolumeX,
   Waves,
   WifiOff,
 } from "lucide-react";
+import {
+  AmplifierIcon,
+  CabinetIcon,
+  CrosspointMatrixIcon,
+  GangedFadersIcon,
+  MemorySlotsIcon,
+  RackPanelIcon,
+} from "./HardwareIcons";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { useConfirm } from "./ConfirmDialog";
 import { SimpleSelect } from "./SimpleSelect";
@@ -48,6 +48,7 @@ import {
 } from "./FingerprintInspector";
 import { FingerprintMismatchModal } from "./FingerprintMismatchModal";
 import { LimiterEditor } from "./LimiterEditor";
+import { LinkingTab } from "./LinkingTab";
 import { RotaryLockToggle } from "./RotaryLockToggle";
 import { StandbyToggle } from "./StandbyToggle";
 import { ChannelStateBadge } from "./ChannelStateBadge";
@@ -90,8 +91,14 @@ import {
   channelTelemetry,
   FALLBACK_LIMITER,
   outputLetter,
+  OUTPUT_METER_FLOOR_DB,
+  OUTPUT_METER_MARKS,
+  outputMeterScale,
+  rmsCeilingVolts,
   type ChannelTelemetry,
+  type OutputMeterScale,
 } from "../lib/channelTelemetry";
+import { linkConfigureActions, linkedChannels, NO_LINKS, type LinkConfig, type LinkScope } from "../lib/channelLinks";
 import {
   createProjectConfigureActions,
   lockConfigureActions,
@@ -173,16 +180,17 @@ const DEVICE_NAME_MAX_LENGTH = 32;
 const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
 const TABS = [
-  { value: "overview", label: "Overview", icon: SlidersVertical, skeleton: "grid" },
-  { value: "main", label: "Input / Output", icon: LayoutDashboard, skeleton: "list" },
-  { value: "routing", label: "Matrix", icon: Route, skeleton: "grid" },
-  { value: "speakers", label: "Speakers", icon: Speaker, skeleton: "list" },
+  { value: "overview", label: "Overview", icon: RackPanelIcon, skeleton: "grid" },
+  { value: "main", label: "Input / Output", icon: AmplifierIcon, skeleton: "list" },
+  { value: "routing", label: "Matrix", icon: CrosspointMatrixIcon, skeleton: "grid" },
+  { value: "speakers", label: "Speakers", icon: CabinetIcon, skeleton: "list" },
   {
     value: "presetConfiguration",
     label: "Preset Configuration",
-    icon: ListPlus,
+    icon: MemorySlotsIcon,
     skeleton: "list",
   },
+  { value: "linking", label: "Channel Linking", icon: GangedFadersIcon, skeleton: "list" },
 ] as const satisfies {
   value: string;
   label: string;
@@ -211,9 +219,8 @@ const SOURCE_LABELS: Record<SourceKind, string> = {
  * this too, so the tile always fills its column exactly. */
 const SOURCE_TILE_WIDTH = 150;
 
-/* HeroUI's overlay parts (`Popover.Content`, `Popover.Dialog`,
- * `Dropdown.Popover`, `Dropdown.Menu`) read their class names off a React
- * context that ONLY the `<Popover>` / `<Dropdown>` root provides. Every
+/* HeroUI's overlay parts (`Popover.Content`, `Popover.Dialog`) read their class
+ * names off a React context that ONLY the `<Popover>` root provides. Every
  * overlay in this file deliberately skips that root and drives the overlay
  * itself with `triggerRef` + `isOpen`, because the roots wrap their child in a
  * `PressResponder`/`role="button"` element — nesting each tile's own
@@ -224,7 +231,6 @@ const SOURCE_TILE_WIDTH = 150;
  * no shadow, no padding. Passing the slot names explicitly is what restores
  * HeroUI's own styling on the standalone pattern. */
 const POPOVER_SLOTS = popoverVariants();
-const DROPDOWN_SLOTS = dropdownVariants();
 
 /** The amp's own source-code space, shared by `FC_SOURCE_SELECT` (11) and the
  * backup priority struct (FC=80) — `BackupPriority.first`/`second` are raw
@@ -576,6 +582,8 @@ function TabSkeleton({
 
 export interface ConfigurableTabProps {
   assignment: AmpAssignment;
+  /** This amp's channel links, for `MainTab`'s linked-controls highlight. */
+  linkConfig?: LinkConfig;
   capability: AmpCapability;
   /** Latest heartbeat reading for a `"live"` source — `undefined` for a
    * Project source and before the first heartbeat arrives. Read through the
@@ -618,13 +626,21 @@ export interface ConfigurableTabProps {
 
 const METER_FLOOR_DB = -60;
 
-/** Shared dB scale for every channel level meter in this view. `0` is the
- * top for all of them, but means different things per tab: rated max output
- * on Output/Routing (`outputLevelDb`), and 1V on Input (`inputDbv`).
- * `-60` is `METER_FLOOR_DB`, the value a `null` reading renders at. */
+/** dB scale of an input's level meter, where `0` is 1V (`inputDbv`). `-60` is
+ * `METER_FLOOR_DB`, the value a `null` reading renders at. Outputs have their
+ * own scale, `outputMeterScale`. */
 const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map(
   (value) => ({ value, label: String(value) }),
 );
+
+/** Marks a tile for `MainTab`'s linked-controls highlight. */
+function LinkTarget({ scope, channel, children }: { scope: LinkScope; channel: number; children: ReactNode }) {
+  return (
+    <div className="flex" data-link-scope={scope} data-link-channel={channel}>
+      {children}
+    </div>
+  );
+}
 
 /** The one channel level meter used by every tab — Input, Output and
  * Routing all render this, so a meter reads identically wherever it appears
@@ -637,10 +653,13 @@ const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map(
  * meter to fill most of its width (matching the reference hardware view),
  * unlike the compact fixed-width meter every other tab uses.
  *
- * `levelDb` is `null` for a Project source, before the first heartbeat, and
+ * `level` is `null` for a Project source, before the first heartbeat, and
  * for a channel with no signal — all of which render fully unlit, the same
  * as a real reading at the floor. The neighbouring stat tile reads "—"
  * rather than a number, which is what keeps those cases distinguishable.
+ *
+ * `scale` puts an output on dB or, by the "Show output meters in volts"
+ * setting, on the amp's own volts.
  *
  * `limiterThresholds`, when given (only the Output tab passes it, behind the
  * "limiter" option of "Enable limiter threshold lines in meters"), draws that
@@ -654,32 +673,38 @@ const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map(
  * "Enable peak hold in meters", so a new caller can't silently inherit an
  * on/off state meant for a different tab. */
 function ChannelLevelMeter({
-  levelDb,
+  level,
+  scale,
   disabled,
   wide,
   peakHold,
   limiterThresholds,
 }: {
-  levelDb: number | null;
+  level: number | null;
+  /** The output scale; an input's meter omits it and stays on dB. */
+  scale?: OutputMeterScale;
   disabled?: boolean;
   wide?: boolean;
   peakHold: boolean;
   limiterThresholds?: {
-    rmsThresholdVrms: number;
-    peakThresholdVp: number;
-    ratedRmsVoltage: number | null;
+    /** `null` for a stage that is switched off: nothing is drawn for it. */
+    rmsThresholdVrms: number | null;
+    peakThresholdVp: number | null;
   };
 }) {
   const [meterRef, meterWidth] = useElementWidth<HTMLDivElement>();
-  const thresholds = limiterThresholds
-    ? buildLimiterThresholdVisuals(
-        limiterThresholds.rmsThresholdVrms,
-        limiterThresholds.peakThresholdVp,
-        limiterThresholds.ratedRmsVoltage,
-        METER_FLOOR_DB,
-        meterWidth !== null ? { pixelsPerDb: meterWidth / (0 - METER_FLOOR_DB) } : undefined,
-      )
-    : null;
+  const min = scale?.min ?? METER_FLOOR_DB;
+  const max = scale?.max ?? 0;
+  const thresholds =
+    limiterThresholds && scale
+      ? buildLimiterThresholdVisuals(
+          limiterThresholds.rmsThresholdVrms,
+          limiterThresholds.peakThresholdVp,
+          scale,
+          meterWidth !== null ? { pixelsPerUnit: meterWidth / (max - min) } : undefined,
+        )
+      : null;
+  const marks = scale?.marks ?? LEVEL_MARKS;
 
   return (
     <div
@@ -700,18 +725,43 @@ function ChannelLevelMeter({
     >
       <VuMeter
         orientation="horizontal"
-        min={METER_FLOOR_DB}
-        max={0}
-        value={levelDb ?? METER_FLOOR_DB}
+        min={min}
+        max={max}
+        value={level ?? min}
         gradient={DEFAULT_LEVEL_GRADIENT}
         thickness={24}
-        marks={thresholds ? [...LEVEL_MARKS, ...thresholds.marks] : LEVEL_MARKS}
+        marks={thresholds ? [...marks, ...thresholds.marks] : marks}
         zones={thresholds?.zones}
         peakHold={peakHold}
         disabled={disabled}
       />
     </div>
   );
+}
+
+/** An output's meter on the Matrix tab: plain, no limiter lines. */
+function RoutingOutputMeter({
+  channel,
+  reading,
+  ratedRmsVoltage,
+  rangeMax,
+  peakHold,
+}: {
+  channel: AmpAssignment["channels"][number];
+  reading: ChannelTelemetry;
+  ratedRmsVoltage: number | null;
+  rangeMax: number | null | undefined;
+  peakHold: boolean;
+}) {
+  const outputMeterVolts = usePreference("outputMeterVolts");
+  const scale = outputMeterScale(
+    outputMeterVolts,
+    rmsCeilingVolts(channel.limiter ?? FALLBACK_LIMITER, ratedRmsVoltage, rangeMax),
+    ratedRmsVoltage,
+    OUTPUT_METER_FLOOR_DB,
+    OUTPUT_METER_MARKS,
+  );
+  return <ChannelLevelMeter level={scale.reading(reading)} scale={scale} peakHold={peakHold} />;
 }
 
 /** How many filters in a chain are engaged — the parametric bands plus the
@@ -884,7 +934,7 @@ function InputChannelRow({
       />
       <div className="flex items-center gap-2">
         <ChannelLevelMeter
-          levelDb={telemetry.inputDbv}
+          level={telemetry.inputDbv}
           disabled={muted}
           peakHold={peakHoldSurfaces.includes("input")}
         />
@@ -901,6 +951,7 @@ function InputChannelRow({
            * both the input and the output strip, so the one control that
            * silences a channel is always in the same place rather than at the
            * end of a queue of editors. */}
+          <LinkTarget scope="muteIn" channel={channel.channelIndex}>
           <StatToggle
             label="Mute"
             engaged={muted}
@@ -908,6 +959,7 @@ function InputChannelRow({
             onClick={onMuteToggle}
             icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
           />
+          </LinkTarget>
           <TilePopover
             opened={delayOpened}
             onOpenChange={setDelayOpened}
@@ -948,6 +1000,7 @@ function InputChannelRow({
            * binary rather than a band count: a count says how many boxes are
            * ticked, not whether the channel is shaped — one band at +12 dB and
            * one at -0.5 dB both read as "2". */}
+          <LinkTarget scope="inputEq" channel={channel.channelIndex}>
           <StatEditorTile
             label="EQ In"
             opens="view"
@@ -955,6 +1008,7 @@ function InputChannelRow({
             icon={<Activity size={16} />}
             onClick={onOpenEq}
           />
+          </LinkTarget>
         </div>
       </div>
     </div>
@@ -968,6 +1022,7 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
 };
 
 function OutputChannelRow({
+  rmsThresholdRangeMax,
   channel,
   speaker,
   onOpenSpeakers,
@@ -1002,6 +1057,8 @@ function OutputChannelRow({
   /** For the limiter threshold lines on this row's meter — see
    * `capability.topology.ratedRmsVoltage` at the call site. */
   ratedRmsVoltage: number | null;
+  /** Generic ceiling for the volt meter, when neither amp nor model gives one. */
+  rmsThresholdRangeMax: number | null | undefined;
   trimMin: number | null;
   trimMax: number | null;
   volumeMin: number | null;
@@ -1060,6 +1117,14 @@ function OutputChannelRow({
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
   const showLimiterThresholds = limiterThresholdSurfaces.includes("output");
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
+  const outputMeterVolts = usePreference("outputMeterVolts");
+  const scale = outputMeterScale(
+    outputMeterVolts,
+    rmsCeilingVolts(limiter, ratedRmsVoltage, rmsThresholdRangeMax),
+    ratedRmsVoltage,
+    OUTPUT_METER_FLOOR_DB,
+    OUTPUT_METER_MARKS,
+  );
 
   return (
     <div>
@@ -1094,16 +1159,16 @@ function OutputChannelRow({
       />
       <div className="flex items-center gap-2">
         <ChannelLevelMeter
-          levelDb={telemetry.outputLevelDb}
+          level={scale.reading(telemetry)}
+          scale={scale}
           disabled={muted}
           wide
           peakHold={peakHoldSurfaces.includes("output")}
           limiterThresholds={
             showLimiterThresholds
               ? {
-                  rmsThresholdVrms: limiter.rms.thresholdVrms ?? 0,
-                  peakThresholdVp: limiter.peak.thresholdVp ?? 0,
-                  ratedRmsVoltage,
+                  rmsThresholdVrms: limiter.rms.enabled ? (limiter.rms.thresholdVrms ?? 0) : null,
+                  peakThresholdVp: limiter.peak.enabled ? (limiter.peak.thresholdVp ?? 0) : null,
                 }
               : undefined
           }
@@ -1139,6 +1204,7 @@ function OutputChannelRow({
             label="°C"
           />
           {/* Same slot as on the input strip — see the note in InputChannelRow. */}
+          <LinkTarget scope="muteOut" channel={channel.channelIndex}>
           <StatToggle
             label="Mute"
             engaged={muted}
@@ -1146,6 +1212,8 @@ function OutputChannelRow({
             onClick={onMuteToggle}
             icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
           />
+          </LinkTarget>
+          <LinkTarget scope="volumeOut" channel={channel.channelIndex}>
           <TilePopover
             opened={openPopover === "volume"}
             onOpenChange={(o) => setOpenPopover(o ? "volume" : null)}
@@ -1184,6 +1252,8 @@ function OutputChannelRow({
               />
             </div>
           </TilePopover>
+          </LinkTarget>
+          <LinkTarget scope="trimOut" channel={channel.channelIndex}>
           <TilePopover
             opened={openPopover === "trim"}
             onOpenChange={(o) => setOpenPopover(o ? "trim" : null)}
@@ -1222,6 +1292,8 @@ function OutputChannelRow({
               />
             </div>
           </TilePopover>
+          </LinkTarget>
+          <LinkTarget scope="outputEq" channel={channel.channelIndex}>
           <StatEditorTile
             label="EQ Out"
             opens="view"
@@ -1229,6 +1301,7 @@ function OutputChannelRow({
             icon={<Activity size={16} />}
             onClick={onOpenEq}
           />
+          </LinkTarget>
           <StatEditorTile
             label="FIR"
             opens="view"
@@ -1236,6 +1309,7 @@ function OutputChannelRow({
             icon={<Waves size={16} />}
             onClick={onOpenFir}
           />
+          <LinkTarget scope="delayOut" channel={channel.channelIndex}>
           <TilePopover
             opened={openPopover === "delay"}
             onOpenChange={(o) => setOpenPopover(o ? "delay" : null)}
@@ -1274,8 +1348,10 @@ function OutputChannelRow({
               />
             </div>
           </TilePopover>
+          </LinkTarget>
           {/* Amber, not red: an inverted polarity is a deliberate setting, and
            * red is reserved for "this channel's audio is cut". */}
+          <LinkTarget scope="polarityOut" channel={channel.channelIndex}>
           <StatToggle
             label="Pol"
             engaged={phaseInverted}
@@ -1284,6 +1360,7 @@ function OutputChannelRow({
             onClick={onPhaseInvertToggle}
             icon={<FlipVertical2 size={16} />}
           />
+          </LinkTarget>
           <StatEditorTile
             label="LIM"
             opens="view"
@@ -1306,6 +1383,7 @@ function OutputChannelRow({
            * duplicates the pill itself. That firmware gets a direct toggle;
            * only firmware with a real threshold field (`noiseGateThresholdAdjustable`)
            * gets the popover. */}
+          <LinkTarget scope="noiseGateOut" channel={channel.channelIndex}>
           {noiseGateThresholdAdjustable ? (
             <TilePopover
               opened={openPopover === "gate"}
@@ -1376,6 +1454,7 @@ function OutputChannelRow({
               icon={<ShieldAlert size={16} />}
             />
           )}
+          </LinkTarget>
           {/* Last, and as far from Mute as the row allows: power mode is rarely
            * changed, and switching Low-Ω/70V/100V on a live system is not a
            * click that should sit next to one people make quickly. */}
@@ -1666,6 +1745,7 @@ function ChannelEditorModal({
 function MainTab({
   assignment,
   capability,
+  linkConfig = NO_LINKS,
   actions,
   telemetry,
   deviceId,
@@ -1769,8 +1849,28 @@ function MainTab({
     channelPairs.push([assignment.channels[i], assignment.channels[i + 1]]);
   }
 
+  // Straight on the DOM: this tab re-renders at meter rate, and hovering must
+  // not add to that. React leaves the attribute alone, it doesn't own it.
+  function highlightLinked(root: HTMLElement, target: Element | null) {
+    root.querySelectorAll("[data-link-hot]").forEach((el) => el.removeAttribute("data-link-hot"));
+    const tile = target?.closest<HTMLElement>("[data-link-scope]");
+    if (!tile) return;
+    const scope = tile.dataset.linkScope as LinkScope;
+    const group = linkedChannels(linkConfig, scope, Number(tile.dataset.linkChannel));
+    if (group.length < 2) return;
+    for (const channel of group) {
+      root
+        .querySelector(`[data-link-scope="${scope}"][data-link-channel="${channel}"]`)
+        ?.setAttribute("data-link-hot", "");
+    }
+  }
+
   return (
-    <div className="h-full min-h-0 overflow-auto">
+    <div
+      className="h-full min-h-0 overflow-auto"
+      onMouseOver={(e) => highlightLinked(e.currentTarget, e.target as Element)}
+      onMouseLeave={(e) => highlightLinked(e.currentTarget, null)}
+    >
       {confirmDialog}
       <ChannelEditorModal
         target={editor}
@@ -1817,6 +1917,7 @@ function MainTab({
                         ratedRmsVoltage,
                       )}
                       ratedRmsVoltage={ratedRmsVoltage}
+                      rmsThresholdRangeMax={capability.paramRanges.rmsLimiterThresholdVrms.max}
                       trimMin={trimRange.min}
                       trimMax={trimRange.max}
                       volumeMin={volumeRange.min}
@@ -2152,7 +2253,7 @@ function RoutingTab({
                   }
                 />
                 <ChannelLevelMeter
-                  levelDb={t.inputDbv}
+                  level={t.inputDbv}
                   disabled={channel.inputMuted ?? false}
                   peakHold={peakHoldSurfaces.includes("input")}
                 />
@@ -2280,8 +2381,11 @@ function RoutingTab({
                       );
                     })}
                     <div className="flex min-w-0" style={dim}>
-                      <ChannelLevelMeter
-                        levelDb={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage).outputLevelDb}
+                      <RoutingOutputMeter
+                        channel={channel}
+                        reading={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
+                        ratedRmsVoltage={ratedRmsVoltage}
+                        rangeMax={capability.paramRanges.rmsLimiterThresholdVrms.max}
                         peakHold={peakHoldSurfaces.includes("output")}
                       />
                     </div>
@@ -2306,16 +2410,10 @@ function isEmptySlot(name: string): boolean {
   return trimmed.length === 0 || trimmed.toLowerCase() === "null";
 }
 
-/** The two controls a preset row carries — Recall, and the ⋯ menu that holds
- * Store — share one look and one box. They are hand-dressed plain buttons
- * rather than a HeroUI `Button` beside a `Dropdown.Trigger`: those two size
- * and style themselves differently, and a pair of controls repeated down
- * every row has to match exactly. */
-const PRESET_ACTION_SIZE = 28;
-const PRESET_ACTION_CLASS =
-  "flex shrink-0 cursor-pointer appearance-none items-center justify-center rounded-md border-0 " +
-  "bg-transparent p-0 text-[var(--amp-color-text)] transition-colors duration-150 " +
-  `hover:bg-[var(--amp-color-gray-light)] ${STAT_TILE_FOCUS}`;
+/** Fixed widths, so a preset row's two buttons form straight columns down the
+ * list. Recall's also holds `ActionFeedbackContent`, which fills its parent. */
+const PRESET_RECALL_WIDTH = 72;
+const PRESET_STORE_WIDTH = 88;
 
 /** The dimmed caption every secondary line in this tab uses. */
 const PRESET_MUTED =
@@ -2323,18 +2421,16 @@ const PRESET_MUTED =
 
 /** One row of the preset list. Kept deliberately thin: with 40 slots, a
  * card per preset put ~80 labelled buttons on screen at once, which read as
- * a wall rather than a list you scan. Both controls are icon-only, and an
- * empty slot renders no Recall control at all rather than a greyed one — on
- * a mostly-empty device that alone removes most of the clutter.
+ * a wall rather than a list you scan. The actions are labelled, because an
+ * icon couldn't say what they do. An empty slot renders no Recall control at all rather than a greyed
+ * one — on a mostly-empty device that alone removes most of the clutter.
  *
  * Store is the destructive half (it overwrites the slot with the amp's
  * current DSP state, and the wire protocol offers no undo), so it never
- * fires from the row at all: it sits behind the ⋯ menu and opens a modal
- * that names the slot, warns when it is about to overwrite, and asks again.
- * Nothing in the resting row is red. Store used to tint itself red on every
- * occupied slot, which on a device with a dozen presets written rendered a
- * solid column of red buttons — at that repetition red stops reading as a
- * warning. It now appears once, on the modal's Overwrite button. */
+ * fires from the row at all: it opens a modal that names the slot, warns when
+ * it is about to overwrite, and asks again. Nothing in the resting row is red:
+ * a solid column of red buttons stops reading as a warning. Red appears once,
+ * on the modal's Overwrite button. */
 function PresetSlotRow({
   slot,
   isActive,
@@ -2348,8 +2444,6 @@ function PresetSlotRow({
 }) {
   const empty = isEmptySlot(slot.name);
   const recallFeedback = useActionFeedback();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTriggerRef = useRef<HTMLDivElement>(null);
 
   function handleRecall() {
     // A second click mid-request would fire the same recall again against a
@@ -2363,7 +2457,7 @@ function PresetSlotRow({
       // Empty slots recede and lift on hover — the same treatment bypassed
       // columns get in the EQ strip, so "present but not doing anything"
       // looks the same everywhere in the app.
-      className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-opacity duration-150 ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
+      className={`flex min-w-0 flex-nowrap items-center gap-2 rounded-md px-2 py-1 transition-opacity duration-150 hover:bg-[var(--amp-color-gray-light)] ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
       style={{
         // The tint alone marks the active row now. This used to add a 2px
         // left accent bar, which made sense while rows were divided by
@@ -2403,83 +2497,35 @@ function PresetSlotRow({
       <div className="flex shrink-0 flex-nowrap items-center gap-1">
         {/* Nothing to recall from an empty slot. The control is omitted
          * rather than disabled, so 29 empty rows do not each carry a dead
-         * button — the spacer keeps ⋯ in one straight column regardless. */}
+         * button — the spacer keeps Store in one straight column regardless. */}
         {empty ? (
-          <div style={{ width: PRESET_ACTION_SIZE }} className="shrink-0" />
+          <div style={{ width: PRESET_RECALL_WIDTH }} className="shrink-0" />
         ) : (
-          <Tooltip delay={400}>
-            {/* `flex` is load-bearing, and so is the `flex` in
-                `PRESET_ACTION_CLASS`. `Tooltip.Trigger` renders a real
-                `<div role="button">`; an *inline-level* child inside it (a
-                plain `<button>`, as the old tile was) sits in a line box
-                whose strut adds descender space underneath, so the wrapper
-                measures taller than the button, and this row's
-                `items-center` then centres that taller box and leaves the
-                button riding visibly high. That is exactly why Recall used
-                to sit a few px above Store, whose `TilePopover` wrapper
-                already carried this fix — see the note there. Either flex
-                box removes the line box; both are set deliberately. */}
-            <Tooltip.Trigger className="flex">
-              {/* Direction is the meaning here: Recall lifts the preset out
-               * of the slot, Store drops the amp's current settings into it.
-               * This deliberately avoids `SquareArrowRightEnter`/`Exit` —
-               * that pair is already the Input/Output tab icons in this same
-               * view, so reusing it read as "Input/Output". */}
-              <button
-                type="button"
-                aria-label={`Recall "${slot.name}"`}
-                aria-busy={recallFeedback.busy || undefined}
-                className={PRESET_ACTION_CLASS}
-                style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
-                onClick={handleRecall}
-              >
-                <ActionFeedbackContent status={recallFeedback.status} size={16}>
-                  <div className="flex h-full items-center justify-center">
-                    <ArrowUpFromLine size={15} />
-                  </div>
-                </ActionFeedbackContent>
-              </button>
-            </Tooltip.Trigger>
-            <Tooltip.Content showArrow>{`Recall "${slot.name}"`}</Tooltip.Content>
-          </Tooltip>
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label={`Recall "${slot.name}"`}
+            aria-busy={recallFeedback.busy || undefined}
+            className="shrink-0 px-0"
+            style={{ width: PRESET_RECALL_WIDTH }}
+            onPress={handleRecall}
+          >
+            <ActionFeedbackContent status={recallFeedback.status} size={16}>
+              {/* The feedback layer is absolute, so it has to centre its own content. */}
+              <div className="flex h-full items-center justify-center">Recall</div>
+            </ActionFeedbackContent>
+          </Button>
         )}
-        {/* The same standalone-overlay pattern `SourcePicker` uses above: no
-            `<Dropdown>` root, so the trigger stays this plain button instead
-            of being wrapped in a second one, and the popover is driven by
-            `triggerRef` + `isOpen`. `flex` on the wrapper for the same strut
-            reason as Recall's tooltip. */}
-        <div ref={menuTriggerRef} className="flex">
-          <button
-            type="button"
-            aria-label={`More actions for slot ${slot.index + 1}`}
-            className={PRESET_ACTION_CLASS}
-            style={{ width: PRESET_ACTION_SIZE, height: PRESET_ACTION_SIZE }}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            <MoreHorizontal size={16} />
-          </button>
-        </div>
-        <Dropdown.Popover
-          triggerRef={menuTriggerRef}
-          isOpen={menuOpen}
-          onOpenChange={setMenuOpen}
-          placement="bottom end"
-          className={`${DROPDOWN_SLOTS.popover()} min-w-[200px]`}
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={empty ? `Store to slot ${slot.index + 1}` : `Overwrite "${slot.name}"`}
+          className="shrink-0 px-0"
+          style={{ width: PRESET_STORE_WIDTH }}
+          onPress={onRequestStore}
         >
-          <Dropdown.Menu
-            className={DROPDOWN_SLOTS.menu()}
-            onAction={() => {
-              setMenuOpen(false);
-              onRequestStore();
-            }}
-          >
-            {/* `Dropdown.Menu` is a RAC collection: its items have to be
-                direct children or the menu renders empty. */}
-            <Dropdown.Item id="store">
-              {empty ? "Store here…" : "Overwrite with current settings…"}
-            </Dropdown.Item>
-          </Dropdown.Menu>
-        </Dropdown.Popover>
+          {empty ? "Store" : "Overwrite"}
+        </Button>
       </div>
     </div>
   );
@@ -2487,12 +2533,10 @@ function PresetSlotRow({
 
 /** Store's confirmation step. One modal for the whole tab rather than one per
  * row — 40 rows would otherwise each carry an overlay — reseeded from `slot`
- * each time a row's ⋯ menu opens it.
+ * each time a row's Store or Overwrite button opens it.
  *
- * A modal rather than the popover this used to be: it is opened from a menu
- * item now, and that item unmounts as it fires, taking any popover anchored
- * to it along with it. A modal also suits the weight of the action, which is
- * the one thing in this tab that destroys something. */
+ * A modal suits the weight of the action, which is the one thing in this tab
+ * that destroys something. */
 function PresetStoreModal({
   slot,
   onClose,
@@ -2658,6 +2702,7 @@ function PresetConfigurationTab({
     presets?.activePresetName && !isEmptySlot(presets.activePresetName)
       ? presets.activePresetName
       : null;
+  const activeRowVisible = visibleSlots.some((slot) => !isEmptySlot(slot.name) && slot.name === activeName);
 
   function toggleFilter(value: string) {
     setSlotFilter((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
@@ -2702,10 +2747,9 @@ function PresetConfigurationTab({
           </div>
         </div>
 
-        {/* The active preset gets its own line rather than a clause in a
-            run-on status string. Worth stating even though the list marks the
-            active row, since that row can be filtered out of view. */}
-        {slots.length > 0 && (
+        {/* The list's own row says which preset is active, so this line only
+            appears when that row can't: filtered out, or nothing reported. */}
+        {slots.length > 0 && !activeRowVisible && (
           <div className={`flex min-w-0 items-center gap-1.5 ${PRESET_MUTED}`}>
             {activeName ? (
               <>
@@ -2776,10 +2820,12 @@ function RailTabIcon({ label, Icon }: { label: string; Icon: ComponentType<{ siz
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
       >
-        <Icon size={18} />
+        <Icon size={24} />
       </span>
-      <Tooltip>
-        <Tooltip.Content isOpen={open} triggerRef={ref} placement="right" showArrow>
+      {/* `isOpen` belongs on the root: positioning reads the root's state, so
+          on `Tooltip.Content` it shows the tooltip unpositioned, top-left. */}
+      <Tooltip isOpen={open}>
+        <Tooltip.Content triggerRef={ref} placement="right" showArrow>
           {label}
         </Tooltip.Content>
       </Tooltip>
@@ -2818,12 +2864,19 @@ export function AmpConfigureView({
   const liveChannelCount = live
     ? live.device.outputChannels || DEFAULT_CHANNEL_COUNT
     : DEFAULT_CHANNEL_COUNT;
+  // Load is local, so it never comes from the reading once it has been set: a
+  // project amp shows its project's, any other live amp this machine's.
+  const liveLoadOhms = usePreference("liveLoadOhms");
   const assignment: AmpAssignment | undefined = live
     ? buildLiveAssignmentViewModel(
         live.device,
         live.channelConfig,
         liveChannelCount,
         liveBridge,
+        (channelIndex) =>
+          source?.kind === "project"
+            ? source.assignment.channels.find((c) => c.channelIndex === channelIndex)?.ohms ?? undefined
+            : liveLoadOhms[live.device.mac]?.[channelIndex],
       )
     : source?.kind === "project"
       ? source.assignment
@@ -2891,8 +2944,18 @@ export function AmpConfigureView({
     if (result.status === "ok") projectSource.onProjectUpdate(result.data);
   }
 
-  const actions: ConfigureActions | undefined = live
-    ? createLiveConfigureActions(live.device.id)
+  const baseActions: ConfigureActions | undefined = live
+    ? {
+        ...createLiveConfigureActions(live.device.id, live.device.mac),
+        // A followed project amp writes the amp, but its Load is the project's.
+        ...(source?.kind === "project" && {
+          setChannelOhms: createProjectConfigureActions(
+            source.project.id,
+            source.assignment.id,
+            source.onProjectUpdate,
+          ).setChannelOhms,
+        }),
+      }
     : source?.kind === "project"
       ? locked
         ? lockConfigureActions(LOCKED_MESSAGE)
@@ -2902,6 +2965,16 @@ export function AmpConfigureView({
             source.onProjectUpdate,
           )
       : undefined;
+  // Links follow the amp where there is one: the MAC outlasts a project, and
+  // the assignment's stays known while the amp is offline.
+  const linkKey = (
+    live?.device.mac ??
+    (source?.kind === "project" ? (source.assignment.mac ?? source.assignment.id) : undefined)
+  )?.toLowerCase();
+  const channelLinks = usePreference("channelLinks");
+  const linkConfig = (linkKey && channelLinks[linkKey]) || NO_LINKS;
+  const actions =
+    baseActions && linkConfigureActions(baseActions, linkConfig, assignment?.channels.length ?? 0);
 
   const [mismatchOpen, setMismatchOpen] = useState(false);
   // Opens the comparison straight onto the differing rows instead of its
@@ -3163,8 +3236,8 @@ export function AmpConfigureView({
           The extra rail controls (fingerprint/rotary-lock/standby) are real
           `size="lg"` icon-only HeroUI Buttons (44px), rendered below
           `Tabs.List` rather than inside it — a RAC collection component that
-          only accepts Tab children. The whole column is pinned to that same
-          44px so every icon (tab or button) lines up on one centerline,
+          only accepts Tab children. The whole column is pinned to one width
+          so every icon (tab or button) lines up on one centerline,
           rather than each box shrink-wrapping to its own content and
           getting centered independently — that's what "centering" silently
           stopped meaning once the tabs' own width shrank to their icon.
@@ -3172,15 +3245,10 @@ export function AmpConfigureView({
           regardless of how much header content sits above it; a short window
           that can't fit the whole column still scrolls instead of clipping,
           since a flex `center` that overflows falls back to `start`. */}
-      <div className="flex w-11 shrink-0 flex-col items-center justify-center gap-1 overflow-y-auto">
+      <div className="flex w-14 shrink-0 flex-col items-center justify-center gap-1 overflow-y-auto">
         <Tabs.List className="w-full">
-          {/* Labels ride on the native `title` rather than a HeroUI `Tooltip`:
-              `Tabs.List` is a RAC collection, so anything between it and its
-              `Tab` children — a `Tooltip.Trigger` wrapper included — leaves the
-              collection empty and the rail renders no tabs at all. Nesting the
-              trigger *inside* the tab is no better: it is a focusable
-              `role="button"` div, which would sit inside the tab's own button
-              and swallow its keyboard handling.
+          {/* Labels are on `RailTabIcon`: `Tabs.List` is a RAC collection, so a
+              `Tooltip.Trigger` wrapper here would leave it empty.
               `w-full` matches `.tabs__tab`'s own default, so the tab already
               fills the rail; `min-w-0!` forcibly drops its `min-w-20` floor
               (sized for a labelled tab, not an icon-only one) — `min-width`
@@ -3188,7 +3256,7 @@ export function AmpConfigureView({
               plain (non-`!`) utility isn't reliably guaranteed to beat that
               default's own `@layer components` rule. */}
           {visibleTabs.map(({ value, label, icon: Icon }) => (
-            <Tabs.Tab key={value} id={value} aria-label={label} className="w-full min-w-0! px-0!">
+            <Tabs.Tab key={value} id={value} aria-label={label} className="h-12! w-full min-w-0! px-0!">
               <RailTabIcon label={label} Icon={Icon} />
             </Tabs.Tab>
           ))}
@@ -3218,6 +3286,8 @@ export function AmpConfigureView({
               firmwareFamily={firmwareFamily}
             />
           );
+        } else if (value === "linking" && assignment && linkKey) {
+          content = <LinkingTab linkKey={linkKey} channelCount={assignment.channels.length} />;
         } else if (value === "speakers" && projectSource) {
           // Refs and statuses come from the project amp even while following
           // the linked amp (the view's `assignment` is then built from the
@@ -3258,6 +3328,7 @@ export function AmpConfigureView({
               telemetry={telemetry}
               ampGains={ampGains}
               actions={actions}
+              linkConfig={linkConfig}
               deviceId={liveAmpDeviceId}
               speakerStates={speakerStates}
               onOpenSpeakers={() => handleTabChange("speakers")}

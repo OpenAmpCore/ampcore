@@ -1,0 +1,39 @@
+# Copy to .github/workflows/forward.yml in OpenAmpCore/ampcore-reports-inbox.
+# Moves each report the app drops there into the private ampcore-reports repo,
+# so the token inside the app has nothing to read. REPORTS_TOKEN: Issues
+# read/write on both repos, plus whatever deleting an inbox issue requires.
+name: Forward bug report
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Forward and delete
+        env:
+          GH_TOKEN: ${{ secrets.REPORTS_TOKEN }}
+          # Untrusted input: only ever read through these variables, never
+          # interpolated into the script.
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          NUMBER: ${{ github.event.issue.number }}
+          INBOX: ${{ github.repository }}
+          REPORTS: OpenAmpCore/ampcore-reports
+          HOURLY_CAP: 20
+        run: |
+          set -euo pipefail
+          # The app caps a description at 8000; its footer needs the extra room.
+          # The hourly count is approximate when reports arrive at the same time.
+          since=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+          recent=$(gh issue list -R "$REPORTS" --state all --search "created:>=$since" --limit 100 --json number --jq length)
+          if [ "${#TITLE}" -le 200 ] && [ "${#BODY}" -le 8200 ] && [ "$recent" -lt "$HOURLY_CAP" ]; then
+            gh issue create -R "$REPORTS" --title "$TITLE" --body "$BODY"
+          else
+            echo "Dropped report: over a size limit or the hourly cap"
+          fi
+          gh issue delete "$NUMBER" -R "$INBOX" --yes

@@ -17,15 +17,17 @@
 //! whether the two fingerprints match — the only definition of "done" this
 //! feature has (see `edit_lock.rs`).
 //!
-//! **Three fields are read-only by decision, not by protocol**: `ohms`,
-//! `limiter.rms.max_vrms` and `limiter.peak.max_vp`. The vendor can write the
-//! first (FC=72) and carries the other two in its 13-byte FC=54/55 records,
-//! but all three describe what the hardware *is* — its load and its rated
-//! output voltage — rather than what anyone plans for it. They are hashed, so
-//! a push that left them differing could never converge; instead
+//! **Two fields are read-only by decision, not by protocol**:
+//! `limiter.rms.max_vrms` and `limiter.peak.max_vp`. The vendor carries them
+//! in its 13-byte FC=54/55 records, but they describe what the hardware *is*
+//! — its rated output voltage — rather than what anyone plans for it. They
+//! are hashed, so a push that left them differing could never converge; instead
 //! `adopt_device_facts` copies them the other way as part of the same
 //! transaction, and `PushPlan.adopted` lists them so the swap is visible
 //! rather than silent.
+//!
+//! `ohms` takes no part in any of this: it is a local value that only converts
+//! volts to watts in the limiter editor, so it is neither written nor adopted.
 
 use serde::Serialize;
 use specta::Type;
@@ -33,7 +35,7 @@ use specta::Type;
 use super::capability::{PowerMode, SourceKind};
 use super::fingerprint::{
     canonical_input_name, canonical_output_name, output_letter, round_to_step, FingerprintRow, DELAY_STEPS, FREQ_STEPS,
-    GAIN_STEPS, OHM_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
+    GAIN_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
 use super::project::{AmpAssignment, AmpChannel, ChannelEq, CrossoverSlot, EqBand, EqDirection, SourceTrim};
 use crate::live::cvr::fir::ChannelFirSnapshot;
@@ -671,7 +673,7 @@ fn row(group: &str, label: &str, project: String, live: String) -> FingerprintRo
 }
 
 /// The hashed fields a push doesn't write, wherever the two sides disagree —
-/// `ohms`, `max_vrms`, `max_vp`. Rendered under the plan so adopting the amp's
+/// `max_vrms`, `max_vp`. Rendered under the plan so adopting the amp's
 /// value is a visible consequence of pushing, not a silent edit.
 pub fn adopted_rows(assignment: &AmpAssignment, snapshot: &ChannelConfigSnapshot) -> Vec<FingerprintRow> {
     let mut rows = Vec::new();
@@ -680,14 +682,6 @@ pub fn adopted_rows(assignment: &AmpAssignment, snapshot: &ChannelConfigSnapshot
         let Some(config) = snapshot.channels.iter().find(|c| c.channel_index == index) else { continue };
         let group = format!("Out {}", output_letter(index));
 
-        if differs(channel.ohms, config.load_ohms as f64, OHM_STEPS) {
-            rows.push(row(
-                &group,
-                "Load",
-                format!("{:.1} Ω", round_to_step(channel.ohms, OHM_STEPS)),
-                format!("{:.1} Ω", round_to_step(config.load_ohms as f64, OHM_STEPS)),
-            ));
-        }
         // Max voltages are only hashed while their stage is enabled, so they
         // can only force a mismatch there.
         let (rms, live_rms) = (&channel.limiter.rms, &config.limiter.rms);
@@ -712,7 +706,7 @@ pub fn adopted_rows(assignment: &AmpAssignment, snapshot: &ChannelConfigSnapshot
     rows
 }
 
-/// Copies the three read-only device facts into `assignment`, at exactly the
+/// Copies the two read-only device facts into `assignment`, at exactly the
 /// steps the hash sees (the same rule `amp_merge.rs` follows). Called as part
 /// of saving a push, so the project ends up describing the amp it is linked to
 /// rather than an impossible one.
@@ -721,7 +715,6 @@ pub fn adopt_device_facts(assignment: &mut AmpAssignment, snapshot: &ChannelConf
         let Some(config) = snapshot.channels.iter().find(|c| c.channel_index == channel.channel_index) else {
             continue;
         };
-        channel.ohms = round_to_step(config.load_ohms as f64, OHM_STEPS);
         channel.limiter.rms.max_vrms = round_to_step(config.limiter.rms.max_vrms, VOLT_STEPS);
         channel.limiter.peak.max_vp = round_to_step(config.limiter.peak.max_vp, VOLT_STEPS);
     }
@@ -1043,7 +1036,7 @@ mod tests {
 
     /// The inverse of `amp_merge`'s `merge_makes_hashes_equal`, and the test
     /// that actually proves the feature: plan a push from a default project
-    /// amp onto a fully tuned amp, obey every write, adopt the three
+    /// amp onto a fully tuned amp, obey every write, adopt the two
     /// device-determined fields, and the two fingerprints must agree.
     #[test]
     fn push_makes_hashes_equal() {
@@ -1180,7 +1173,7 @@ mod tests {
         );
     }
 
-    /// The three fields a push doesn't write are reported rather than sent.
+    /// The two fields a push doesn't write are adopted; a local load is left alone.
     #[test]
     fn device_facts_are_adopted_not_pushed() {
         let mut assignment = assignment();
@@ -1189,10 +1182,10 @@ mod tests {
         assert_ne!(assignment.channels[0].ohms, snapshot.channels[0].load_ohms as f64);
 
         let plan = plan_push(&assignment, &snapshot, DEVICE_NAME, &bridged(), 4).expect("plan");
-        assert!(plan.adopted.iter().any(|row| row.group == "Out A" && row.label == "Load" && row.differs));
+        assert!(plan.adopted.iter().all(|row| row.label != "Load"));
 
         adopt_device_facts(&mut assignment, &snapshot);
-        assert_eq!(assignment.channels[0].ohms, 4.0);
+        assert_eq!(assignment.channels[0].ohms, 16.0);
         assert_eq!(assignment.channels[0].limiter.rms.max_vrms, 127.35);
         assert_eq!(assignment.channels[0].limiter.peak.max_vp, 179.89);
     }

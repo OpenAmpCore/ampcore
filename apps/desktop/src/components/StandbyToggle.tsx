@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Spinner, Tooltip } from "@heroui/react";
 import { toast } from "@heroui/react";
-import { Power, PowerOff } from "lucide-react";
+import { PowerOnIcon, StandbyIcon } from "./HardwareIcons";
 import { commands } from "../lib/bindings";
 
 /** Amp standby (FC=15), the amp-level sibling of `RotaryLockToggle`: green
@@ -68,7 +68,7 @@ export function StandbyToggle({
           isDisabled={!canToggle}
           onPress={toggle}
         >
-          {pending ? <Spinner size="sm" /> : standby ? <PowerOff size={18} /> : <Power size={18} />}
+          {pending ? <Spinner size="sm" /> : standby ? <StandbyIcon /> : <PowerOnIcon />}
         </Button>
       </Tooltip.Trigger>
       <Tooltip.Content placement="right" showArrow>

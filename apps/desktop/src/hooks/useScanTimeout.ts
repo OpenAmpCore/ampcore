@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { commands } from "../lib/bindings";
+import { startLiveDriver } from "./useLiveDriver";
 
 /** How long a discovery empty state keeps saying it is scanning before it
  * says nothing answered. Discovery broadcasts once a second
@@ -23,8 +23,8 @@ export const SCAN_TIMEOUT_MS = 30_000;
  * failed at startup (port 45454 held by another program) it is what brings
  * discovery back. Stopping first would add nothing and can lose the port:
  * the old driver only releases it once it finishes its current `select!`
- * arm, and a new driver that binds before then fails with `AddrInUse` —
- * silently, leaving discovery and liveness both off.
+ * arm, and a new driver that binds before then fails with `AddrInUse`,
+ * leaving discovery and liveness both off.
  *
  * The window restarts whenever `searching` goes false and back to true, so a
  * dialog that stays mounted while closed gets a fresh scan each time it
@@ -46,7 +46,7 @@ export function useScanTimeout(searching: boolean) {
   }, [searching, attempt]);
 
   const scanAgain = useCallback(() => {
-    void commands.liveControlStart();
+    void startLiveDriver();
     setTimedOut(false);
     setAttempt((a) => a + 1);
   }, []);

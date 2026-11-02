@@ -124,9 +124,10 @@ export function buildCabinets(
   return cabinets.sort((a, b) => first(a) - first(b));
 }
 
-/** A ⋯ button with its menu — the standalone-overlay pattern of the preset
- * rows (`triggerRef` + `isOpen`), since `Dropdown.Menu` is a RAC collection
- * and its items must be direct children. */
+/** A ⋯ button with its menu, or the action itself as a labelled button when
+ * there is only one: a menu with a single option is one click too many. The
+ * standalone-overlay pattern (`triggerRef` + `isOpen`), since `Dropdown.Menu`
+ * is a RAC collection and its items must be direct children. */
 export function RowMenu({ label, items, disabled, onAction }: {
   label: string;
   items: Array<{ id: string; label: string; danger?: boolean }>;
@@ -136,6 +137,14 @@ export function RowMenu({ label, items, disabled, onAction }: {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   if (items.length === 0) return null;
+  if (items.length === 1) {
+    const [item] = items;
+    return (
+      <Button size="sm" variant={item.danger ? "danger-soft" : "ghost"} className="shrink-0" isDisabled={disabled} onPress={() => onAction(item.id)}>
+        {item.label}
+      </Button>
+    );
+  }
   return (
     <>
       <div ref={ref} className="flex shrink-0">

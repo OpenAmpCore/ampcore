@@ -17,8 +17,8 @@
 //!   (`SpeakerWay.fc57_hex`), so nothing is lost for a later pass;
 //! - limiter `auto`/`max_*`: the maxima describe the amp, not the speaker
 //!   (the same rule as `channel_clipboard.rs`);
-//! - load (`ohms`): a fact the push adopts *from* the amp (`amp_push.rs`),
-//!   so a preset's would never survive an apply;
+//! - load (`ohms`): a local value on the output, for the limiter editor's
+//!   watts; it says what is connected here, not what the preset is;
 //! - output volume and mute: how loud the system runs tonight, never part of
 //!   a speaker on any make or model — not stored, applied or compared;
 //! - output name and bridging: wiring, not speaker.

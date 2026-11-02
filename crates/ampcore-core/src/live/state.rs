@@ -93,10 +93,16 @@ pub struct LiveDeviceInner {
     /// running. `Some` while `cvr::driver::start`'s spawned task is alive.
     pub request_tx: Option<mpsc::UnboundedSender<RequestSpec>>,
     /// Write counterpart to `request_tx` — routes control packets through the
-    /// driver's single long-lived socket (bound to `PC_LISTEN_PORT`) so the
+    /// driver's long-lived sockets (bound to `PC_LISTEN_PORT`) so the
     /// device's ACK echo comes back to a socket that still exists and can be
     /// correlated. `None` whenever no driver is running.
     pub write_tx: Option<mpsc::UnboundedSender<WriteSpec>>,
+    /// The one network adapter to use, by name; `None` is all of them. The
+    /// driver follows it within a discovery cycle.
+    pub adapter: Option<String>,
+    /// Why the driver couldn't open a socket on its last attempt. It retries
+    /// every discovery cycle, which clears this.
+    pub socket_error: Option<String>,
 }
 
 impl LiveDeviceInner {
@@ -132,6 +138,8 @@ impl LiveDeviceState {
             polls_held: 0,
             request_tx: None,
             write_tx: None,
+            adapter: None,
+            socket_error: None,
         })))
     }
 
@@ -139,21 +147,20 @@ impl LiveDeviceState {
         self.0.lock().map_err(|e| AppError::from(e.to_string()))
     }
 
-    /// Starts the driver; a no-op when it is already running. `sink` must wrap
-    /// this same state.
+    /// Starts the driver if it isn't running, and reports a socket it couldn't
+    /// open. The driver runs regardless and keeps retrying. `sink` must wrap this
+    /// same state.
     pub fn start(&self, sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> Result<(), AppError> {
-        // A driver whose task has ended (its socket couldn't be bound — another
-        // AmpCore holds the port) dropped its stop receiver; that one is dead
-        // and is replaced, or discovery would stay off for the whole session.
-        if self.lock()?.driver.as_ref().is_some_and(|d| !d.stop_tx.is_closed()) {
-            return Ok(());
+        // A driver whose task has ended dropped its stop receiver; that one is
+        // dead and is replaced, or discovery would stay off for the whole session.
+        if !self.lock()?.driver.as_ref().is_some_and(|d| !d.stop_tx.is_closed()) {
+            // Lock released before `start()`: the driver locks this same mutex
+            // itself (to store `request_tx`/`write_tx`), and `std::sync::Mutex`
+            // isn't reentrant — holding it across the call deadlocks.
+            let handle = super::cvr::driver::start(sink, runtime);
+            self.lock()?.driver = Some(handle);
         }
-        // Lock released before `start()`: the driver locks this same mutex
-        // itself (to store `request_tx`/`write_tx`), and `std::sync::Mutex`
-        // isn't reentrant — holding it across the call deadlocks.
-        let handle = super::cvr::driver::start(sink, runtime);
-        self.lock()?.driver = Some(handle);
-        Ok(())
+        self.lock()?.socket_error.clone().map_or(Ok(()), |message| Err(AppError::from(message)))
     }
 
     pub fn stop(&self) -> Result<(), AppError> {
@@ -161,6 +168,7 @@ impl LiveDeviceState {
             let mut inner = self.lock()?;
             inner.request_tx = None;
             inner.write_tx = None;
+            inner.socket_error = None;
             inner.driver.take()
         };
         if let Some(h) = handle {

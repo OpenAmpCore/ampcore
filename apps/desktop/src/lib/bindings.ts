@@ -276,6 +276,9 @@ export const commands = {
 	/**  Soft-delete — see `AmpModelCatalogEntry.archived` for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
+	liveControlListAdapters: () => __TAURI_INVOKE<NetworkAdapter[]>("live_control_list_adapters"),
+	/**  `None` uses every adapter. The driver follows within a discovery cycle. */
+	liveControlSetAdapter: (name: string | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_adapter", { name })),
 	/**
 	 *  Declares which devices one live consumer needs the heavy polls (heartbeat,
 	 *  FC=27, FC=50) for. Devices no consumer has asked for get discovery alone.
@@ -688,8 +691,8 @@ export const commands = {
 	 *  and pushing again re-plans against the amp's new state, so a retry picks up
 	 *  where this left off instead of redoing the work that landed.
 	 * 
-	 *  Three hashed fields travel the other way instead of being written (load and
-	 *  the two rated max voltages) — see `data/amp_push.rs`.
+	 *  Two hashed fields travel the other way instead of being written (the
+	 *  rated max voltages) — see `data/amp_push.rs`.
 	 */
 	projectsPushAmpToLive: (projectId: string, assignmentId: string) => typedError<AmpPushResult, AppError>(__TAURI_INVOKE("projects_push_amp_to_live", { projectId, assignmentId })),
 	/**
@@ -721,6 +724,7 @@ export const commands = {
 	 *  already running changes nothing, so the frontend can call this freely.
 	 */
 	webServerSet: (enabled: boolean, port: number) => typedError<string[], AppError>(__TAURI_INVOKE("web_server_set", { enabled, port })),
+	bugReportSend: (title: string, description: string) => typedError<BugReportOutcome, AppError>(__TAURI_INVOKE("bug_report_send", { title, description })),
 };
 
 /* Types */
@@ -1226,7 +1230,7 @@ export type AmpPushResult = {
 	 */
 	pushed: boolean,
 	/**
-	 *  The saved project. Always `Some` on a result: the three device facts
+	 *  The saved project. Always `Some` on a result: the two device facts
 	 *  are re-read and saved even when no write was needed, so the caller can
 	 *  use it unconditionally. `Option` only so the shape matches
 	 *  `AmpMergeResult`, whose pull can legitimately save nothing.
@@ -1301,6 +1305,10 @@ export type BackupPriorityPatch = {
 	second: number | null,
 	thresholdDb: number | null,
 };
+
+export type BugReportOutcome = "Sent" | 
+/**  Couldn't go out now; the background retry delivers it. */
+"Saved";
 
 export type CanvasPosition = {
 	x: number | null,
@@ -1956,6 +1964,15 @@ export type MatrixCrosspoint = {
 	active: boolean,
 };
 
+/**
+ *  One IPv4 network adapter of this machine. Self-assigned (169.254.x.x)
+ *  addresses count: an amp cabled straight to the computer lives on one.
+ */
+export type NetworkAdapter = {
+	name: string,
+	ip: string,
+};
+
 export type OutputFit = {
 	channelIndex: number,
 	/**  What applying changes from the way as stored; empty when it fits as is. */
@@ -2178,7 +2195,6 @@ export type SpeakerCanonical = {
 	phaseInverted: boolean,
 	/**  `None` only for a live channel whose power-mode byte is unmapped. */
 	powerMode: PowerMode | null,
-	loadOhms: number | null,
 	firBypassed: boolean,
 };
 
@@ -2292,12 +2308,12 @@ export type Telemetry = {
 	temperatures: (number | null)[],
 	outputVoltages: (number | null)[],
 	outputCurrents: (number | null)[],
-	outputImpedance: (number | null)[],
 	/**
-	 *  V × A per output — apparent power (VA). The heartbeat carries no
-	 *  phase, so a reactive speaker load takes somewhat less real power.
+	 *  True where an output has voltage but reports exactly 0 A. The firmware
+	 *  subtracts an offset from measured current and clamps anything under
+	 *  0.1 A to 0, so this means "too low to measure", not "no current".
 	 */
-	outputPowerVa: (number | null)[],
+	outputCurrentBelowRange: boolean[],
 	/**
 	 *  dB relative to the device's rated RMS output voltage (`0dB` = rated
 	 *  max output) — `None` per-channel until `driver.rs` fills it in, since

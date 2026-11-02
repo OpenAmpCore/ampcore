@@ -373,30 +373,98 @@ pub fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
         .unwrap_or_default()
 }
 
-/// Directed broadcast address for every active, non-loopback IPv4 interface,
-/// falling back to 255.255.255.255 if none are found.
-pub fn directed_broadcast_addresses() -> Vec<Ipv4Addr> {
+/// One IPv4 network adapter of this machine. Self-assigned (169.254.x.x)
+/// addresses count: an amp cabled straight to the computer lives on one.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkAdapter {
+    pub name: String,
+    pub ip: String,
+}
+
+/// Every non-loopback IPv4 adapter with its address and directed broadcast
+/// address.
+pub fn network_adapters() -> Vec<(NetworkAdapter, Ipv4Addr, Ipv4Addr)> {
+    adapter_addresses()
+        .into_iter()
+        .filter(|(_, ip, _)| !ip.is_loopback())
+        .map(|(name, ip, netmask)| {
+            let broadcast = Ipv4Addr::from(u32::from(ip) | !u32::from(netmask));
+            (NetworkAdapter { name, ip: ip.to_string() }, ip, broadcast)
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn adapter_addresses() -> Vec<(String, Ipv4Addr, Ipv4Addr)> {
+    if_addrs::get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter_map(|iface| match iface.addr {
+                    if_addrs::IfAddr::V4(v4) => Some((iface.name, v4.ip, v4.netmask)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read from the table `Get-NetIPAddress` shows, not through `if_addrs`: on a
+/// real machine that left out a USB Ethernet adapter whose self-assigned address
+/// this table reports as Preferred, the amps' network when there is no router.
+#[cfg(windows)]
+fn adapter_addresses() -> Vec<(String, Ipv4Addr, Ipv4Addr)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceLuidToAlias, FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_TABLE,
+    };
+    use windows_sys::Win32::Networking::WinSock::{IpDadStatePreferred, AF_INET};
+
     let mut out = Vec::new();
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for iface in ifaces {
-            if iface.is_loopback() {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+    // SAFETY: on success `table` points at a block of `NumEntries` rows, which
+    // is only read before `FreeMibTable` releases it. With AF_INET every row
+    // holds an IPv4 address, and the alias buffer's length is passed along.
+    unsafe {
+        if GetUnicastIpAddressTable(AF_INET, &mut table) != 0 {
+            return out;
+        }
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        for row in rows.iter().filter(|row| row.DadState == IpDadStatePreferred) {
+            let mut alias = [0u16; 257];
+            if ConvertInterfaceLuidToAlias(&row.InterfaceLuid, alias.as_mut_ptr(), alias.len()) != 0 {
                 continue;
             }
-            if let if_addrs::IfAddr::V4(v4) = iface.addr {
-                let ip = v4.ip.octets();
-                let mask = v4.netmask.octets();
-                let bcast = [
-                    ip[0] | !mask[0],
-                    ip[1] | !mask[1],
-                    ip[2] | !mask[2],
-                    ip[3] | !mask[3],
-                ];
-                out.push(Ipv4Addr::from(bcast));
-            }
+            let len = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
+            let ip = Ipv4Addr::from(u32::from_be(row.Address.Ipv4.sin_addr.S_un.S_addr));
+            out.push((String::from_utf16_lossy(&alias[..len]), ip, prefix_netmask(row.OnLinkPrefixLength)));
         }
-    }
-    if out.is_empty() {
-        out.push(Ipv4Addr::new(255, 255, 255, 255));
+        FreeMibTable(table as *const _);
     }
     out
+}
+
+#[cfg(windows)]
+fn prefix_netmask(prefix: u8) -> Ipv4Addr {
+    Ipv4Addr::from(u32::MAX.checked_shl(32 - u32::from(prefix.min(32))).unwrap_or(0))
+}
+
+#[cfg(all(test, windows))]
+mod adapter_tests {
+    use super::*;
+
+    #[test]
+    fn netmask_comes_from_the_prefix_length() {
+        assert_eq!(prefix_netmask(16), Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(prefix_netmask(24), Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(prefix_netmask(0), Ipv4Addr::new(0, 0, 0, 0));
+        assert_eq!(prefix_netmask(32), Ipv4Addr::new(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn lists_addresses_without_loopback() {
+        let adapters = network_adapters();
+        eprintln!("{adapters:?}");
+        assert!(adapters.iter().all(|(_, ip, _)| !ip.is_loopback()));
+    }
 }

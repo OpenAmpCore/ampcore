@@ -9,8 +9,9 @@
 //! `commands/amp_links.rs::projects_merge_amp_from_live`.
 //!
 //! Deliberately not copied: `backup_priority` (read from an unverified offset
-//! and not hashed — see the `fingerprint.rs` module doc), which keeps the
-//! project's value. `noise_gate_threshold_dbu` is copied only where the amp
+//! and not hashed — see the `fingerprint.rs` module doc) and `ohms` (a local
+//! value, not hashed), which keep the project's value.
+//! `noise_gate_threshold_dbu` is copied only where the amp
 //! reports one (1.1.9+); on 1.1.8 the project keeps its own.
 
 use serde::Serialize;
@@ -19,7 +20,7 @@ use specta::Type;
 use super::edit_lock::LiveAmpReading;
 use super::fingerprint::{
     canonical_input_name, canonical_output_name, round_to_step, split_hash_suffix, FingerprintRow, DELAY_STEPS,
-    FREQ_STEPS, GAIN_STEPS, OHM_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
+    FREQ_STEPS, GAIN_STEPS, Q_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
 use super::project::{
     AmpAssignment, AmpChannel, ChannelEq, ChannelFir, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, Project,
@@ -133,7 +134,6 @@ fn mirror_channel(channel: &mut AmpChannel, config: &ChannelConfig, matrix_input
     }
     channel.limiter = mirror_limiter(&config.limiter);
     channel.fir_bypassed = config.fir_bypassed;
-    channel.ohms = round_to_step(config.load_ohms as f64, OHM_STEPS);
     channel.source_trims = SourceTrims {
         analog: mirror_trim(config.analog_trim_db, config.analog_delay_ms),
         dante: mirror_trim(config.dante_trim_db, config.dante_delay_ms),
@@ -242,6 +242,20 @@ mod tests {
         assert!(candidate.channels[0].fir.same_taps(&[0.5, 0.25]));
     }
 
+    /// Load is local: a pull keeps it, and it can't make the amp differ.
+    #[test]
+    fn load_is_kept_and_not_hashed() {
+        let (models, links, reading) = (models(), links(), reading());
+        let project = Project::new("Test".to_string(), String::new());
+        let mut assignment = assignment();
+        assignment.channels[0].ohms = 16.0;
+        let candidate = mirror_live_into_assignment(&assignment, &reading, 4);
+        assert_eq!(candidate.channels[0].ohms, 16.0);
+        let live =
+            fingerprint_live_device(&reading.device, reading.snapshot.as_ref().unwrap(), reading.bridge.as_ref(), &reading.fir, &models, &links);
+        assert_eq!(fingerprint_project_amp(&project, &candidate, &models).amp_hash, live.amp_hash);
+    }
+
     #[test]
     fn merge_leaves_unhashed_fields_alone() {
         let mut assignment = assignment();
@@ -282,7 +296,6 @@ mod tests {
         assert_eq!(channel.delay_out_ms, 7.87);
         assert_eq!(channel.input_eq.bands[0].q, 0.7);
         assert_eq!(channel.matrix_crosspoints[0].gain_db, -3.1);
-        assert_eq!(channel.ohms, 4.0);
     }
 
     #[test]

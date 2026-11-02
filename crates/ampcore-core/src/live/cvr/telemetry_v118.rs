@@ -133,14 +133,8 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         _ => return None,
     };
 
-    let output_impedance = fields
-        .output_voltages
-        .iter()
-        .zip(fields.output_currents.iter())
-        .map(|(&v, &a)| if a > 0.0 { (v / a).round() } else { 0.0 })
-        .collect();
-
-    let output_power_va = fields.output_voltages.iter().zip(fields.output_currents.iter()).map(|(&v, &a)| v * a).collect();
+    let output_current_below_range =
+        fields.output_voltages.iter().zip(fields.output_currents.iter()).map(|(&v, &a)| v > 0.0 && a == 0.0).collect();
 
     // Reference is an explicit, honest 1.0V — NOT a calibrated ADC full-scale
     // value (this device's real full-scale voltage isn't known here), so this
@@ -173,8 +167,7 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         temperatures: fields.temperatures,
         output_voltages: fields.output_voltages,
         output_currents: fields.output_currents,
-        output_impedance,
-        output_power_va,
+        output_current_below_range,
         output_level_db,
         rated_rms_voltage: None,
         output_states: fields.output_states,
@@ -226,6 +219,18 @@ mod tests {
         assert!(parsed.limiters.is_empty());
         let parsed = parse_heartbeat_telemetry(&framed(&[0u8; WHOLE118])).unwrap();
         assert_eq!(parsed.limiters.len(), 4);
+    }
+
+    /// Voltage with exactly 0 A is the firmware's clamp, not a silent output.
+    #[test]
+    fn zero_current_with_voltage_is_below_range() {
+        let mut body = [0u8; WHOLE118];
+        // Legacy layout: volts at 20, amps at 36. Output A: 10 V, 0 A; B: 0 V, 0 A; C: 10 V, 2 A.
+        body[20..24].copy_from_slice(&10f32.to_le_bytes());
+        body[28..32].copy_from_slice(&10f32.to_le_bytes());
+        body[44..48].copy_from_slice(&2f32.to_le_bytes());
+        let parsed = parse_heartbeat_telemetry(&framed(&body)).unwrap();
+        assert_eq!(parsed.output_current_below_range, vec![true, false, false, false]);
     }
 
     #[test]

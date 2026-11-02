@@ -20,10 +20,10 @@ pub struct Telemetry {
     pub temperatures: Vec<f32>,
     pub output_voltages: Vec<f32>,
     pub output_currents: Vec<f32>,
-    pub output_impedance: Vec<f32>,
-    /// V × A per output — apparent power (VA). The heartbeat carries no
-    /// phase, so a reactive speaker load takes somewhat less real power.
-    pub output_power_va: Vec<f32>,
+    /// True where an output has voltage but reports exactly 0 A. The firmware
+    /// subtracts an offset from measured current and clamps anything under
+    /// 0.1 A to 0, so this means "too low to measure", not "no current".
+    pub output_current_below_range: Vec<bool>,
     /// dB relative to the device's rated RMS output voltage (`0dB` = rated
     /// max output) — `None` per-channel until `driver.rs` fills it in, since
     /// the wire-format adapters (`telemetry_v118`) only see

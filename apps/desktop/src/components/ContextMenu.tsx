@@ -18,7 +18,7 @@ export const useContextMenu = () => useContext(ContextMenuContext);
 
 // Passed explicitly: the menu hangs off a bare anchor, not a `<Dropdown>` root,
 // and without that root HeroUI's overlay parts get no classes (see
-// `DROPDOWN_SLOTS` in `AmpConfigureView.tsx`).
+// `DROPDOWN_SLOTS` in `SpeakerBench.tsx`).
 const SLOTS = dropdownVariants();
 
 /** The app's single right-click menu. Mounted once around everything; a view

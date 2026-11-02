@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Spinner, Tooltip } from "@heroui/react";
 import { toast } from "@heroui/react";
-import { Lock, LockOpen } from "lucide-react";
+import { KnobLockedIcon, KnobUnlockedIcon } from "./HardwareIcons";
 import { commands } from "../lib/bindings";
 
 /** Front-panel knob lock (FC=17), same toggle as the reference web app: red
@@ -45,7 +45,7 @@ export function RotaryLockToggle({
           isDisabled={!known}
           onPress={toggle}
         >
-          {pending ? <Spinner size="sm" /> : rotaryLocked ? <Lock size={18} /> : <LockOpen size={18} />}
+          {pending ? <Spinner size="sm" /> : rotaryLocked ? <KnobLockedIcon /> : <KnobUnlockedIcon />}
         </Button>
       </Tooltip.Trigger>
       <Tooltip.Content placement="right" showArrow>

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import type { LinkConfig } from "./channelLinks";
 
 /** Local UI preferences — not app/project data, just browser-side toggles,
  * so `localStorage` is enough (no Rust-backed storage needed).
@@ -26,9 +27,19 @@ const DEFAULTS = {
    * on for the Output tab and unconditional on the Limiter tab. */
   peakHoldSurfaces: ["input", "output", "limiter"] as string[],
   limiterThresholdSurfaces: ["output", "limiter"] as string[],
+  /** Output meters read the amp's volts directly instead of dB re rated. */
+  outputMeterVolts: false,
   /** The built-in web server (`web_server.rs`): off until asked for. */
   webServerEnabled: false,
   webServerPort: 8642,
+  /** Adapter name the amps are reached through; empty means all of them. */
+  networkAdapter: "",
+  /** Load (Ω) per amp MAC and channel for amps edited outside a project; a
+   * project amp keeps its own in the project file. */
+  liveLoadOhms: {} as Record<string, Record<string, number>>,
+  /** Channel action links per amp (`channelLinks.ts`), by MAC, or by assignment
+   * id for a project amp with no device behind it. */
+  channelLinks: {} as Record<string, LinkConfig>,
 };
 
 type Preferences = typeof DEFAULTS;
@@ -59,7 +70,7 @@ function read<K extends PreferenceKey>(key: K): Preferences[K] {
     const parsed: unknown = JSON.parse(raw);
     const valid = Array.isArray(fallback)
       ? Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
-      : typeof parsed === typeof fallback;
+      : parsed !== null && typeof parsed === typeof fallback;
     if (valid) return parsed as Preferences[K];
   } catch {
     // Private mode / blocked site data / corrupt JSON — fall through.

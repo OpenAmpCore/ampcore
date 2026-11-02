@@ -17,9 +17,9 @@ export interface ChannelTelemetry {
   outputLevelDb: number | null;
   outputVoltage: number | null;
   outputCurrent: number | null;
-  /** V × A, from core — apparent power (VA), not real watts: the heartbeat
-   * carries no phase. */
-  outputPowerVa: number | null;
+  /** The output has voltage but its current is too low for the amp to
+   * measure, so `outputCurrent`'s 0 is not a real reading. */
+  outputCurrentBelowRange: boolean;
   temperatureC: number | null;
   /** Limiter gain reduction, as a non-positive dB value (the wire carries
    * the magnitude; the reference implementation negates it the same way).
@@ -45,7 +45,7 @@ const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
   outputLevelDb: null,
   outputVoltage: null,
   outputCurrent: null,
-  outputPowerVa: null,
+  outputCurrentBelowRange: false,
   temperatureC: null,
   gainReductionDb: null,
   outputState: null,
@@ -103,11 +103,14 @@ export function channelTelemetry(
       voltageToDb(outputVoltage, telemetry.ratedRmsVoltage ?? ratedRmsVoltage),
     outputVoltage,
     outputCurrent: at(telemetry.outputCurrents, channelIndex),
-    outputPowerVa: at(telemetry.outputPowerVa, channelIndex),
+    outputCurrentBelowRange: telemetry.outputCurrentBelowRange[channelIndex] ?? false,
     // `temperatures` is 5 long: [0-3] per-channel, [4] PSU — a channel index
     // past 3 has no reading of its own rather than borrowing the PSU's.
     temperatureC: channelIndex < 4 ? at(telemetry.temperatures, channelIndex) : null,
-    gainReductionDb: gr === null ? null : -Math.abs(gr),
+    // The firmware's reading looks like an after/before signal ratio, which
+    // means nothing at noise level, so at 0 V it isn't limiting. The raw value
+    // stays in `telemetry.limiters` for the debug panel.
+    gainReductionDb: gr === null ? null : outputVoltage === 0 ? 0 : -Math.abs(gr),
     outputState: stateAt(telemetry.outputChannelStates, channelIndex),
     outputStateRaw: at(telemetry.outputStates, channelIndex),
     inputClipping: telemetry.inputClipping[channelIndex] ?? null,
@@ -121,26 +124,80 @@ export function channelTelemetry(
  * not 2 — is the voltage-domain factor for a power-domain doubling. */
 const PEAK_TO_RMS_FACTOR = Math.SQRT2;
 
-/** A limiter threshold expressed on the same dB scale as `outputLevelDb`
- * (`0dB` = the model's rated RMS output), so a threshold can be drawn
- * directly against an output level meter.
+/** This channel's maximum RMS voltage: what the amp itself reports (the
+ * firmware clamps every threshold to it), else the assigned model's rating,
+ * else the generic range. Same order as core's `validation::limiter_ceiling`. */
+export function rmsCeilingVolts(
+  limiter: Limiter,
+  ratedRmsVoltage: number | null,
+  rangeMax: number | null | undefined,
+): number {
+  const reported = limiter.rms.maxVrms;
+  return (reported != null && Number.isFinite(reported) && reported > 0 ? reported : null) ??
+    ratedRmsVoltage ??
+    rangeMax ??
+    200;
+}
+
+/** The dB scale of every output level meter: Output row, Matrix, Overview,
+ * Limiter. Inputs keep their own, longer one. */
+export const OUTPUT_METER_FLOOR_DB = -40;
+export const OUTPUT_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map((value) => ({
+  value,
+  label: String(value),
+}));
+
+/** What an output level meter draws: dB re rated output, or, behind the
+ * "Show output meters in volts" setting, the amp's own volts on a linear
+ * `0..max` scale with no conversion at all. Thresholds go through `fromVolts`
+ * so they land on whichever scale the bar is using. */
+export interface OutputMeterScale {
+  min: number;
+  max: number;
+  marks: VuMeterMark[];
+  unit: "dB" | "V";
+  reading(telemetry: ChannelTelemetry | undefined): number | null;
+  fromVolts(volts: number | null): number | null;
+}
+
+export function outputMeterScale(
+  volts: boolean,
+  maxVolts: number,
+  ratedRmsVoltage: number | null,
+  floorDb: number,
+  dbMarks: VuMeterMark[],
+): OutputMeterScale {
+  if (volts) {
+    return {
+      min: 0,
+      max: maxVolts,
+      marks: [0, 0.25, 0.5, 0.75, 1].map((f) => ({ value: f * maxVolts, label: String(Math.round(f * maxVolts)) })),
+      unit: "V",
+      reading: (t) => t?.outputVoltage ?? null,
+      fromVolts: (v) => v,
+    };
+  }
+  return {
+    min: floorDb,
+    max: 0,
+    marks: dbMarks,
+    unit: "dB",
+    reading: (t) => t?.outputLevelDb ?? null,
+    fromVolts: (v) => voltageToDb(v, ratedRmsVoltage),
+  };
+}
+
+/** A limiter threshold in the volts the meter's bar reads, which are RMS.
  *
  * `"peak"` thresholds are divided by √2 first: `thresholdVp` is a *peak*
- * voltage, and putting it on an RMS-referenced scale unconverted reads
- * ~3dB hot. Note that conversion is exact only for a sine — against real
- * program material, whose crest factor is whatever it happens to be, this
- * is "the level of a sine that would just touch this threshold", which is
- * the right thing for a scale marker but not a claim about the audio.
- *
- * `null` when there's no reading or the model has no known rated voltage —
- * the same honest gap `outputLevelDb` has, and for the same reason. */
-function limiterThresholdToDb(
-  thresholdVolts: number | null,
-  kind: "rms" | "peak",
-  ratedRmsVoltage: number | null,
-): number | null {
+ * voltage, and putting it on an RMS scale unconverted reads ~3dB hot. Note
+ * that conversion is exact only for a sine — against real program material,
+ * whose crest factor is whatever it happens to be, this is "the level of a
+ * sine that would just touch this threshold", which is the right thing for a
+ * scale marker but not a claim about the audio. */
+function thresholdRmsVolts(thresholdVolts: number | null, kind: "rms" | "peak"): number | null {
   if (thresholdVolts === null) return null;
-  return voltageToDb(kind === "peak" ? thresholdVolts / PEAK_TO_RMS_FACTOR : thresholdVolts, ratedRmsVoltage);
+  return kind === "peak" ? thresholdVolts / PEAK_TO_RMS_FACTOR : thresholdVolts;
 }
 
 /** `AmpChannel.limiter` is typed optional in TS (specta marks any
@@ -167,7 +224,7 @@ const PEAK_THRESHOLD_COLOR = "rgb(255, 28, 28)";
 const THRESHOLD_ZONE_OPACITY = 0.5;
 /** Left/right halves of the track, used only while the two threshold lines
  * would otherwise occlude each other (see `buildLimiterThresholdVisuals`'s
- * `pixelsPerDb` parameter). */
+ * `pixelsPerUnit` parameter). */
 const RMS_MARK_SPAN = [0, 0.5] as const;
 const PEAK_MARK_SPAN = [0.5, 1] as const;
 /** Gap, in px, below which the two threshold lines are treated as
@@ -178,11 +235,9 @@ const DEFAULT_MARK_COLLISION_PX = 3;
 /** The RMS/peak limiter threshold lines and shaded bands for a level meter,
  * shared by the Limiter tab's own meter and the Output tab's (behind the
  * "Display limiter threshold lines in output tab" preference) so both read
- * identically. `meterFloor` is the caller's own scale floor — the two
- * callers use different floors (`-40` on the Limiter tab, `-60` on Output),
- * so it's a parameter rather than a constant here.
+ * identically. A stage that is switched off passes `null` and draws nothing.
  *
- * `pixelsPerDb`, when given, enables collision-avoidance: two thresholds
+ * `pixelsPerUnit` (px per dB or per volt), when given, enables collision-avoidance: two thresholds
  * closer than `collisionPx` (default `DEFAULT_MARK_COLLISION_PX`) apart on
  * screen split into side-by-side half-width lines instead of drawing on top
  * of each other — real stored data can put RMS and peak within a fraction of
@@ -192,23 +247,20 @@ const DEFAULT_MARK_COLLISION_PX = 3;
  * Omit it to skip the check (unsplit lines) when the caller has no fixed
  * pixel size to measure against. */
 export function buildLimiterThresholdVisuals(
-  rmsThresholdVrms: number,
-  peakThresholdVp: number,
-  ratedRmsVoltage: number | null,
-  meterFloor: number,
-  collision?: { pixelsPerDb: number; collisionPx?: number },
+  rmsThresholdVrms: number | null,
+  peakThresholdVp: number | null,
+  scale: OutputMeterScale,
+  collision?: { pixelsPerUnit: number; collisionPx?: number },
 ): { zones: VuMeterZone[]; marks: VuMeterMark[] } {
-  const rmsThresholdDb = limiterThresholdToDb(rmsThresholdVrms, "rms", ratedRmsVoltage);
-  const peakThresholdDb = limiterThresholdToDb(peakThresholdVp, "peak", ratedRmsVoltage);
+  const rmsThreshold = scale.fromVolts(thresholdRmsVolts(rmsThresholdVrms, "rms"));
+  const peakThreshold = scale.fromVolts(thresholdRmsVolts(peakThresholdVp, "peak"));
   // A threshold off the bottom of the scale is dropped rather than clamped —
   // a line pinned to the floor would read as a threshold *at* the floor.
-  const inScale = (db: number | null): db is number => db !== null && db >= meterFloor && db <= 0;
+  const inScale = (v: number | null): v is number => v !== null && v >= scale.min && v <= scale.max;
 
-  // Two bands under the bar: red from the peak threshold up to 0dB (past
-  // peak protection), yellow between the two thresholds (RMS limiting, peak
-  // still clear). Both need their own threshold in scale to have a defined
-  // edge; the yellow band additionally needs the peak line, since that's
-  // where it starts.
+  // Two bands under the bar: red from the peak threshold up to the top of the
+  // scale (past peak protection), yellow from the RMS threshold up to the peak
+  // line, or to the top when the peak stage is off and nothing cuts it short.
   //
   // Peak normally sits at or above RMS in dB, since the editing panel
   // enforces `peakVp >= rmsVrms * √2` on every edit — but only on edit.
@@ -218,14 +270,14 @@ export function buildLimiterThresholdVisuals(
   // `from < to`, which is what keeps that case rendering as a thin band
   // instead of vanishing.
   const zones: VuMeterZone[] = [
-    ...(inScale(peakThresholdDb)
-      ? [{ from: peakThresholdDb, to: 0, color: PEAK_THRESHOLD_COLOR, opacity: THRESHOLD_ZONE_OPACITY }]
+    ...(inScale(peakThreshold)
+      ? [{ from: peakThreshold, to: scale.max, color: PEAK_THRESHOLD_COLOR, opacity: THRESHOLD_ZONE_OPACITY }]
       : []),
-    ...(inScale(peakThresholdDb) && inScale(rmsThresholdDb)
+    ...(inScale(rmsThreshold)
       ? [
           {
-            from: rmsThresholdDb,
-            to: peakThresholdDb,
+            from: rmsThreshold,
+            to: inScale(peakThreshold) ? peakThreshold : scale.max,
             color: RMS_THRESHOLD_COLOR,
             opacity: THRESHOLD_ZONE_OPACITY,
           },
@@ -239,17 +291,17 @@ export function buildLimiterThresholdVisuals(
   // tracking the meter's real scale instead of a guessed epsilon.
   const collides =
     collision !== undefined &&
-    inScale(rmsThresholdDb) &&
-    inScale(peakThresholdDb) &&
-    Math.abs(peakThresholdDb - rmsThresholdDb) * collision.pixelsPerDb <
+    inScale(rmsThreshold) &&
+    inScale(peakThreshold) &&
+    Math.abs(peakThreshold - rmsThreshold) * collision.pixelsPerUnit <
       (collision.collisionPx ?? DEFAULT_MARK_COLLISION_PX);
 
   const marks: VuMeterMark[] = [
-    ...(inScale(rmsThresholdDb)
-      ? [{ value: rmsThresholdDb, color: RMS_THRESHOLD_COLOR, glow: true, span: collides ? RMS_MARK_SPAN : undefined }]
+    ...(inScale(rmsThreshold)
+      ? [{ value: rmsThreshold, color: RMS_THRESHOLD_COLOR, glow: true, span: collides ? RMS_MARK_SPAN : undefined }]
       : []),
-    ...(inScale(peakThresholdDb)
-      ? [{ value: peakThresholdDb, color: PEAK_THRESHOLD_COLOR, glow: true, span: collides ? PEAK_MARK_SPAN : undefined }]
+    ...(inScale(peakThreshold)
+      ? [{ value: peakThreshold, color: PEAK_THRESHOLD_COLOR, glow: true, span: collides ? PEAK_MARK_SPAN : undefined }]
       : []),
   ];
 

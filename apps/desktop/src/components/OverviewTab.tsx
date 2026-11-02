@@ -11,7 +11,17 @@ import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
 import type { ActionResult } from "../lib/actionResult";
 import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../lib/bindings";
-import { channelTelemetry, type ChannelTelemetry, outputLetter } from "../lib/channelTelemetry";
+import {
+  channelTelemetry,
+  FALLBACK_LIMITER,
+  outputLetter,
+  OUTPUT_METER_FLOOR_DB,
+  OUTPUT_METER_MARKS,
+  outputMeterScale,
+  rmsCeilingVolts,
+  type ChannelTelemetry,
+  type OutputMeterScale,
+} from "../lib/channelTelemetry";
 import { channelStateTone } from "../lib/channelState";
 import { usePreference } from "../lib/preferences";
 
@@ -40,7 +50,7 @@ const STRIP_H = 200;
  * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
  * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
-/** A value row: the dB/Gain/SEN fields and the V/A/VA/°C readouts. */
+/** A value row: the dB/Gain/SEN fields and the V/A/°C readouts. */
 const ROW_H = 30;
 /** A column's channel number or letter, with its name under it. */
 const HEADER_H = 36;
@@ -52,9 +62,8 @@ const LEGEND_W = 56;
 const GAP = 8;
 const LED_ROW_H = 16;
 
-/** The level meters' scale — the same −60..0 the Input / Output tab's
- * horizontal meters use (`LEVEL_MARKS` there): 1 V on inputs, rated output
- * on outputs. */
+/** The input meters' scale — the same −60..0, re 1 V, the Input / Output tab's
+ * horizontal meters use (`LEVEL_MARKS` there). Outputs use `outputMeterScale`. */
 const METER_FLOOR_DB = -60;
 const METER_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
 
@@ -111,22 +120,30 @@ const fmt = (value: number | null, digits: number) => (value === null ? "—" : 
 
 interface OutputTotals {
   currentA: number | null;
-  powerVa: number | null;
+  /** An output's current is too low to measure, so the sum is a lower bound. */
+  belowRange: boolean;
 }
 
-/** What the outputs deliver between them: summed current and apparent power
- * (`ChannelTelemetry.outputPowerVa`). There is
- * no mains reading, so this is the load side, not what the amp draws from the
- * wall. `null` when no output has a reading. */
+/** What the outputs deliver between them: summed current. There is no mains
+ * reading, so this is the load side, not what the amp draws from the wall.
+ * `null` when no output has a reading. */
 function outputTotals(readings: ChannelTelemetry[]): OutputTotals {
   let currentA: number | null = null;
-  let powerVa: number | null = null;
+  let belowRange = false;
   for (const reading of readings) {
     if (reading.outputCurrent === null) continue;
     currentA = (currentA ?? 0) + reading.outputCurrent;
-    if (reading.outputPowerVa !== null) powerVa = (powerVa ?? 0) + reading.outputPowerVa;
+    belowRange ||= reading.outputCurrentBelowRange;
   }
-  return { currentA, powerVa };
+  return { currentA, belowRange };
+}
+
+const LOW_CURRENT = "Low";
+const LOW_CURRENT_HINT = "Current is below what the amp can measure";
+
+function totalCurrentText({ currentA, belowRange }: OutputTotals): string {
+  if (!belowRange) return fmt(currentA, 1);
+  return currentA ? `≥ ${fmt(currentA, 1)}` : LOW_CURRENT;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -201,8 +218,8 @@ const outputName = (channel: AmpChannel) =>
   channel.outputName?.trim().replace(/_[0-9a-fA-F]{4}$/, "") || `Out${outputLetter(channel.channelIndex)}`;
 
 /** A passive value, recessed like `StatReadout` but one row high. */
-function ValueCell({ value }: { value: string }) {
-  return (
+function ValueCell({ value, hint }: { value: string; hint?: string }) {
+  const cell = (
     <div
       className="flex w-full items-center justify-center"
       style={{
@@ -216,6 +233,13 @@ function ValueCell({ value }: { value: string }) {
     >
       {value}
     </div>
+  );
+  return hint ? (
+    <Hint text={hint} className="w-full">
+      {cell}
+    </Hint>
+  ) : (
+    cell
   );
 }
 
@@ -255,13 +279,25 @@ function Scale({ min, max, marks, inset = 0 }: { min: number; max: number; marks
   );
 }
 
-function LevelMeter({ levelDb, peakHold, disabled }: { levelDb: number | null; peakHold: boolean; disabled?: boolean }) {
+function LevelMeter({
+  level,
+  peakHold,
+  disabled,
+  min = METER_FLOOR_DB,
+  max = 0,
+}: {
+  level: number | null;
+  peakHold: boolean;
+  disabled?: boolean;
+  min?: number;
+  max?: number;
+}) {
   return (
     <VuMeter
       orientation="vertical"
-      min={METER_FLOOR_DB}
-      max={0}
-      value={levelDb ?? METER_FLOOR_DB}
+      min={min}
+      max={max}
+      value={level ?? min}
       gradient={DEFAULT_LEVEL_GRADIENT}
       thickness={14}
       size={STRIP_H}
@@ -388,7 +424,7 @@ function SourceStrip({
     <Column>
       <ChannelHeader label={String(channel.channelIndex + 1)} name={inputName(channel)} />
       <Cell height={STRIP_H}>
-        <LevelMeter levelDb={reading.inputDbv} peakHold={peakHold} disabled={channel.inputMuted ?? false} />
+        <LevelMeter level={reading.inputDbv} peakHold={peakHold} disabled={channel.inputMuted ?? false} />
       </Cell>
       <Cell height={LED_ROW_H}>
         <Led color="var(--amp-color-red-5)" lit={reading.inputClipping === true} label="Clip" />
@@ -401,11 +437,13 @@ function OutputStrip({
   channel,
   reading,
   peakHold,
+  scale,
   onMute,
 }: {
   channel: AmpChannel;
   reading: ChannelTelemetry;
   peakHold: boolean;
+  scale: OutputMeterScale;
   onMute: () => Promise<ActionResult>;
 }) {
   const muted = channel.outputMuted ?? false;
@@ -420,7 +458,13 @@ function OutputStrip({
       <ChannelHeader label={outputLetter(channel.channelIndex)} name={outputName(channel)} />
       <Cell height={STRIP_H}>
         <div className="flex h-full items-end gap-2.5">
-          <LevelMeter levelDb={reading.outputLevelDb} peakHold={peakHold} disabled={muted} />
+          <LevelMeter
+            level={scale.reading(reading)}
+            min={scale.min}
+            max={scale.max}
+            peakHold={peakHold}
+            disabled={muted}
+          />
           <div className="flex flex-col">
             {STATUS_LEDS.map((led) => (
               <Cell key={led.label} height={LED_ROW_H}>
@@ -438,8 +482,11 @@ function OutputStrip({
         icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
       />
       <ValueCell value={fmt(reading.outputVoltage, 1)} />
-      <ValueCell value={fmt(reading.outputCurrent, 1)} />
-      <ValueCell value={fmt(reading.outputPowerVa, 0)} />
+      {reading.outputCurrentBelowRange ? (
+        <ValueCell value={LOW_CURRENT} hint={LOW_CURRENT_HINT} />
+      ) : (
+        <ValueCell value={fmt(reading.outputCurrent, 1)} />
+      )}
       <ValueCell value={fmt(reading.temperatureC, 0)} />
     </Column>
   );
@@ -478,7 +525,9 @@ function InfoBar({
       <InfoItem label="Firmware">{device.firmwareVersion || "—"}</InfoItem>
       <InfoItem label="Preset">{presetName || "—"}</InfoItem>
       <InfoItem label="Total">
-        {totals.currentA === null ? "—" : `${fmt(totals.currentA, 1)} A · ${fmt(totals.powerVa, 0)} VA`}
+        {totals.currentA === null || (totals.belowRange && !totals.currentA)
+          ? totalCurrentText(totals)
+          : `${totalCurrentText(totals)} A`}
       </InfoItem>
       <InfoItem label="PSU">{psuTempC === null ? "—" : `${psuTempC.toFixed(0)} °C`}</InfoItem>
       <InfoItem label="Status">
@@ -509,6 +558,19 @@ export function OverviewTab({
   const volumeMax = capability.paramRanges.outputVolumeDb.max ?? 18;
   const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
+  const outputMeterVolts = usePreference("outputMeterVolts");
+  // One scale column serves every output, so all of them use the highest max.
+  const outScale = outputMeterScale(
+    outputMeterVolts,
+    Math.max(
+      ...channels.map((c) =>
+        rmsCeilingVolts(c.limiter ?? FALLBACK_LIMITER, ratedRmsVoltage, capability.paramRanges.rmsLimiterThresholdVrms.max),
+      ),
+    ),
+    ratedRmsVoltage,
+    OUTPUT_METER_FLOOR_DB,
+    OUTPUT_METER_MARKS,
+  );
   const readings = channels.map((c) => channelTelemetry(telemetry, c.channelIndex, ratedRmsVoltage));
   const psuTempC = telemetry?.temperatures[4] ?? null;
   const totals = outputTotals(readings);
@@ -599,16 +661,13 @@ export function OverviewTab({
           <Section title="Output">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
-              <Scale min={METER_FLOOR_DB} max={0} marks={METER_MARKS} />
+              <Scale min={outScale.min} max={outScale.max} marks={outScale.marks} />
               <Cell height={TOGGLE_H} />
               <Cell height={ROW_H} align="end">
                 <SideText>V</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
                 <SideText>A</SideText>
-              </Cell>
-              <Cell height={ROW_H} align="end">
-                <SideText>VA</SideText>
               </Cell>
               <Cell height={ROW_H} align="end">
                 <SideText>°C</SideText>
@@ -620,12 +679,13 @@ export function OverviewTab({
                 channel={channel}
                 reading={readings[i]}
                 peakHold={peakHoldSurfaces.includes("output")}
+                scale={outScale}
                 onMute={() => actions.setChannelOutputMute(channel.channelIndex, !(channel.outputMuted ?? false))}
               />
             ))}
             {/* Legend for the LED column, bottom-aligned with it; below it,
-             * the A and VA rows' totals under a label in the V row, where a
-             * sum would mean nothing. */}
+             * the A row's total under a label in the V row, where a sum would
+             * mean nothing. */}
             <Column width={LEGEND_W}>
               <Cell height={HEADER_H} />
               <div className="flex flex-col justify-end" style={{ height: STRIP_H }}>
@@ -639,8 +699,7 @@ export function OverviewTab({
               <Cell height={ROW_H} align="center">
                 <SideText>Total</SideText>
               </Cell>
-              <ValueCell value={fmt(totals.currentA, 1)} />
-              <ValueCell value={fmt(totals.powerVa, 0)} />
+              <ValueCell value={totalCurrentText(totals)} hint={totals.belowRange ? LOW_CURRENT_HINT : undefined} />
             </Column>
           </Section>
         </div>

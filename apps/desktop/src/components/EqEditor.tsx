@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Switch } from "@heroui/react";
+import { Button, Switch } from "@heroui/react";
 import { Power, RotateCcw } from "lucide-react";
 import { ClipboardButtons } from "./ClipboardButtons";
+import { useConfirm } from "./ConfirmDialog";
 import { CommitNumberInput, STEP_COMMIT_DELAY_MS, stepSizeOf, stepped } from "./CommitNumberInput";
 import { useContextMenu } from "./ContextMenu";
 import { formatDb, FrequencyPlot, pathD, toPlotPoints, type PlotAxis, type PlotCurve, type PlotScale } from "./FrequencyPlot";
@@ -61,6 +62,9 @@ const FALLBACK_CHANNEL_EQ: ChannelEq = {
   })),
   lp: { filterType: "butterworth12", freqHz: 20000, active: false },
 };
+
+/** A band's default frequency: `DEFAULT_BAND_FREQS_HZ` in core's `project.rs`. */
+const DEFAULT_BAND_FREQS_HZ = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
 
 const EQ_FILTER_LABELS: Record<EqFilterType, string> = {
   peaking: "Peaking",
@@ -877,6 +881,8 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   const [preview, setPreview] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
   const [writes, setWrites] = useState<Record<string, StageWrite>>({});
   const [flash, setFlash] = useState<Record<string, "ok" | "fail">>({});
+  const [resetting, setResetting] = useState(false);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const writeToken = useRef(0);
 
   // Switching channel or direction (Input EQ <-> Output EQ) reuses the same
@@ -986,7 +992,11 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
       });
     settle(result.ok);
     if (result.ok) window.setTimeout(() => settle(false), WRITE_HOLD_MS);
-    setFlash((f) => ({ ...f, [key]: result.ok ? "ok" : "fail" }));
+    flashStage(key, result.ok);
+  }
+
+  function flashStage(key: string, ok: boolean) {
+    setFlash((f) => ({ ...f, [key]: ok ? "ok" : "fail" }));
     window.setTimeout(
       () =>
         setFlash((f) => {
@@ -996,6 +1006,41 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
         }),
       WRITE_FLASH_MS,
     );
+  }
+
+  /** Every stage back to its default values: flat bands, on, at their
+   * default frequencies, HP/LP off at the ends of the range. One at a time, each
+   * tile flashing its own outcome; the next reading shows the new values. */
+  async function handleResetAll() {
+    const ok = await confirm({
+      title: "Reset this EQ?",
+      description:
+        "Every band goes back to its default frequency, 1 Q and 0 dB, switched on. HP and LP go back to their defaults, switched off. This can't be undone.",
+      confirmLabel: "Reset all",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setPreview(null);
+    setWrites({});
+    setResetting(true);
+    for (const ref of stagesOf(eq)) {
+      const result =
+        ref.kind === "band"
+          ? await handleBandChange(ref.bandIndex, {
+              filterType: "peaking",
+              freqHz: clampToRange(DEFAULT_BAND_FREQS_HZ[ref.bandIndex] ?? 1000, freqRange),
+              gainDb: clampToRange(0, gainRange),
+              q: clampToRange(1, qRangeFor("peaking")),
+              active: true,
+            })
+          : await handleCrossoverChange(ref.kind, {
+              filterType: FALLBACK_CHANNEL_EQ[ref.kind].filterType,
+              freqHz: clampToRange(FALLBACK_CHANNEL_EQ[ref.kind].freqHz ?? 1000, freqRange),
+              active: false,
+            });
+      flashStage(stageKey(ref), result.ok);
+    }
+    setResetting(false);
   }
 
   function handleToggleActive(ref: EqStageRef) {
@@ -1038,8 +1083,18 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-3">
+      {confirmDialog}
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
         <span className="min-w-0 flex-1 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">{hint}</span>
+        <Button
+          size="sm"
+          variant="secondary"
+          isDisabled={!interactive || resetting}
+          onPress={() => void handleResetAll()}
+        >
+          <RotateCcw size={14} />
+          Reset all
+        </Button>
         <ClipboardButtons
           actions={actions}
           channelIndex={channelIndex}

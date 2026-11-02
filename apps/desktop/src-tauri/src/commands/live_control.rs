@@ -9,6 +9,7 @@ use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use ampcore_core::live::cvr::write_v118::{CHANNEL_NAME_FIELD_LEN, DEVICE_NAME_FIELD_LEN};
 use ampcore_core::live::cvr::fir;
+use ampcore_core::live::cvr::protocol::{network_adapters, NetworkAdapter};
 use ampcore_core::live::cvr::write;
 use ampcore_core::live::state::{
     DeviceBridge, DeviceChannelConfig, DeviceChannelFir, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState,
@@ -38,6 +39,20 @@ fn side_label(direction: EqDirection, channel_index: u8) -> String {
 pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Result<(), AppError> {
     let sink = crate::live::event_sink::make_event_sink(app, state.0.clone());
     state.start(sink, tauri::async_runtime::handle().inner())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_list_adapters() -> Vec<NetworkAdapter> {
+    network_adapters().into_iter().map(|(adapter, ..)| adapter).collect()
+}
+
+/// `None` uses every adapter. The driver follows within a discovery cycle.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_set_adapter(state: State<LiveDeviceState>, name: Option<String>) -> Result<(), AppError> {
+    state.0.lock().map_err(|e| e.to_string())?.adapter = name;
+    Ok(())
 }
 
 #[tauri::command]
