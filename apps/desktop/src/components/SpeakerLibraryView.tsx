@@ -37,22 +37,22 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
   v100: "100V",
 };
 
-const REFUSED = "Not part of a speaker preset.";
+const REFUSED = "Not part of a speaker.";
 
 const DEFAULT_OHMS = 8;
 
 /** One way as the single output channel of a stand-in amp, so the Configure
- * tab's own editors (EQ, limiter, FIR) edit a preset exactly as they edit an
- * output. A field the preset leaves out (`None`) shows the new-output value.
+ * tab's own editors (EQ, limiter, FIR) edit a speaker exactly as they edit an
+ * output. A field the speaker leaves out (`None`) shows the new-output value.
  * `ohms` is the way's nominal impedance, which only the watt figures use. */
-function presetAssignment(
+function wayAssignment(
   p: SpeakerProcessing,
   ohms: number,
   ampModelId: string | null,
   firmwareVersion: string | null,
 ): AmpAssignment {
   return {
-    id: "preset",
+    id: "speaker-way",
     mac: null,
     ampModelId,
     firmwareVersion,
@@ -81,7 +81,7 @@ function presetAssignment(
  * field saves the way's nominal impedance instead (`setOhms`), which is not
  * processing. Input-side and wiring actions don't exist for a speaker and are
  * left out (optional) or refused (required). */
-function presetActions(
+function wayActions(
   edit: (change: (p: SpeakerProcessing) => SpeakerProcessing) => Promise<ActionResult>,
   setOhms: (ohms: number) => Promise<ActionResult>,
 ): ConfigureActions {
@@ -163,13 +163,13 @@ function presetActions(
   };
 }
 
-/** The Presets tab: this machine's speaker library as a list beside an editor
- * for the selected preset — its details, its ways, and every value a way
+/** The Speaker Library tab: this machine's speaker library as a list beside an editor
+ * for the selected speaker — its details, its ways, and every value a way
  * carries (output EQ, both limiters, delay, polarity, trim, noise gate, power
- * mode, FIR). Ranges come from a reference amp model, since a preset itself
- * belongs to no amp. Applying a preset to outputs stays in an amp's Speakers
+ * mode, FIR). Ranges come from a reference amp model, since a speaker itself
+ * belongs to no amp. Applying a speaker to outputs stays in an amp's Speakers
  * tab. */
-export function PresetsView({ project, ampModels }: { project: Project; ampModels: AmpModelCatalogEntry[] | null }) {
+export function SpeakerLibraryView({ project, ampModels }: { project: Project; ampModels: AmpModelCatalogEntry[] | null }) {
   const library = useSpeakerLibrary();
   const compact = useIsCompact();
   const { confirm, dialog } = useConfirm();
@@ -195,7 +195,7 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
   async function duplicate(entry: SpeakerLibraryEntry) {
     const r = await commands.speakersDuplicate(entry.id);
     if (r.status === "ok") setSelectedId(r.data.id);
-    else toast.danger("Preset not duplicated", { description: r.error.message });
+    else toast.danger("Speaker not duplicated", { description: r.error.message });
   }
 
   async function remove(entry: SpeakerLibraryEntry) {
@@ -207,7 +207,7 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
     });
     if (!ok) return;
     const r = await commands.speakersDelete(entry.id);
-    if (r.status !== "ok") toast.danger("Preset not deleted", { description: r.error.message });
+    if (r.status !== "ok") toast.danger("Speaker not deleted", { description: r.error.message });
   }
 
   function handleAction(entry: SpeakerLibraryEntry, action: string) {
@@ -223,9 +223,9 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
         }`}
       >
         <div className="flex items-center gap-2">
-          <h2 className="min-w-0 flex-1 truncate text-base font-semibold">Presets</h2>
+          <h2 className="min-w-0 flex-1 truncate text-base font-semibold">Speaker Library</h2>
           <Hint text="Import the old app's speaker preset files">
-            <Button size="sm" variant="ghost" isIconOnly aria-label="Import presets" onPress={() => setImportOpen(true)}>
+            <Button size="sm" variant="ghost" isIconOnly aria-label="Import speakers" onPress={() => setImportOpen(true)}>
               <FileUp size={14} />
             </Button>
           </Hint>
@@ -235,7 +235,7 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
         </div>
         <input
           type="search"
-          aria-label="Search presets"
+          aria-label="Search speakers"
           placeholder="Search brand, model, family…"
           value={search}
           className={FIELD_INPUT}
@@ -243,9 +243,9 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
         />
         <div className="min-h-0 flex-1 overflow-y-auto">
           {library.length === 0 && (
-            <span className={MUTED}>No presets yet. Create one, import preset files, or save outputs from an amp's Speakers tab.</span>
+            <span className={MUTED}>No speakers yet. Create one, import preset files, or save outputs from an amp's Speakers tab.</span>
           )}
-          {library.length > 0 && shown.length === 0 && <span className={MUTED}>No preset matches.</span>}
+          {library.length > 0 && shown.length === 0 && <span className={MUTED}>No speaker matches.</span>}
           <div className="flex flex-col gap-0.5">
             {shown.map((entry) => {
               const active = entry.id === selected?.id;
@@ -293,7 +293,7 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
       </aside>
       <main className="min-h-0 min-w-0 flex-1 overflow-auto p-4">
         {selected ? (
-          <PresetEditor
+          <SpeakerEditor
             key={selected.id}
             entry={selected}
             project={project}
@@ -302,7 +302,7 @@ export function PresetsView({ project, ampModels }: { project: Project; ampModel
             onDelete={() => void remove(selected)}
           />
         ) : (
-          <div className={`${MUTED} flex h-full items-center justify-center`}>Select or create a preset.</div>
+          <div className={`${MUTED} flex h-full items-center justify-center`}>Select or create a speaker.</div>
         )}
       </main>
       <CreateModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(id) => setSelectedId(id)} />
@@ -336,8 +336,8 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (value: 
   );
 }
 
-/** A labelled value of a way. `onUnset` marks a field the preset may leave
- * out: unset, applying the preset leaves the amp's own value. */
+/** A labelled value of a way. `onUnset` marks a field a speaker may leave
+ * out: unset, applying the speaker leaves the amp's own value. */
 function Field({
   label,
   set = true,
@@ -359,7 +359,7 @@ function Field({
           children
         ) : (
           <>
-            <span className={`${MUTED} flex-1`}>Not in preset — the amp keeps its own value</span>
+            <span className={`${MUTED} flex-1`}>Not in this speaker — the amp keeps its own value</span>
             <Button size="sm" variant="secondary" onPress={onSet}>
               Set
             </Button>
@@ -367,8 +367,8 @@ function Field({
         )}
       </div>
       {set && onUnset && (
-        <Hint text="Leave out of the preset: the amp keeps its own value" className="flex">
-          <Button size="sm" variant="ghost" isIconOnly aria-label={`Leave ${label} out of the preset`} onPress={onUnset}>
+        <Hint text="Leave out of this speaker: the amp keeps its own value" className="flex">
+          <Button size="sm" variant="ghost" isIconOnly aria-label={`Leave ${label} out of this speaker`} onPress={onUnset}>
             <X size={14} />
           </Button>
         </Hint>
@@ -386,7 +386,7 @@ const WAY_PANES: { id: WayPane; label: string }[] = [
   { id: "fir", label: "FIR" },
 ];
 
-function PresetEditor({
+function SpeakerEditor({
   entry,
   project,
   ampModels,
@@ -436,7 +436,7 @@ function PresetEditor({
         return saved.then((r) => {
           pending.current -= 1;
           if (r.status !== "ok") {
-            toast.danger("Preset not saved", { description: r.error.message, timeout: 0 });
+            toast.danger("Speaker not saved", { description: r.error.message, timeout: 0 });
           }
           return toActionResult(r);
         });
@@ -460,10 +460,10 @@ function PresetEditor({
       },
     [entry.id, shownWay, storedOhms],
   );
-  const actions = useMemo(() => presetActions(edit, saveOhms), [edit, saveOhms]);
+  const actions = useMemo(() => wayActions(edit, saveOhms), [edit, saveOhms]);
 
   const assignment = useMemo(
-    () => presetAssignment(draft, ohms, reference.modelId, reference.firmware),
+    () => wayAssignment(draft, ohms, reference.modelId, reference.firmware),
     [draft, ohms, reference.modelId, reference.firmware],
   );
   const capability = reference.capability;
@@ -590,7 +590,7 @@ function PresetEditor({
 type Edit = (change: (p: SpeakerProcessing) => SpeakerProcessing) => Promise<ActionResult>;
 
 /** Delay, polarity, trim, noise gate, power mode and FIR bypass of one way.
- * The fields after polarity are optional in a preset. */
+ * The fields after polarity are optional in a speaker. */
 function OutputPane({ processing: p, capability, edit }: { processing: SpeakerProcessing; capability: AmpCapability; edit: Edit }) {
   const ranges = capability.paramRanges;
   const set = (patch: Partial<SpeakerProcessing>) => void edit((current) => ({ ...current, ...patch }));
@@ -604,7 +604,6 @@ function OutputPane({ processing: p, capability, edit }: { processing: SpeakerPr
             max={ranges.delayOutMs.max ?? undefined}
             step={0.01}
             suffix=" ms"
-            showStepper
             onCommit={(v) => set({ delayOutMs: v })}
           />
         </div>
@@ -625,7 +624,6 @@ function OutputPane({ processing: p, capability, edit }: { processing: SpeakerPr
             max={ranges.outputTrimDb.max ?? undefined}
             step={0.1}
             suffix=" dB"
-            showStepper
             onCommit={(v) => set({ outputTrimDb: v })}
           />
         </div>
@@ -678,7 +676,7 @@ function OutputPane({ processing: p, capability, edit }: { processing: SpeakerPr
   );
 }
 
-/** The amp model (and firmware) whose ranges the editors use. A preset
+/** The amp model (and firmware) whose ranges the editors use. A speaker
  * belongs to no amp; this one only bounds the fields. Defaults to the
  * project's first modelled amp, else the first model in the catalogue. */
 function useReferenceAmp(project: Project, ampModels: AmpModelCatalogEntry[] | null) {
@@ -727,7 +725,7 @@ function ReferenceAmpPicker({ reference, ampModels }: { reference: ReferenceAmp;
   const firmwares = firmwareOptionsFor(model?.protocol);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <Hint text="A preset belongs to no amp: this model only sets the ranges, filter types and power modes offered here.">
+      <Hint text="A speaker belongs to no amp: this model only sets the ranges, filter types and power modes offered here.">
         <span className={MUTED}>Ranges from</span>
       </Hint>
       <div className="w-64">
@@ -858,7 +856,7 @@ function WayLabelFields({ labels, onChange }: { labels: string[]; onChange: (lab
 const MAX_NEW_WAYS = 4;
 const EMPTY_DETAILS: SpeakerDetails = { brand: "", model: "", family: "", application: "", notes: "", wayLabels: [""] };
 
-/** A new preset from scratch: name and way count. Every way starts neutral
+/** A new speaker from scratch: name and way count. Every way starts neutral
  * (flat EQ, limiters off) and is edited in the tab. */
 function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (id: string) => void }) {
   const compact = useIsCompact();
@@ -890,7 +888,7 @@ function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () 
       <Modal.Container placement="center" size={compact ? "full" : "md"}>
         <Modal.Dialog>
           <Modal.Header>
-            <Modal.Heading>New preset</Modal.Heading>
+            <Modal.Heading>New speaker</Modal.Heading>
             <Modal.CloseTrigger />
           </Modal.Header>
           <Modal.Body>
@@ -929,7 +927,7 @@ function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () 
                   isDisabled={saving || !draft.brand.trim() || !draft.model.trim()}
                   onPress={() => void create()}
                 >
-                  {saving ? <Spinner size="sm" /> : "Create preset"}
+                  {saving ? <Spinner size="sm" /> : "Create speaker"}
                 </Button>
               </div>
             </div>

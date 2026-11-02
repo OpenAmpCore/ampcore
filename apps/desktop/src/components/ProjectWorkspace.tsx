@@ -3,7 +3,7 @@ import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
-import { PresetsView } from "./PresetsView";
+import { SpeakerLibraryView } from "./SpeakerLibraryView";
 import { WorkspaceView } from "./WorkspaceView";
 import { useAmpEditLock } from "../hooks/useAmpEditLock";
 import { useLinkedSync } from "../hooks/useLinkedSync";
@@ -19,7 +19,7 @@ import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project }
 interface ProjectWorkspaceProps {
   project: Project;
   onProjectUpdate: (project: Project) => void;
-  /** Workspace/Operator View/Presets selection — owned by `App` since the tab
+  /** Workspace/Operator View/Speaker Library selection — owned by `App` since the tab
    * selector itself now renders in the title bar, not here. */
   activeTab: string | null;
   onActiveTabChange: (tab: string | null) => void;
@@ -199,7 +199,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
             />
           )}
           {activeTab === "operator" && <OperatorView />}
-          {activeTab === "presets" && <PresetsView project={project} ampModels={ampModels} />}
+          {activeTab === "speakerLibrary" && <SpeakerLibraryView project={project} ampModels={ampModels} />}
           {activeDevice && (
             <AmpConfigureView
               activeTab={configureTabById[activeDevice.id] ?? "overview"}

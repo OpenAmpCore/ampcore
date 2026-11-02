@@ -71,6 +71,14 @@ pub struct SpeakerProcessing {
     pub fir: Option<ChannelFir>,
 }
 
+/// The peak floor (`Vp >= √2 · Vrms`, the rule every limiter edit keeps), for
+/// everything entering the library from outside an amp, so the library holds
+/// exactly what an apply writes and status compares like with like.
+fn with_peak_floor(mut limiter: Limiter) -> Limiter {
+    limiter.peak.threshold_vp = limiter.peak.threshold_vp.max(limiter.rms.threshold_vrms * std::f64::consts::SQRT_2);
+    limiter
+}
+
 /// `v` limited to `range`; a change is reported as `label: before → after`.
 fn clamp(issues: &mut Vec<String>, label: &str, unit: &str, v: f64, range: ParamRange) -> f64 {
     let c = v.clamp(range.min, range.max);
@@ -102,15 +110,11 @@ impl SpeakerProcessing {
         Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0])
     }
 
-    /// The peak floor (`Vp >= √2 · Vrms`, the rule every limiter edit keeps)
-    /// is applied here, once, so the library holds exactly what an apply
-    /// writes and status compares like with like.
+    /// The peak floor is applied here, once (`with_peak_floor`).
     pub fn from_speaker_data(data: &SpeakerData) -> Self {
-        let mut limiter = data.limiter;
-        limiter.peak.threshold_vp = limiter.peak.threshold_vp.max(limiter.rms.threshold_vrms * std::f64::consts::SQRT_2);
         Self {
             output_eq: data.eq.clone(),
-            limiter,
+            limiter: with_peak_floor(data.limiter),
             delay_out_ms: data.delay_ms as f64,
             phase_inverted: data.phase_inverted,
             fir_bypassed: Some(data.fir_bypassed),
@@ -499,7 +503,7 @@ impl SpeakerLibraryEntry {
     /// Replaces one way's processing and bumps the revision.
     pub fn set_way_processing(&mut self, way_index: u32, processing: SpeakerProcessing) -> Result<(), String> {
         let way = self.ways.get_mut(way_index as usize).ok_or("No such way")?;
-        way.processing = processing;
+        way.processing = SpeakerProcessing { limiter: with_peak_floor(processing.limiter), ..processing };
         way.fc57_hex = None; // no longer what the blob says
         self.revision += 1;
         self.updated_at = now_millis();
@@ -842,6 +846,22 @@ mod tests {
         let rev = entry.revision;
         entry.set_details(details(2)).unwrap();
         assert_eq!(entry.revision, rev, "metadata never bumps the revision");
+    }
+
+    /// A hand edit stores what an import would: the peak floor applied, and no
+    /// blob that no longer matches the values.
+    #[test]
+    fn a_way_edit_applies_the_peak_floor_and_drops_the_blob() {
+        let mut p = SpeakerProcessing::from_channel(&channel());
+        p.limiter.rms.threshold_vrms = 100.0;
+        p.limiter.peak.threshold_vp = 50.0;
+        let mut entry = SpeakerLibraryEntry::new(details(1), vec![SpeakerProcessing::from_channel(&channel())]).unwrap();
+        entry.ways[0].fc57_hex = Some("00".into());
+
+        entry.set_way_processing(0, p).unwrap();
+        let limiter = entry.ways[0].processing.limiter;
+        assert!((limiter.peak.threshold_vp - 100.0 * std::f64::consts::SQRT_2).abs() < 1e-9);
+        assert_eq!(entry.ways[0].fc57_hex, None);
     }
 
     #[test]

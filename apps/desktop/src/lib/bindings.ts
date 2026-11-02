@@ -184,12 +184,12 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
-	 *  Removes an output's speaker reference. Its values are left alone â€”
+	 *  Removes an output's speaker reference. Its values are left alone —
 	 *  `speakers_apply` is what sets a speaker up.
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
 	/**
-	 *  Places a library speaker in the project, linked to nothing yet â€” a group
+	 *  Places a library speaker in the project, linked to nothing yet — a group
 	 *  of `parallel` identical cabinets on the same outputs (1 = one cabinet).
 	 *  Its ways are linked by `speakers_apply` (`SpeakerItem.project_speaker_id`).
 	 */
@@ -250,8 +250,8 @@ export const commands = {
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
 	/**
-	 *  Creates a library entry from consecutive outputs â€” one way per output, in
-	 *  order â€” and sets those outputs up from it.
+	 *  Creates a library entry from consecutive outputs — one way per output, in
+	 *  order — and sets those outputs up from it.
 	 */
 	speakersSaveFromOutputs: (projectId: string, assignmentId: string, channelIndices: number[], details: SpeakerDetails) => typedError<Project, AppError>(__TAURI_INVOKE("speakers_save_from_outputs", { projectId, assignmentId, channelIndices, details })),
 	/**
@@ -2036,7 +2036,7 @@ export type ProfileImportResult = {
 	error: string | null,
 	/**  The entry the file makes. Not in the library unless `commit` was set. */
 	entry: SpeakerLibraryEntry | null,
-	/**  Brand, family and model already exist in the library â€” imported anyway. */
+	/**  Brand, family and model already exist in the library — imported anyway. */
 	duplicate: boolean,
 };
 
@@ -2231,7 +2231,7 @@ export type SpeakerDetails = {
 /**
  *  One output to set up: which way of which library entry goes onto it.
  *  Entries may differ between items, so any number of speakers is one apply
- *  â€” and one push.
+ *  — and one push.
  */
 export type SpeakerItem = {
 	channelIndex: number,
