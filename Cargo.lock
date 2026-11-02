@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "ampcore-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "if-addrs",
  "serde",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "ampcore-desktop"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "ampcore-core",
  "axum",
