@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::data::amp_model::AmpProtocol;
-use crate::data::capability::cvr::{amp_gain_range_db, amp_sensitivity_v, rated_rms_voltage_from_firmware_string};
+use crate::data::capability::cvr::{amp_gain_range_db, amp_gain_v118_db, amp_sensitivity_v, rated_rms_voltage_from_firmware_string};
 use crate::data::common::now_millis;
 use crate::live::dsp::voltage_to_db;
 use crate::live::state::{DiscoveredDevice, DriverHandle, LiveEventSink};
@@ -836,8 +836,15 @@ pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -
     };
     match channel_config::parse_channel_config(device.firmware_family.as_deref(), body, device.output_channels) {
         Some(mut cfg) => {
+            let gain_from_volume = device.firmware_family.as_deref() == Some("1.1.8");
             for channel in &mut cfg.channels {
-                channel.amp_gain_range_db = amp_gain_range_db(device.gain_max, channel.power_mode);
+                if gain_from_volume {
+                    // No gain setting on 1.1.8: derived from the volume, read-only.
+                    channel.amp_gain_db =
+                        amp_gain_v118_db(device.gain_max, channel.power_mode, f64::from(channel.output_volume_db)).map(|g| g as f32);
+                } else {
+                    channel.amp_gain_range_db = amp_gain_range_db(device.gain_max, channel.power_mode);
+                }
                 channel.amp_sensitivity_v =
                     channel.amp_gain_db.and_then(|g| amp_sensitivity_v(f64::from(g), device.gain_max, channel.power_mode));
             }

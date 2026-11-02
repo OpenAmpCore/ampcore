@@ -420,9 +420,32 @@ pub fn amp_sensitivity_v(gain_db: f64, gain_max: u32, power_mode: Option<PowerMo
     amp_gain_base_dbv(gain_max, power_mode).map(|base| 10f64.powf((base - gain_db) / 20.0))
 }
 
+/// The gain a 1.1.8 output runs at. 1.1.8 has no gain setting of its own
+/// (its FC=8 is LCD contrast): the top 18 dB of the volume fader is the amp
+/// gain, so `base − 18 + clamp(volume, 0, 18)`. That is the vendor's
+/// `MainVolTY::setGain_SEN` (`MinGain = MaxGain − 18`, CPCR 19/22), and what
+/// 1.1.9 firmware preserves when it upgrades such settings to `Gains =
+/// gain_max`, `volume −= 18`. Read-only: it moves with the volume.
+pub fn amp_gain_v118_db(gain_max: u32, power_mode: Option<PowerMode>, volume_db: f64) -> Option<f64> {
+    amp_gain_base_dbv(gain_max, power_mode).map(|base| base - 18.0 + volume_db.clamp(0.0, 18.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Matches the vendor's 1.1.8 fader: Gain/SEN track volume 0…+18 only.
+    #[test]
+    fn amp_gain_v118_follows_the_top_of_the_volume_fader() {
+        let low = Some(PowerMode::LowOhm);
+        assert_eq!(amp_gain_v118_db(42, low, 0.0), Some(24.0));
+        assert_eq!(amp_gain_v118_db(42, low, 18.0), Some(42.0));
+        assert_eq!(amp_gain_v118_db(42, low, -10.0), Some(24.0));
+        assert_eq!(amp_gain_v118_db(0, Some(PowerMode::V70), 5.0), Some(24.0)); // 19 + 5
+        let sen = |v| amp_sensitivity_v(amp_gain_v118_db(42, low, v).unwrap(), 42, low).map(|s| (s * 100.0).round() / 100.0);
+        assert_eq!(sen(0.0), Some(7.94));
+        assert_eq!(sen(18.0), Some(1.0));
+    }
 
     /// The base follows the power mode, as the vendor's `CPCR` switch does;
     /// an unknown base yields no range rather than a guessed one.
