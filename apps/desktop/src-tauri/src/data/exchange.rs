@@ -15,9 +15,9 @@ use serde_json::Value;
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::common::EntryOrigin;
 use ampcore_core::data::project::Project;
-use ampcore_core::data::speaker::SpeakerLibraryEntry;
+use ampcore_core::data::speaker::{SpeakerLibraryEntry, CURRENT_SPEAKER_LIBRARY_VERSION};
 
-use super::store::parse_project_value;
+use super::store::{migrate_speakers, parse_project_value};
 
 const PROJECT_FORMAT: &str = "ampcore-project";
 const LIBRARY_FORMAT: &str = "ampcore-speakers";
@@ -31,6 +31,7 @@ const LIBRARY_FORMAT: &str = "ampcore-speakers";
 struct ProjectFile<'a> {
     format: &'a str,
     project: &'a Project,
+    speaker_schema_version: u32,
     speakers: Vec<&'a SpeakerLibraryEntry>,
     amp_models: Vec<&'a AmpModelCatalogEntry>,
 }
@@ -39,6 +40,7 @@ struct ProjectFile<'a> {
 #[serde(rename_all = "camelCase")]
 struct LibraryFile<'a> {
     format: &'a str,
+    schema_version: u32,
     speakers: &'a [SpeakerLibraryEntry],
 }
 
@@ -63,6 +65,7 @@ pub fn export_project(
     let file = ProjectFile {
         format: PROJECT_FORMAT,
         project,
+        speaker_schema_version: CURRENT_SPEAKER_LIBRARY_VERSION,
         speakers: library.iter().filter(|e| speaker_ids.contains(e.id.as_str())).collect(),
         amp_models: amp_models
             .iter()
@@ -85,6 +88,7 @@ pub struct ImportedProject {
 pub fn import_project(text: &str) -> Result<ImportedProject, String> {
     let mut raw: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
     let mut take = |key: &str| raw.get_mut(key).map(Value::take).unwrap_or(Value::Null);
+    let speaker_version = take("speakerSchemaVersion").as_u64().unwrap_or(0);
     let (project, speakers, amp_models) = if take("format").as_str() == Some(PROJECT_FORMAT) {
         (take("project"), take("speakers"), take("ampModels"))
     } else {
@@ -94,13 +98,18 @@ pub fn import_project(text: &str) -> Result<ImportedProject, String> {
     };
     Ok(ImportedProject {
         project: parse_project_value(project).map_err(|e| e.to_string())?,
-        speakers: list(speakers, "speakers")?,
+        speakers: list(migrate_speakers(speaker_version, speakers)?, "speakers")?,
         amp_models: list(amp_models, "amp models")?,
     })
 }
 
 pub fn export_library(library: &[SpeakerLibraryEntry]) -> Result<String, String> {
-    serde_json::to_string_pretty(&LibraryFile { format: LIBRARY_FORMAT, speakers: library }).map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&LibraryFile {
+        format: LIBRARY_FORMAT,
+        schema_version: CURRENT_SPEAKER_LIBRARY_VERSION,
+        speakers: library,
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// The entries of an exported speaker library; `None` for any other file.
@@ -109,7 +118,10 @@ pub fn import_library(text: &str) -> Option<Result<Vec<SpeakerLibraryEntry>, Str
     if raw.get("format").and_then(Value::as_str) != Some(LIBRARY_FORMAT) {
         return None;
     }
-    Some(list(raw.get_mut("speakers").map(Value::take).unwrap_or(Value::Null), "speakers"))
+    // Exports from before the format had a version are format 0.
+    let version = raw.get("schemaVersion").and_then(Value::as_u64).unwrap_or(0);
+    let speakers = raw.get_mut("speakers").map(Value::take).unwrap_or(Value::Null);
+    Some(migrate_speakers(version, speakers).and_then(|speakers| list(speakers, "speakers")))
 }
 
 /// Adds the `incoming` items `have` lacks (by id) and returns how many. One
@@ -211,6 +223,26 @@ mod tests {
         assert_eq!(import_library(&text).unwrap().unwrap().len(), 2);
         assert!(import_library(r#"{"speaker":{"brand":"x"}}"#).is_none(), "an old preset file is not a library");
         assert!(import_library("not json").is_none());
+    }
+
+    /// Exports from before the version still import; newer ones are refused,
+    /// on their own and inside a project export.
+    #[test]
+    fn speaker_format_gates_imports() {
+        let old = r#"{"format":"ampcore-speakers","speakers":[]}"#;
+        assert!(import_library(old).unwrap().unwrap().is_empty());
+
+        let mut newer: Value = serde_json::from_str(&export_library(&[entry("a")]).unwrap()).unwrap();
+        newer["schemaVersion"] = (CURRENT_SPEAKER_LIBRARY_VERSION + 1).into();
+        let err = import_library(&newer.to_string()).unwrap().unwrap_err();
+        assert!(err.contains("newer AmpCore"), "{err}");
+
+        let project = Project::new("P".into(), String::new());
+        let mut file: Value = serde_json::from_str(&export_project(&project, &[], &[]).unwrap()).unwrap();
+        assert!(import_project(&file.to_string()).is_ok());
+        file["speakerSchemaVersion"] = (CURRENT_SPEAKER_LIBRARY_VERSION + 1).into();
+        let err = import_project(&file.to_string()).err().unwrap();
+        assert!(err.contains("newer AmpCore"), "{err}");
     }
 
     /// Importing adds what's missing and never replaces what's there.

@@ -13,7 +13,7 @@ use ampcore_core::data::common::now_millis;
 use ampcore_core::data::capability::cvr::builtin_topology;
 use ampcore_core::data::device_link::DeviceModelLink;
 use ampcore_core::data::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
-use ampcore_core::data::speaker::SpeakerLibraryEntry;
+use ampcore_core::data::speaker::{SpeakerLibraryEntry, CURRENT_SPEAKER_LIBRARY_VERSION};
 
 /// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
 /// here are infrequent and user-paced (not a polling loop), so a single
@@ -109,7 +109,7 @@ impl ProjectDataState {
         }
         let mut load_problems = Vec::new();
         let device_model_links = load_json_or_set_aside(&data_dir.join("device_model_links.json"), &mut load_problems)?;
-        let speakers = load_json_or_set_aside(&data_dir.join("speakers.json"), &mut load_problems)?;
+        let speakers = load_speakers(&data_dir.join("speakers.json"), &mut load_problems)?;
         let mut amp_models = load_json_or_set_aside(&data_dir.join("amp_models.json"), &mut load_problems)?;
         let seeded = seed_builtin_amp_models(&mut amp_models);
         if seeded {
@@ -286,13 +286,82 @@ where
     match serde_json::from_str(&contents) {
         Ok(value) => Ok(value),
         Err(e) => {
-            let aside = set_aside(path)?;
-            problems.push(format!(
-                "{} couldn't be read ({e}) and was moved aside, unchanged, to {}; AmpCore started with an empty one.",
-                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                aside.display()
-            ));
+            set_aside_and_report(path, &e, problems)?;
             Ok(T::default())
+        }
+    }
+}
+
+fn set_aside_and_report(path: &Path, reason: &dyn std::fmt::Display, problems: &mut Vec<String>) -> Result<(), String> {
+    let aside = set_aside(path)?;
+    problems.push(format!(
+        "{} couldn't be read ({reason}) and was moved aside, unchanged, to {}; AmpCore started with an empty one.",
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        aside.display()
+    ));
+    Ok(())
+}
+
+/// A stored library's format: a bare list is 0, from before it had a version.
+/// `None` if this isn't a library at all.
+fn speaker_library_version(raw: &Value) -> Option<u64> {
+    if raw.is_array() {
+        return Some(0);
+    }
+    raw.get("schemaVersion")?.as_u64()
+}
+
+fn newer_speaker_library(version: u64) -> String {
+    format!(
+        "it was saved by a newer AmpCore (speaker library format {version}; this version reads up to {CURRENT_SPEAKER_LIBRARY_VERSION}) — update AmpCore to open it"
+    )
+}
+
+/// A speaker list in format `version`, rewritten to the current format: the
+/// one way a library enters the app, from `speakers.json` or an imported file.
+/// A newer list is refused rather than loaded lossily. A change that renames,
+/// removes or reinterprets a field bumps `CURRENT_SPEAKER_LIBRARY_VERSION` and
+/// rewrites `speakers` here, oldest step first. Format 1 changed only the
+/// wrapper, so there are no steps yet.
+pub fn migrate_speakers(version: u64, speakers: Value) -> Result<Value, String> {
+    if version > u64::from(CURRENT_SPEAKER_LIBRARY_VERSION) {
+        return Err(newer_speaker_library(version));
+    }
+    Ok(speakers)
+}
+
+/// `speakers.json`, in any format up to the current one. A newer file is left
+/// exactly where it is and `save_speakers` refuses to replace it. One that
+/// can't be read is set aside like any other data file.
+fn load_speakers(path: &Path, problems: &mut Vec<String>) -> Result<Vec<SpeakerLibraryEntry>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed = serde_json::from_str::<Value>(&contents).map_err(|e| e.to_string()).and_then(|mut raw| {
+        let version = speaker_library_version(&raw).ok_or("not a speaker library")?;
+        let speakers = if raw.is_array() { raw } else { raw.get_mut("speakers").map(Value::take).unwrap_or(Value::Null) };
+        Ok((version, speakers))
+    });
+    let (version, speakers) = match parsed {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            set_aside_and_report(path, &e, problems)?;
+            return Ok(Vec::new());
+        }
+    };
+    if version > u64::from(CURRENT_SPEAKER_LIBRARY_VERSION) {
+        problems.push(format!(
+            "speakers.json wasn't opened: {}. AmpCore started with an empty speaker library and can't change it until then.",
+            newer_speaker_library(version)
+        ));
+        return Ok(Vec::new());
+    }
+    match migrate_speakers(version, speakers).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
+        Ok(entries) => Ok(entries),
+        Err(e) => {
+            set_aside_and_report(path, &e, problems)?;
+            Ok(Vec::new())
         }
     }
 }
@@ -353,8 +422,32 @@ pub fn save_device_model_links(data_dir: &Path, entries: &[DeviceModelLink]) -> 
     save_json(&data_dir.join("device_model_links.json"), entries)
 }
 
+/// Saves the library in the current format. What's on disk decides what happens
+/// first: a newer file is never replaced, and an older one is copied to
+/// `speakers.json.v<old>` the first time its format changes.
 pub fn save_speakers(data_dir: &Path, entries: &[SpeakerLibraryEntry]) -> Result<(), String> {
-    save_json(&data_dir.join("speakers.json"), entries)
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredLibrary<'a> {
+        schema_version: u32,
+        speakers: &'a [SpeakerLibraryEntry],
+    }
+
+    let path = data_dir.join("speakers.json");
+    let stored_version = fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .and_then(|raw| speaker_library_version(&raw));
+    if let Some(version) = stored_version {
+        if version > u64::from(CURRENT_SPEAKER_LIBRARY_VERSION) {
+            return Err(format!("The speaker library wasn't saved: {}.", newer_speaker_library(version)));
+        }
+        let backup = data_dir.join(format!("speakers.json.v{version}"));
+        if version < u64::from(CURRENT_SPEAKER_LIBRARY_VERSION) && !backup.exists() {
+            fs::copy(&path, &backup).map_err(|e| format!("could not back up {}: {e}", path.display()))?;
+        }
+    }
+    save_json(&path, &StoredLibrary { schema_version: CURRENT_SPEAKER_LIBRARY_VERSION, speakers: entries })
 }
 
 #[cfg(test)]
@@ -437,5 +530,83 @@ mod tests {
         let _: Vec<SpeakerLibraryEntry> = load_json_or_set_aside(&path, &mut problems).unwrap();
         assert_eq!(fs::read_to_string(dir.join("speakers.json.unreadable")).unwrap(), "not json");
         fs::remove_dir_all(dir).ok();
+    }
+
+    fn library_entry(id: &str) -> SpeakerLibraryEntry {
+        SpeakerLibraryEntry {
+            id: id.into(),
+            brand: "B".into(),
+            family: String::new(),
+            model: id.into(),
+            application: String::new(),
+            notes: String::new(),
+            revision: 1,
+            ways: Vec::new(),
+            created_at: 0.0,
+            updated_at: 0.0,
+        }
+    }
+
+    /// Today's bare list still loads. The first save moves it to the current
+    /// format and keeps the original, once.
+    #[test]
+    fn a_bare_library_loads_and_is_backed_up_when_saved() {
+        let dir = data_dir();
+        let path = dir.join("speakers.json");
+        let bare = serde_json::to_string(&vec![library_entry("a")]).unwrap();
+        fs::write(&path, &bare).unwrap();
+
+        let mut problems = Vec::new();
+        let loaded = load_speakers(&path, &mut problems).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), bare, "loading alone changes nothing");
+
+        save_speakers(&dir, &loaded).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("speakers.json.v0")).unwrap(), bare);
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["schemaVersion"], u64::from(CURRENT_SPEAKER_LIBRARY_VERSION));
+
+        assert_eq!(load_speakers(&path, &mut problems).unwrap().len(), 1, "the new format reads back");
+        fs::write(&path, &bare).unwrap();
+        fs::write(dir.join("speakers.json.v0"), "first backup").unwrap();
+        save_speakers(&dir, &loaded).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("speakers.json.v0")).unwrap(), "first backup", "never overwritten");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A newer library is neither loaded lossily nor replaced by a save.
+    #[test]
+    fn a_newer_library_is_left_untouched() {
+        let dir = data_dir();
+        let path = dir.join("speakers.json");
+        let newer = format!(r#"{{"schemaVersion":{},"speakers":[],"futureField":1}}"#, CURRENT_SPEAKER_LIBRARY_VERSION + 1);
+        fs::write(&path, &newer).unwrap();
+
+        let mut problems = Vec::new();
+        assert!(load_speakers(&path, &mut problems).unwrap().is_empty());
+        assert!(problems.iter().any(|p| p.contains("newer AmpCore")), "{problems:?}");
+        let err = save_speakers(&dir, &[library_entry("a")]).unwrap_err();
+        assert!(err.contains("newer AmpCore"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+        assert!(!dir.join("speakers.json.unreadable").exists());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Valid JSON that isn't a library, or entries that can't be read, go the
+    /// same way as a broken file.
+    #[test]
+    fn an_unreadable_library_is_still_set_aside() {
+        for contents in ["not json", r#"{"other":true}"#, r#"[{"id":1}]"#] {
+            let dir = data_dir();
+            let path = dir.join("speakers.json");
+            fs::write(&path, contents).unwrap();
+            let mut problems = Vec::new();
+            assert!(load_speakers(&path, &mut problems).unwrap().is_empty());
+            assert_eq!(problems.len(), 1, "{contents}");
+            assert_eq!(fs::read_to_string(dir.join("speakers.json.unreadable")).unwrap(), contents);
+            save_speakers(&dir, &[library_entry("a")]).unwrap();
+            fs::remove_dir_all(dir).ok();
+        }
     }
 }
