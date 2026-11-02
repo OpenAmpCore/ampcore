@@ -741,7 +741,11 @@ export const commands = {
 	 *  already running changes nothing, so the frontend can call this freely.
 	 */
 	webServerSet: (enabled: boolean, port: number) => typedError<string[], AppError>(__TAURI_INVOKE("web_server_set", { enabled, port })),
-	bugReportSend: (title: string, description: string) => typedError<BugReportOutcome, AppError>(__TAURI_INVOKE("bug_report_send", { title, description })),
+	/**
+	 *  `images` are base64 PNG or JPEG files. They are written to the queue's image
+	 *  folder first, so sending now and sending later read them the same way.
+	 */
+	bugReportSend: (title: string, description: string, images: string[]) => typedError<BugReportOutcome, AppError>(__TAURI_INVOKE("bug_report_send", { title, description, images })),
 };
 
 /* Types */

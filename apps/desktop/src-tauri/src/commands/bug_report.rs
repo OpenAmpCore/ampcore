@@ -9,6 +9,11 @@
 //!
 //! The token stays on this side of the IPC bridge and no error names the
 //! service: the user is only ever told a report goes to the developers.
+//!
+//! Issues can't carry files through the API, so screenshots travel as assets of
+//! a draft release in the inbox, named in the body by an `ampcore-attachments`
+//! marker. The workflow copies them next to the report and deletes them, and a
+//! deleted asset leaves no history for the token to read back.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -16,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ampcore_core::data::common::new_id;
 use ampcore_core::error::AppError;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use specta::Type;
@@ -25,9 +32,16 @@ use tauri::{AppHandle, Manager};
 use crate::data::store::write_atomic;
 
 const INBOX_URL: &str = "https://api.github.com/repos/OpenAmpCore/ampcore-reports-inbox/issues";
+const RELEASES_URL: &str = "https://api.github.com/repos/OpenAmpCore/ampcore-reports-inbox/releases";
+const UPLOADS_URL: &str = "https://uploads.github.com/repos/OpenAmpCore/ampcore-reports-inbox/releases";
+const ATTACHMENT_RELEASE: &str = "attachments";
 const TITLE_MAX_CHARS: usize = 200;
 const DESCRIPTION_MAX_CHARS: usize = 8000;
+const IMAGES_MAX: usize = 3;
+const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Its images live in the folder of the same name without the extension.
 const QUEUE_FILE: &str = "pending-bug-reports.json";
 const QUEUE_MAX_REPORTS: usize = 50;
 const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -44,6 +58,9 @@ struct PendingReport {
     title: String,
     /// Includes the footer, so a later send names the version that had the bug.
     body: String,
+    /// File names in the image folder beside the queue file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
@@ -80,18 +97,154 @@ fn outcome_of_status(status: u16) -> SendOutcome {
     }
 }
 
-async fn post_report(report: &PendingReport) -> SendOutcome {
-    let Ok(client) = client() else { return SendOutcome::RetryLater };
-    let response = client
-        .post(INBOX_URL)
+/// Sends with the token and returns the response's JSON, or how the failure counts.
+async fn call(request: reqwest::RequestBuilder) -> Result<serde_json::Value, SendOutcome> {
+    let response = request
         .bearer_auth(unmask(TOKEN_MASKED, TOKEN_KEY))
         .header("Accept", "application/vnd.github+json")
-        .json(&json!({ "title": report.title, "body": report.body }))
         .send()
-        .await;
-    match response {
-        Ok(response) => outcome_of_status(response.status().as_u16()),
-        Err(_) => SendOutcome::RetryLater,
+        .await
+        .map_err(|_| SendOutcome::RetryLater)?;
+    match outcome_of_status(response.status().as_u16()) {
+        SendOutcome::Sent => Ok(response.json().await.unwrap_or(serde_json::Value::Null)),
+        other => Err(other),
+    }
+}
+
+/// One long-lived draft release; drafts are invisible without write access.
+async fn attachment_release(client: &reqwest::Client) -> Result<u64, SendOutcome> {
+    let releases = call(client.get(format!("{RELEASES_URL}?per_page=100"))).await?;
+    let existing = releases.as_array().into_iter().flatten().find(|r| {
+        r["draft"].as_bool() == Some(true) && r["name"].as_str() == Some(ATTACHMENT_RELEASE)
+    });
+    let release = match existing {
+        Some(release) => release.clone(),
+        None => {
+            let create = json!({ "tag_name": ATTACHMENT_RELEASE, "name": ATTACHMENT_RELEASE, "draft": true });
+            call(client.post(RELEASES_URL).json(&create)).await?
+        }
+    };
+    release["id"].as_u64().ok_or(SendOutcome::RetryLater)
+}
+
+/// Best effort: what's left behind the workflow never deletes.
+async fn delete_assets(client: &reqwest::Client, ids: &[u64]) {
+    for id in ids {
+        let _ = call(client.delete(format!("{RELEASES_URL}/assets/{id}"))).await;
+    }
+}
+
+/// A file that has gone missing is skipped, so it can't hold up the queue.
+async fn upload_images(client: &reqwest::Client, images: &[String], dir: &Path) -> Result<Vec<u64>, SendOutcome> {
+    let release = attachment_release(client).await?;
+    let mut ids = Vec::new();
+    for name in images {
+        let Ok(bytes) = fs::read(dir.join(name)) else { continue };
+        let content_type = if name.ends_with(".png") { "image/png" } else { "image/jpeg" };
+        let uploaded = call(
+            client
+                .post(format!("{UPLOADS_URL}/{release}/assets?name={name}"))
+                .timeout(UPLOAD_TIMEOUT)
+                .header("Content-Type", content_type)
+                .body(bytes),
+        )
+        .await
+        .and_then(|asset| asset["id"].as_u64().ok_or(SendOutcome::RetryLater));
+        match uploaded {
+            Ok(id) => ids.push(id),
+            Err(outcome) => {
+                delete_assets(client, &ids).await;
+                return Err(outcome);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn attachment_marker(ids: &[u64]) -> String {
+    let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+    format!("\n<!-- ampcore-attachments: {} -->", ids.join(","))
+}
+
+async fn post_report(report: &PendingReport, image_dir: &Path) -> SendOutcome {
+    let Ok(client) = client() else { return SendOutcome::RetryLater };
+    let mut body = report.body.clone();
+    let mut ids = Vec::new();
+    if !report.images.is_empty() {
+        match upload_images(&client, &report.images, image_dir).await {
+            Ok(uploaded) => ids = uploaded,
+            Err(outcome) => return outcome,
+        }
+        if !ids.is_empty() {
+            body.push_str(&attachment_marker(&ids));
+        }
+    }
+    let outcome = match call(client.post(INBOX_URL).json(&json!({ "title": report.title, "body": body }))).await {
+        Ok(_) => SendOutcome::Sent,
+        Err(outcome) => outcome,
+    };
+    if outcome != SendOutcome::Sent {
+        delete_assets(&client, &ids).await;
+    }
+    outcome
+}
+
+/// The image's file extension, from its signature: only PNG and JPEG are taken.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else {
+        None
+    }
+}
+
+fn decoded_images(images: &[String]) -> Result<Vec<(Vec<u8>, &'static str)>, AppError> {
+    if images.len() > IMAGES_MAX {
+        return Err(AppError::from(format!("A report can carry up to {IMAGES_MAX} pictures")));
+    }
+    let too_large = || AppError::from(format!("A picture is limited to {} MB", IMAGE_MAX_BYTES / (1024 * 1024)));
+    images
+        .iter()
+        .map(|image| {
+            if image.len() > IMAGE_MAX_BYTES / 3 * 4 + 4 {
+                return Err(too_large());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(image)
+                .map_err(|_| AppError::from("A picture couldn't be read"))?;
+            if bytes.len() > IMAGE_MAX_BYTES {
+                return Err(too_large());
+            }
+            let ext = image_extension(&bytes).ok_or_else(|| AppError::from("Pictures must be PNG or JPEG"))?;
+            Ok((bytes, ext))
+        })
+        .collect()
+}
+
+fn image_dir(queue: &Path) -> PathBuf {
+    queue.with_extension("")
+}
+
+fn save_images(dir: &Path, images: &[(Vec<u8>, &'static str)]) -> Result<Vec<String>, String> {
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    images
+        .iter()
+        .map(|(bytes, ext)| {
+            let name = format!("{}.{ext}", new_id());
+            fs::write(dir.join(&name), bytes).map_err(|e| e.to_string())?;
+            Ok(name)
+        })
+        .collect()
+}
+
+fn remove_images(dir: &Path, names: &[String]) {
+    for name in names {
+        let _ = fs::remove_file(dir.join(name));
     }
 }
 
@@ -161,11 +314,13 @@ fn remove_pending(path: &Path, report: &PendingReport) -> Result<(), String> {
 /// Sends oldest first, stopping at the first report that has to wait: the next
 /// one would only wait as well.
 async fn flush_queue(path: &Path) -> Result<(), String> {
+    let dir = image_dir(path);
     while let Some(report) = first_pending(path)? {
-        if post_report(&report).await == SendOutcome::RetryLater {
+        if post_report(&report, &dir).await == SendOutcome::RetryLater {
             break;
         }
         remove_pending(path, &report)?;
+        remove_images(&dir, &report.images);
     }
     Ok(())
 }
@@ -189,8 +344,16 @@ pub fn start_bug_report_retry(app: &AppHandle) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn bug_report_send(app: AppHandle, title: String, description: String) -> Result<BugReportOutcome, AppError> {
+/// `images` are base64 PNG or JPEG files. They are written to the queue's image
+/// folder first, so sending now and sending later read them the same way.
+pub async fn bug_report_send(
+    app: AppHandle,
+    title: String,
+    description: String,
+    images: Vec<String>,
+) -> Result<BugReportOutcome, AppError> {
     let (title, description) = validated(&title, &description)?;
+    let images = decoded_images(&images)?;
     if TOKEN_MASKED.is_empty() {
         return Err(AppError::from("Bug reports aren't available in this build"));
     }
@@ -200,17 +363,26 @@ pub async fn bug_report_send(app: AppHandle, title: String, description: String)
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
-    let report = PendingReport { title, body };
+    let path = queue_path(&app).map_err(|_| AppError::from("The report couldn't be prepared"))?;
+    let dir = image_dir(&path);
+    let images = save_images(&dir, &images).map_err(|_| AppError::from("The pictures couldn't be prepared"))?;
+    let report = PendingReport { title, body, images };
 
-    match post_report(&report).await {
+    let outcome = post_report(&report, &dir).await;
+    if outcome != SendOutcome::RetryLater {
+        remove_images(&dir, &report.images);
+    }
+    match outcome {
         SendOutcome::Sent => Ok(BugReportOutcome::Sent),
         SendOutcome::Rejected(status) => {
             Err(AppError::from(format!("The report couldn't be sent (error {status})")))
         }
         SendOutcome::RetryLater => {
-            queue_path(&app)
-                .and_then(|path| enqueue(&path, report))
-                .map_err(|_| AppError::from("The report couldn't be sent or saved"))?;
+            let images = report.images.clone();
+            enqueue(&path, report).map_err(|_| {
+                remove_images(&dir, &images);
+                AppError::from("The report couldn't be sent or saved")
+            })?;
             Ok(BugReportOutcome::Saved)
         }
     }
@@ -228,7 +400,47 @@ mod tests {
     }
 
     fn report(title: &str) -> PendingReport {
-        PendingReport { title: title.to_string(), body: "body".to_string() }
+        PendingReport { title: title.to_string(), body: "body".to_string(), images: Vec::new() }
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn images_are_checked_by_count_size_and_signature() {
+        let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
+        let jpg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        let decoded = decoded_images(&[b64(&png), b64(&jpg)]).unwrap();
+        assert_eq!(decoded, vec![(png.clone(), "png"), (jpg, "jpg")]);
+        assert!(decoded_images(&vec![b64(&png); IMAGES_MAX + 1]).is_err());
+        assert!(decoded_images(&[b64(b"GIF89a")]).is_err());
+        assert!(decoded_images(&["not base64!".to_string()]).is_err());
+        let mut big = png;
+        big.resize(IMAGE_MAX_BYTES + 1, 0);
+        assert!(decoded_images(&[b64(&big)]).is_err());
+    }
+
+    #[test]
+    fn a_queue_from_before_images_still_loads() {
+        let path = queue_file();
+        fs::write(&path, r#"[{"title":"a","body":"body"}]"#).unwrap();
+        assert_eq!(load_queue(&path).unwrap(), vec![report("a")]);
+    }
+
+    #[test]
+    fn saved_images_land_beside_the_queue_and_are_removed() {
+        let dir = image_dir(&queue_file());
+        let names = save_images(&dir, &[(vec![1, 2], "png")]).unwrap();
+        assert!(names[0].ends_with(".png"));
+        assert_eq!(fs::read(dir.join(&names[0])).unwrap(), vec![1, 2]);
+        remove_images(&dir, &names);
+        assert!(!dir.join(&names[0]).exists());
+    }
+
+    #[test]
+    fn marker_lists_asset_ids() {
+        assert_eq!(attachment_marker(&[1, 22]), "\n<!-- ampcore-attachments: 1,22 -->");
     }
 
     /// Needs internet. An anonymous POST is refused without creating anything,

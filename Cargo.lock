@@ -53,10 +53,11 @@ dependencies = [
 
 [[package]]
 name = "ampcore-desktop"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "ampcore-core",
  "axum",
+ "base64 0.22.1",
  "reqwest",
  "serde",
  "serde_json",
