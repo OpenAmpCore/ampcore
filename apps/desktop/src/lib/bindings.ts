@@ -230,6 +230,23 @@ export const commands = {
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
 	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
+	/**
+	 *  A new entry from scratch: one way per label, each with neutral values
+	 *  (`SpeakerProcessing::neutral`), edited afterwards in the Presets tab.
+	 */
+	speakersCreate: (details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_create", { details })),
+	speakersDuplicate: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_duplicate", { id })),
+	/**
+	 *  Replaces one way's processing with values edited by hand. Outputs set up
+	 *  from the entry then read "library updated", same as `speakers_update_from_output`.
+	 */
+	speakersSetWayProcessing: (id: string, wayIndex: number, processing: SpeakerProcessing) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_processing", { id, wayIndex, processing })),
+	/**  Appends a way: a copy of way `copy_from`, or neutral values. */
+	speakersAddWay: (id: string, copyFrom: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_add_way", { id, copyFrom })),
+	/**  Removes the entry's last way; see `SpeakerLibraryEntry::remove_last_way`. */
+	speakersRemoveLastWay: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_remove_last_way", { id })),
+	/**  A way's nominal impedance, for the preset editor's watt figures only. */
+	speakersSetWayNominalOhms: (id: string, wayIndex: number, ohms: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_nominal_ohms", { id, wayIndex, ohms })),
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
 	/**
@@ -2301,6 +2318,12 @@ export type SpeakerWay = {
 	 *  kept for a later live write. `None` for a way saved from an output.
 	 */
 	fc57Hex?: string | null,
+	/**
+	 *  The driver's nominal impedance. Only the preset editor's watt figures
+	 *  use it: never applied to an output, never compared, no revision bump.
+	 *  `None` for a way stored before this existed.
+	 */
+	nominalOhms?: number | null,
 };
 
 export type Telemetry = {

@@ -1,6 +1,6 @@
 [package]
 name = "ampcore-desktop"
-version = "0.3.7"
+version = "0.3.8"
 description = "AmpCore"
 authors = ["scalli007YT"]
 edition = "2021"

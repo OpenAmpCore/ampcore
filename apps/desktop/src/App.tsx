@@ -109,6 +109,12 @@ function App() {
               >
                 Operator View
               </Button>
+              <Button
+                variant={workspaceTab === "speakerLibrary" ? "primary" : "ghost"}
+                onPress={() => setWorkspaceTab("speakerLibrary")}
+              >
+                Speaker Library
+              </Button>
             </ButtonGroup>
           ) : undefined
         }
