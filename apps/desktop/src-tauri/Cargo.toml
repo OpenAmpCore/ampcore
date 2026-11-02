@@ -1,6 +1,6 @@
 [package]
 name = "ampcore-desktop"
-version = "0.3.8"
+version = "0.3.9"
 description = "AmpCore"
 authors = ["scalli007YT"]
 edition = "2021"
@@ -23,6 +23,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 tauri-plugin-process = "2"
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 tauri-specta = { version = "2.0.0-rc.25", features = ["derive", "typescript"] }

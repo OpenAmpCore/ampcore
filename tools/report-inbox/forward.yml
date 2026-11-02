@@ -1,7 +1,11 @@
 # Copy to .github/workflows/forward.yml in OpenAmpCore/ampcore-reports-inbox.
 # Moves each report the app drops there into the private ampcore-reports repo,
-# so the token inside the app has nothing to read. REPORTS_TOKEN: Issues
-# read/write on both repos, plus whatever deleting an inbox issue requires.
+# so the token inside the app has nothing to read. Screenshots arrive as assets
+# of the inbox's draft "attachments" release, named by an ampcore-attachments
+# marker in the body; they are committed to ampcore-reports/attachments/ and
+# deleted from the inbox. REPORTS_TOKEN: Issues read/write on both repos,
+# Contents read/write on both (assets, the commit), plus whatever deleting an
+# inbox issue requires.
 name: Forward bug report
 
 on:
@@ -27,13 +31,38 @@ jobs:
           HOURLY_CAP: 20
         run: |
           set -euo pipefail
+          # Asset ids are digits only; anything else in the marker is ignored.
+          ids=$(printf '%s\n' "$BODY" | sed -n 's/^<!-- ampcore-attachments: \([0-9,]*\) -->$/\1/p' | head -n 1 | tr ',' ' ')
+          body=$(printf '%s\n' "$BODY" | sed '/^<!-- ampcore-attachments:/d')
+
+          # Copies one asset to ampcore-reports and prints its image link; any
+          # failure just leaves that picture out.
+          attach() {
+            local name ext path
+            name=$(gh api "repos/$INBOX/releases/assets/$1" --jq .name) || return 1
+            case "$name" in *.png|*.jpg) ext="${name##*.}" ;; *) return 1 ;; esac
+            gh api -H "Accept: application/octet-stream" "repos/$INBOX/releases/assets/$1" > img || return 1
+            [ "$(stat -c%s img)" -le 5242880 ] || return 1
+            path="attachments/$1.$ext"
+            jq -n --rawfile c <(base64 -w0 img) --arg m "Report attachment $1" '{message: $m, content: $c}' > req.json
+            gh api -X PUT "repos/$REPORTS/contents/$path" --input req.json > /dev/null || return 1
+            printf '\n\n![screenshot](https://github.com/%s/blob/HEAD/%s?raw=true)' "$REPORTS" "$path"
+          }
+
           # The app caps a description at 8000; its footer needs the extra room.
           # The hourly count is approximate when reports arrive at the same time.
           since=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
           recent=$(gh issue list -R "$REPORTS" --state all --search "created:>=$since" --limit 100 --json number --jq length)
-          if [ "${#TITLE}" -le 200 ] && [ "${#BODY}" -le 8200 ] && [ "$recent" -lt "$HOURLY_CAP" ]; then
-            gh issue create -R "$REPORTS" --title "$TITLE" --body "$BODY"
+          if [ "${#TITLE}" -le 200 ] && [ "${#body}" -le 8200 ] && [ "$recent" -lt "$HOURLY_CAP" ]; then
+            # The app sends at most three.
+            for id in $(echo $ids | cut -d' ' -f1-3); do
+              body+=$(attach "$id") || echo "Skipped attachment $id"
+            done
+            gh issue create -R "$REPORTS" --title "$TITLE" --body "$body"
           else
             echo "Dropped report: over a size limit or the hourly cap"
           fi
+          for id in $ids; do
+            gh api -X DELETE "repos/$INBOX/releases/assets/$id" || true
+          done
           gh issue delete "$NUMBER" -R "$INBOX" --yes
