@@ -35,6 +35,14 @@ use super::fingerprint::{
 use super::project::{AmpAssignment, AmpChannel, ChannelEq, ChannelFir, Limiter, SpeakerRef};
 use crate::live::cvr::speaker_data::{decode_speaker_data, hex_to_bytes, SpeakerData};
 
+/// The speaker library's format, in `speakers.json` and export files. Separate
+/// from the project format, since the library lives outside any project.
+/// Migrations and the newer-file check live in `store.rs::migrate_speakers`.
+///
+/// 0: a bare list of entries, before the format had a version.
+/// 1: the same entries, wrapped with this version.
+pub const CURRENT_SPEAKER_LIBRARY_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerProcessing {
