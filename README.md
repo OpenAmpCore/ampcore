@@ -46,7 +46,7 @@ also plan a whole rig before the gig and send it to the amps on site. It's a rep
 <summary>Good to know</summary>
 
 - A hardware preset brings back the selected input source, but not that source's trim and delay.
-- Amps on firmware 1.1.8 don't report their gain, so Gain and SEN show "—".
+- On firmware 1.1.8, Gain and SEN follow the top 18 dB of the volume fader, as in the vendor app, and can't be set separately.
 
 </details>
 

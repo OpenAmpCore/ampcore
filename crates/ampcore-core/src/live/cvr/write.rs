@@ -78,10 +78,11 @@ pub fn build_set_output_volume(firmware_family: Option<&str>, channel_index: u8,
     is_known_family(firmware_family).then(|| super::write_v118::build_set_output_volume(channel_index, volume_db))
 }
 
-/// FC=8 amp gain — see `write_v118::build_set_amp_gain`. Read back correctly
-/// on 1.1.9; 1.1.8 shares the encoder but is unverified.
+/// FC=8 amp gain — see `write_v118::build_set_amp_gain`. 1.1.9 only: on 1.1.8
+/// FC=8 sets the front-panel LCD contrast from the body's first byte (36.0 dB
+/// would blank the display), and the amp's gain is fixed.
 pub fn build_set_amp_gain(firmware_family: Option<&str>, channel_index: u8, gain_db: f32) -> Option<Vec<u8>> {
-    is_known_family(firmware_family).then(|| super::write_v118::build_set_amp_gain(channel_index, gain_db))
+    (firmware_family == Some("1.1.9")).then(|| super::write_v118::build_set_amp_gain(channel_index, gain_db))
 }
 
 pub fn build_set_delay_in(firmware_family: Option<&str>, channel_index: u8, delay_ms: f32) -> Option<Vec<u8>> {
@@ -439,6 +440,13 @@ fn has_following_fragment(packet: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1.1.8's FC=8 is LCD contrast, so no gain write may reach it.
+    #[test]
+    fn amp_gain_is_never_sent_to_1_1_8() {
+        assert!(build_set_amp_gain(Some("1.1.8"), 0, 36.0).is_none());
+        assert!(build_set_amp_gain(Some("1.1.9"), 0, 36.0).is_some());
+    }
 
     /// 1.1.9's threshold rides on its own FC=87 packet; 1.1.8 sends only the
     /// 1-byte FC=69 enable. Never the old 2-byte FC=69 body.
