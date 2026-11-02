@@ -16,7 +16,7 @@ use ampcore_core::live::state::LiveDeviceState;
 use ampcore_core::data::project::{AmpAssignment, CanvasPosition, Project, ProjectSpeaker, SpeakerRef, MAX_PARALLEL};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
-    speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
+    check_way_count, remap_way_refs, speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
 };
 use ampcore_core::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use ampcore_core::error::AppError;
@@ -208,9 +208,7 @@ pub fn speakers_update_details(
 #[tauri::command]
 #[specta::specta]
 pub fn speakers_create(app: AppHandle, state: State<ProjectDataState>, details: SpeakerDetails) -> Result<SpeakerLibraryEntry, AppError> {
-    if details.way_labels.is_empty() {
-        return Err(AppError::from("A speaker needs at least one way"));
-    }
+    check_way_count(details.way_labels.len())?;
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     let processing = details.way_labels.iter().map(|_| SpeakerProcessing::neutral()).collect();
     let entry = SpeakerLibraryEntry::new(details, processing)?;
@@ -229,70 +227,38 @@ pub fn speakers_duplicate(app: AppHandle, state: State<ProjectDataState>, id: St
     Ok(copy)
 }
 
-/// Replaces one way's processing with values edited by hand. Outputs set up
-/// from the entry then read "library updated", same as `speakers_update_from_output`.
+/// Stores the library editor's edit of an entry in one go; see
+/// `SpeakerLibraryEntry::save_edit` for `origins` and when the revision
+/// moves. Outputs in every project set up from the entry follow their way
+/// (`remap_way_refs`); those on a removed way lose the speaker.
 #[tauri::command]
 #[specta::specta]
-pub fn speakers_set_way_processing(
+pub fn speakers_save(
     app: AppHandle,
     state: State<ProjectDataState>,
     id: String,
-    way_index: u32,
-    processing: SpeakerProcessing,
+    entry: SpeakerLibraryEntry,
+    origins: Vec<Option<u32>>,
 ) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = find_entry(&mut inner.speakers, &id)?;
-    entry.set_way_processing(way_index, processing)?;
-    let entry = entry.clone();
-    saved_library(&app, &inner)?;
-    Ok(entry)
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = &mut *guard;
+    let stored = find_entry(&mut inner.speakers, &id)?;
+    stored.save_edit(entry, &origins)?;
+    let stored = stored.clone();
+    saved_library(&app, inner)?;
+    for project in inner.projects.iter_mut().filter_map(|p| remap_way_refs(p, &id, &origins).then_some(p)) {
+        project.touch();
+        save_project_file(&inner.data_dir, project).map_err(AppError::from)?;
+        app.emit("project:updated", &*project).ok();
+    }
+    Ok(stored)
 }
 
-/// A way's nominal impedance, for the preset editor's watt figures only.
+/// A fresh output's values, for a way the editor adds from scratch.
 #[tauri::command]
 #[specta::specta]
-pub fn speakers_set_way_nominal_ohms(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    id: String,
-    way_index: u32,
-    ohms: Option<f64>,
-) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = find_entry(&mut inner.speakers, &id)?;
-    entry.set_way_nominal_ohms(way_index, ohms)?;
-    let entry = entry.clone();
-    saved_library(&app, &inner)?;
-    Ok(entry)
-}
-
-/// Appends a way: a copy of way `copy_from`, or neutral values.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_add_way(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    id: String,
-    copy_from: Option<u32>,
-) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = find_entry(&mut inner.speakers, &id)?;
-    entry.add_way(copy_from)?;
-    let entry = entry.clone();
-    saved_library(&app, &inner)?;
-    Ok(entry)
-}
-
-/// Removes the entry's last way; see `SpeakerLibraryEntry::remove_last_way`.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_remove_last_way(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = find_entry(&mut inner.speakers, &id)?;
-    entry.remove_last_way()?;
-    let entry = entry.clone();
-    saved_library(&app, &inner)?;
-    Ok(entry)
+pub fn speakers_neutral_processing() -> SpeakerProcessing {
+    SpeakerProcessing::neutral()
 }
 
 /// Outputs set up from the entry keep their values and read as detached.

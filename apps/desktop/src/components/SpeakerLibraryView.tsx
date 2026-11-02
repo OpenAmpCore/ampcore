@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button, ButtonGroup, Chip, Modal, Spinner, Switch, toast } from "@heroui/react";
-import { Copy, FileUp, Minus, Plus, Trash2, X } from "lucide-react";
+import { Copy, FileUp, Minus, Plus, Save, Trash2, Undo2, Upload } from "lucide-react";
 import {
   commands,
   type AmpAssignment,
@@ -11,8 +11,9 @@ import {
   type SpeakerDetails,
   type SpeakerLibraryEntry,
   type SpeakerProcessing,
+  type SpeakerWay,
 } from "../lib/bindings";
-import { actionFailed, toActionResult, type ActionResult } from "../lib/actionResult";
+import { ACTION_OK, actionFailed, type ActionResult } from "../lib/actionResult";
 import { useIsCompact } from "../lib/breakpoints";
 import type { ConfigureActions } from "../lib/configureActions";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
@@ -27,6 +28,7 @@ import { SimpleSelect } from "./SimpleSelect";
 import { MUTED, RowMenu } from "./SpeakerBench";
 import { ImportModal } from "./SpeakersTab";
 import { FIELD_INPUT } from "./fieldClasses";
+import { useProjectSpeakers } from "./useProjectSpeakers";
 
 const SECTION_TITLE =
   "text-[length:var(--amp-font-size-xs)] font-semibold uppercase tracking-widest text-[var(--amp-color-dimmed)]";
@@ -41,10 +43,28 @@ const REFUSED = "Not part of a speaker.";
 
 const DEFAULT_OHMS = 8;
 
+/** Most ways a speaker can have; `save_edit` refuses more. */
+const MAX_WAYS = 4;
+
+/** Unsaved edits, by speaker id: the whole entry as edited. Module-level, like
+ * `JOINS` in `SpeakersTab.tsx`, so leaving the tab or picking another speaker
+ * keeps them; Save stores one with a single `speakersSave`.
+ * ponytail: lost when the app closes; persist them if that bites. */
+const DRAFTS = new Map<string, SpeakerLibraryEntry>();
+
+/** Way `i` of a draft was way `origins[i]` of the stored speaker (`null`: a
+ * new way), so a save can move outputs along when a way is removed. Kept
+ * beside `DRAFTS`; absent while the ways are the stored ones in order. */
+const ORIGINS = new Map<string, (number | null)[]>();
+
+const storedOrder = (entry: SpeakerLibraryEntry) => entry.ways.map((_, i): number | null => i);
+
+const UNSAVED_DOT = "block size-2 shrink-0 rounded-full bg-[var(--amp-color-orange-6)]";
+
 /** One way as the single output channel of a stand-in amp, so the Configure
  * tab's own editors (EQ, limiter, FIR) edit a speaker exactly as they edit an
- * output. A field the speaker leaves out (`None`) shows the new-output value.
- * `ohms` is the way's nominal impedance, which only the watt figures use. */
+ * output. `ohms` is the way's nominal impedance, which only the watt figures
+ * use. */
 function wayAssignment(
   p: SpeakerProcessing,
   ohms: number,
@@ -65,12 +85,12 @@ function wayAssignment(
         limiter: p.limiter,
         delayOutMs: p.delayOutMs,
         outputPhaseInverted: p.phaseInverted,
-        outputTrimDb: p.outputTrimDb ?? 0,
-        noiseGateEnabled: p.noiseGateEnabled ?? false,
-        noiseGateThresholdDbu: p.noiseGateThresholdDbu ?? 0,
-        powerMode: p.powerMode ?? "lowOhm",
-        firBypassed: p.firBypassed ?? false,
-        fir: p.fir ?? undefined,
+        outputTrimDb: p.outputTrimDb,
+        noiseGateEnabled: p.noiseGateEnabled,
+        noiseGateThresholdDbu: p.noiseGateThresholdDbu,
+        powerMode: p.powerMode,
+        firBypassed: p.firBypassed,
+        fir: p.fir,
       },
     ],
   };
@@ -167,10 +187,28 @@ function wayActions(
  * for the selected speaker — its details, its ways, and every value a way
  * carries (output EQ, both limiters, delay, polarity, trim, noise gate, power
  * mode, FIR). Ranges come from a reference amp model, since a speaker itself
- * belongs to no amp. Applying a speaker to outputs stays in an amp's Speakers
- * tab. */
-export function SpeakerLibraryView({ project, ampModels }: { project: Project; ampModels: AmpModelCatalogEntry[] | null }) {
+ * belongs to no amp. Edits stay a draft until Save, so tweaking never touches
+ * `speakers.json` or the project's outputs. A save that changes values leaves
+ * this project's outputs on the older revision, and the editor offers to
+ * update them; applying a speaker to new outputs stays in the Workspace and
+ * an amp's Speakers tab. */
+export function SpeakerLibraryView({
+  project,
+  onProjectUpdate,
+  ampModels,
+}: {
+  project: Project;
+  onProjectUpdate: (project: Project) => void;
+  ampModels: AmpModelCatalogEntry[] | null;
+}) {
   const library = useSpeakerLibrary();
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  const [saving, setSaving] = useState(false);
+  const nameFor = (amp: AmpAssignment) => {
+    const model = ampModels?.find((m) => m.id === amp.ampModelId);
+    return amp.deviceName ?? (model ? `${model.brand} ${model.model}` : "Unnamed");
+  };
+  const projectSpeakers = useProjectSpeakers({ project, onProjectUpdate, nameFor });
   const compact = useIsCompact();
   const { confirm, dialog } = useConfirm();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -208,6 +246,47 @@ export function SpeakerLibraryView({ project, ampModels }: { project: Project; a
     if (!ok) return;
     const r = await commands.speakersDelete(entry.id);
     if (r.status !== "ok") toast.danger("Speaker not deleted", { description: r.error.message });
+    else discard(entry.id);
+  }
+
+  /** Applies `change` to the speaker's draft, and `reorder` to its way
+   * origins when ways are added or removed; a draft back at the stored values
+   * is no draft. Reads `DRAFTS` itself, so edits made in one go build on each
+   * other. */
+  const updateDraft = (stored: SpeakerLibraryEntry): Update => (change, reorder) => {
+    const next = change(DRAFTS.get(stored.id) ?? stored);
+    const current = ORIGINS.get(stored.id) ?? storedOrder(stored);
+    const origins = reorder ? reorder(current) : current;
+    const inOrder = JSON.stringify(origins) === JSON.stringify(storedOrder(stored));
+    if (inOrder && JSON.stringify(next) === JSON.stringify(stored)) {
+      discard(stored.id);
+      return;
+    }
+    DRAFTS.set(stored.id, next);
+    if (inOrder) ORIGINS.delete(stored.id);
+    else ORIGINS.set(stored.id, origins);
+    redraw();
+  };
+
+  function discard(id: string) {
+    DRAFTS.delete(id);
+    ORIGINS.delete(id);
+    redraw();
+  }
+
+  async function save(id: string) {
+    const draft = DRAFTS.get(id);
+    if (!draft || saving) return;
+    setSaving(true);
+    const r = await commands.speakersSave(id, draft, ORIGINS.get(id) ?? storedOrder(draft));
+    setSaving(false);
+    if (r.status !== "ok") {
+      toast.danger("Speaker not saved", { description: r.error.message });
+      return;
+    }
+    // Only what was saved: an edit made while the save was out stays a draft.
+    if (DRAFTS.get(id) === draft) discard(id);
+    else redraw();
   }
 
   function handleAction(entry: SpeakerLibraryEntry, action: string) {
@@ -274,6 +353,11 @@ export function SpeakerLibraryView({ project, ampModels }: { project: Project; a
                       {[entry.family, entry.application].filter(Boolean).join(" · ") || "—"}
                     </span>
                   </div>
+                  {DRAFTS.has(entry.id) && (
+                    <Hint text="Unsaved changes" className="flex">
+                      <span className={UNSAVED_DOT} />
+                    </Hint>
+                  )}
                   <Chip size="sm" color="default">
                     {entry.ways.length} way
                   </Chip>
@@ -296,6 +380,15 @@ export function SpeakerLibraryView({ project, ampModels }: { project: Project; a
           <SpeakerEditor
             key={selected.id}
             entry={selected}
+            draft={DRAFTS.get(selected.id) ?? selected}
+            dirty={DRAFTS.has(selected.id)}
+            saving={saving}
+            update={updateDraft(selected)}
+            onSave={() => void save(selected.id)}
+            onDiscard={() => discard(selected.id)}
+            behind={projectSpeakers.behindLibrary(selected.id)}
+            updatingOutputs={projectSpeakers.busy}
+            onUpdateOutputs={() => void projectSpeakers.updateFromLibrary(selected.id)}
             project={project}
             ampModels={ampModels}
             onDuplicate={() => void duplicate(selected)}
@@ -307,6 +400,7 @@ export function SpeakerLibraryView({ project, ampModels }: { project: Project; a
       </main>
       <CreateModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(id) => setSelectedId(id)} />
       <ImportModal open={importOpen} onClose={() => setImportOpen(false)} />
+      {projectSpeakers.elements}
       {dialog}
     </div>
   );
@@ -336,43 +430,12 @@ function Toggle({ value, onChange, label }: { value: boolean; onChange: (value: 
   );
 }
 
-/** A labelled value of a way. `onUnset` marks a field a speaker may leave
- * out: unset, applying the speaker leaves the amp's own value. */
-function Field({
-  label,
-  set = true,
-  onSet,
-  onUnset,
-  children,
-}: {
-  label: string;
-  set?: boolean;
-  onSet?: () => void;
-  onUnset?: () => void;
-  children: ReactNode;
-}) {
+/** A labelled value of a way. */
+function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex min-h-9 items-center gap-3">
       <span className="w-36 shrink-0 text-sm">{label}</span>
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        {set ? (
-          children
-        ) : (
-          <>
-            <span className={`${MUTED} flex-1`}>Not in this speaker — the amp keeps its own value</span>
-            <Button size="sm" variant="secondary" onPress={onSet}>
-              Set
-            </Button>
-          </>
-        )}
-      </div>
-      {set && onUnset && (
-        <Hint text="Leave out of this speaker: the amp keeps its own value" className="flex">
-          <Button size="sm" variant="ghost" isIconOnly aria-label={`Leave ${label} out of this speaker`} onPress={onUnset}>
-            <X size={14} />
-          </Button>
-        </Hint>
-      )}
+      <div className="flex min-w-0 flex-1 items-center gap-2">{children}</div>
     </div>
   );
 }
@@ -386,14 +449,40 @@ const WAY_PANES: { id: WayPane; label: string }[] = [
   { id: "fir", label: "FIR" },
 ];
 
+type Update = (
+  change: (draft: SpeakerLibraryEntry) => SpeakerLibraryEntry,
+  reorder?: (origins: (number | null)[]) => (number | null)[],
+) => void;
+
 function SpeakerEditor({
   entry,
+  draft,
+  dirty,
+  saving,
+  update,
+  onSave,
+  onDiscard,
+  behind,
+  updatingOutputs,
+  onUpdateOutputs,
   project,
   ampModels,
   onDuplicate,
   onDelete,
 }: {
+  /** The speaker as stored. */
   entry: SpeakerLibraryEntry;
+  /** The speaker as edited here: `entry` itself while nothing is unsaved. */
+  draft: SpeakerLibraryEntry;
+  dirty: boolean;
+  saving: boolean;
+  update: Update;
+  onSave: () => void;
+  onDiscard: () => void;
+  /** This project's outputs still on an older revision of this speaker. */
+  behind: string[];
+  updatingOutputs: boolean;
+  onUpdateOutputs: () => void;
   project: Project;
   ampModels: AmpModelCatalogEntry[] | null;
   onDuplicate: () => void;
@@ -401,126 +490,153 @@ function SpeakerEditor({
 }) {
   const [wayIndex, setWayIndex] = useState(0);
   const [pane, setPane] = useState<WayPane>("output");
-  const way = entry.ways[Math.min(wayIndex, entry.ways.length - 1)];
+  const shownWay = Math.min(wayIndex, draft.ways.length - 1);
+  const way = draft.ways[shownWay];
   const reference = useReferenceAmp(project, ampModels);
+  const invalid = !draft.brand.trim() || !draft.model.trim();
+  const canSave = dirty && !saving && !invalid;
 
-  // The way's values as last edited here. Edits apply at once and are saved in
-  // order; the library's echo only takes over once none is in flight, so a
-  // second edit never builds on values older than the first.
-  const [draft, setDraft] = useState(way.processing);
-  const draftRef = useRef(draft);
-  const pending = useRef(0);
-  const queue = useRef<Promise<unknown>>(Promise.resolve());
-  const shownWay = Math.min(wayIndex, entry.ways.length - 1);
-  const wayKey = JSON.stringify(way.processing);
-  const draftWay = useRef(shownWay);
+  // The editors get callbacks that stay put while the draft changes under
+  // them (`ResponseGraph` is memoised on its props).
+  const latest = useRef({ update, onSave, canSave });
+  latest.current = { update, onSave, canSave };
   useEffect(() => {
-    // Another way always takes over; the same way's echo only when idle.
-    if (draftWay.current !== shownWay || pending.current === 0) {
-      draftWay.current = shownWay;
-      draftRef.current = way.processing;
-      setDraft(way.processing);
+    function onKey(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (latest.current.canSave) latest.current.onSave();
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wayKey, shownWay]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
+  const setWay = useMemo(
+    () => (change: (w: SpeakerWay) => SpeakerWay) =>
+      latest.current.update((d) => ({ ...d, ways: d.ways.map((w, i) => (i === shownWay ? change(w) : w)) })),
+    [shownWay],
+  );
   const edit = useMemo(
     () =>
       (change: (p: SpeakerProcessing) => SpeakerProcessing): Promise<ActionResult> => {
-        const next = change(draftRef.current);
-        draftRef.current = next;
-        setDraft(next);
-        pending.current += 1;
-        const saved = queue.current.then(() => commands.speakersSetWayProcessing(entry.id, shownWay, next));
-        queue.current = saved;
-        return saved.then((r) => {
-          pending.current -= 1;
-          if (r.status !== "ok") {
-            toast.danger("Speaker not saved", { description: r.error.message, timeout: 0 });
-          }
-          return toActionResult(r);
-        });
+        setWay((w) => ({ ...w, processing: change(w.processing) }));
+        return Promise.resolve(ACTION_OK);
       },
-    [entry.id, shownWay],
+    [setWay],
+  );
+  const actions = useMemo(
+    () =>
+      wayActions(edit, async (ohms) => {
+        setWay((w) => ({ ...w, nominalOhms: ohms }));
+        return ACTION_OK;
+      }),
+    [edit, setWay],
   );
   // A way without a stored impedance reads as 8 Ω, a new output's default.
-  const storedOhms = way.nominalOhms ?? DEFAULT_OHMS;
-  const [ohms, setOhms] = useState(storedOhms);
-  useEffect(() => setOhms(storedOhms), [storedOhms, shownWay]);
-  const saveOhms = useMemo(
-    () =>
-      async (next: number): Promise<ActionResult> => {
-        setOhms(next);
-        const r = await commands.speakersSetWayNominalOhms(entry.id, shownWay, next);
-        if (r.status !== "ok") {
-          setOhms(storedOhms);
-          toast.danger("Impedance not saved", { description: r.error.message });
-        }
-        return toActionResult(r);
-      },
-    [entry.id, shownWay, storedOhms],
-  );
-  const actions = useMemo(() => wayActions(edit, saveOhms), [edit, saveOhms]);
+  const ohms = way.nominalOhms ?? DEFAULT_OHMS;
 
   const assignment = useMemo(
-    () => wayAssignment(draft, ohms, reference.modelId, reference.firmware),
-    [draft, ohms, reference.modelId, reference.firmware],
+    () => wayAssignment(way.processing, ohms, reference.modelId, reference.firmware),
+    [way.processing, ohms, reference.modelId, reference.firmware],
   );
   const capability = reference.capability;
 
+  const full = draft.ways.length >= MAX_WAYS;
+
   async function addWay(copyFrom: number | null) {
-    const r = await commands.speakersAddWay(entry.id, copyFrom);
-    if (r.status === "ok") setWayIndex(r.data.ways.length - 1);
-    else toast.danger("Way not added", { description: r.error.message });
+    const from = copyFrom === null ? null : draft.ways[copyFrom];
+    const processing = from ? from.processing : await commands.speakersNeutralProcessing();
+    update(
+      (d) => ({
+        ...d,
+        ways: [...d.ways, { label: `Way ${d.ways.length + 1}`, processing, fc57Hex: null, nominalOhms: from?.nominalOhms ?? null }],
+      }),
+      (origins) => [...origins, null],
+    );
+    setWayIndex(draft.ways.length);
   }
 
-  async function removeLastWay() {
-    const r = await commands.speakersRemoveLastWay(entry.id);
-    if (r.status === "ok") setWayIndex((i) => Math.min(i, r.data.ways.length - 1));
-    else toast.danger("Way not removed", { description: r.error.message });
+  /** Removes the shown way. On save, outputs set up from it lose their
+   * speaker (values stay) and those on later ways move along with them. */
+  function removeShownWay() {
+    const keep = (_: unknown, i: number) => i !== shownWay;
+    update((d) => ({ ...d, ways: d.ways.filter(keep) }), (origins) => origins.filter(keep));
+    setWayIndex(Math.max(0, shownWay - 1));
   }
 
   return (
     <div className="mx-auto flex w-full max-w-[1180px] min-w-0 flex-col gap-5">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="min-w-0 flex-1 truncate text-lg font-semibold">{speakerName(entry)}</h2>
-        <Hint text="Bumped on every change to a way's values; outputs set up from an older revision show “Library updated”.">
+        <h2 className="min-w-0 flex-1 truncate text-lg font-semibold">{speakerName(draft)}</h2>
+        <Hint text="Moves on each save that changes a way's values; outputs set up from an older revision show “Library updated”.">
           <Chip size="sm" color="default">
             Revision {entry.revision}
           </Chip>
         </Hint>
-        <Button size="sm" variant="secondary" onPress={onDuplicate}>
-          <Copy size={14} /> Duplicate
-        </Button>
+        {dirty && (
+          <>
+            <span className="flex items-center gap-1.5 text-sm">
+              <span className={UNSAVED_DOT} /> Unsaved changes
+            </span>
+            <Button size="sm" variant="ghost" isDisabled={saving} onPress={onDiscard}>
+              <Undo2 size={14} /> Discard
+            </Button>
+          </>
+        )}
+        <Hint text={invalid ? "Brand and model are required" : "Save to the library (Ctrl+S)"}>
+          <Button size="sm" variant="primary" isDisabled={!canSave} onPress={onSave}>
+            {saving ? <Spinner size="sm" /> : <Save size={14} />} Save
+          </Button>
+        </Hint>
+        <Hint text={dirty ? "Copies the saved speaker, without the unsaved changes" : "Copy this speaker"}>
+          <Button size="sm" variant="secondary" onPress={onDuplicate}>
+            <Copy size={14} /> Duplicate
+          </Button>
+        </Hint>
         <Button size="sm" variant="danger" onPress={onDelete}>
           <Trash2 size={14} /> Delete
         </Button>
       </div>
 
-      <DetailsSection entry={entry} />
+      {behind.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2">
+          <span className="min-w-0 flex-1 text-sm">
+            {behind.length === 1 ? "1 output in this project still holds" : `${behind.length} outputs in this project still hold`} an
+            older revision: {behind.join(", ")}
+          </span>
+          <Hint text={dirty ? "Save or discard your changes first" : "Write this speaker's saved values to them"}>
+            <Button size="sm" variant="primary" isDisabled={dirty || updatingOutputs} onPress={onUpdateOutputs}>
+              <Upload size={14} /> Update outputs
+            </Button>
+          </Hint>
+        </div>
+      )}
+
+      <DetailsSection draft={draft} update={update} />
 
       <Section
         title="Ways"
         trailing={
           <div className="flex items-center gap-1">
-            <Button size="sm" variant="ghost" onPress={() => void addWay(null)}>
-              <Plus size={14} /> Add way
-            </Button>
-            <Hint text={`Append a copy of “${way.label}” as a new way`}>
-              <Button size="sm" variant="ghost" onPress={() => void addWay(shownWay)}>
-                <Copy size={14} /> Copy way
+            <Hint text={full ? `A speaker has at most ${MAX_WAYS} ways` : "Append a way with flat values"}>
+              <Button size="sm" variant="ghost" isDisabled={full} onPress={() => void addWay(null)}>
+                <Plus size={14} /> Add way
               </Button>
             </Hint>
-            <Hint text="Only the last way can be removed, so the others keep their place on every output">
-              <Button
-                size="sm"
-                variant="ghost"
-                isIconOnly
-                aria-label="Remove the last way"
-                isDisabled={entry.ways.length <= 1}
-                onPress={() => void removeLastWay()}
-              >
-                <Minus size={14} />
+            <Hint text={full ? `A speaker has at most ${MAX_WAYS} ways` : `Append a copy of “${way.label}” as a new way`}>
+              <Button size="sm" variant="ghost" isDisabled={full} onPress={() => void addWay(shownWay)}>
+                <Copy size={14} /> Duplicate way
+              </Button>
+            </Hint>
+            <Hint
+              text={
+                draft.ways.length <= 1
+                  ? "A speaker needs at least one way"
+                  : `Removes “${way.label}”. On save, outputs set up from it keep their values but lose this speaker; the other ways keep their outputs.`
+              }
+            >
+              <Button size="sm" variant="ghost" isDisabled={draft.ways.length <= 1} onPress={removeShownWay}>
+                <Minus size={14} /> Remove way
               </Button>
             </Hint>
           </div>
@@ -529,12 +645,25 @@ function SpeakerEditor({
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-3">
             <ButtonGroup size="sm">
-              {entry.ways.map((w, i) => (
+              {draft.ways.map((w, i) => (
                 <Button key={i} variant={i === shownWay ? "primary" : "ghost"} onPress={() => setWayIndex(i)}>
-                  {w.label}
+                  {w.label || `Way ${i + 1}`}
                 </Button>
               ))}
             </ButtonGroup>
+            <label className="flex items-center gap-2">
+              <span className={MUTED}>Label</span>
+              <input
+                className={`${FIELD_INPUT} w-40`}
+                aria-label="Way label"
+                placeholder={draft.ways.length === 1 ? "Full" : `Way ${shownWay + 1}`}
+                value={way.label}
+                onChange={(e) => {
+                  const label = e.currentTarget.value;
+                  setWay((w) => ({ ...w, label }));
+                }}
+              />
+            </label>
             <div className="flex-1" />
             <ButtonGroup size="sm">
               {WAY_PANES.map((p) => (
@@ -550,7 +679,7 @@ function SpeakerEditor({
               {reference.loading ? <Spinner size="sm" /> : "Pick a reference amp model to edit the values."}
             </div>
           ) : pane === "output" ? (
-            <OutputPane processing={draft} capability={capability} edit={edit} />
+            <OutputPane processing={way.processing} capability={capability} edit={edit} />
           ) : pane === "eq" ? (
             <EqEditor
               key={`eq:${shownWay}`}
@@ -574,8 +703,8 @@ function SpeakerEditor({
               channelIndex={0}
               label={way.label}
               capability={capability}
-              bypassed={draft.firBypassed ?? false}
-              stored={draft.fir ?? undefined}
+              bypassed={way.processing.firBypassed}
+              stored={way.processing.fir}
               onBypassChange={(next) => actions.setChannelFirBypass(0, next)}
               onImportData={(name, coefficients) => actions.setChannelFirData!(0, name, coefficients)}
               onClearData={() => actions.clearChannelFirData!(0)}
@@ -590,7 +719,8 @@ function SpeakerEditor({
 type Edit = (change: (p: SpeakerProcessing) => SpeakerProcessing) => Promise<ActionResult>;
 
 /** Delay, polarity, trim, noise gate, power mode and FIR bypass of one way.
- * The fields after polarity are optional in a speaker. */
+ * A speaker carries all of them; applying it writes every one (as far as the
+ * target amp can hold it). */
 function OutputPane({ processing: p, capability, edit }: { processing: SpeakerProcessing; capability: AmpCapability; edit: Edit }) {
   const ranges = capability.paramRanges;
   const set = (patch: Partial<SpeakerProcessing>) => void edit((current) => ({ ...current, ...patch }));
@@ -611,12 +741,7 @@ function OutputPane({ processing: p, capability, edit }: { processing: SpeakerPr
       <Field label="Polarity inverted">
         <Toggle label="Polarity inverted" value={p.phaseInverted} onChange={(v) => set({ phaseInverted: v })} />
       </Field>
-      <Field
-        label="Output trim"
-        set={p.outputTrimDb != null}
-        onSet={() => set({ outputTrimDb: 0 })}
-        onUnset={() => set({ outputTrimDb: null })}
-      >
+      <Field label="Output trim">
         <div className="w-40">
           <CommitNumberInput
             value={p.outputTrimDb ?? 0}
@@ -628,49 +753,38 @@ function OutputPane({ processing: p, capability, edit }: { processing: SpeakerPr
           />
         </div>
       </Field>
-      <Field
-        label="Noise gate"
-        set={p.noiseGateEnabled != null}
-        onSet={() =>
-          set({ noiseGateEnabled: false, noiseGateThresholdDbu: p.noiseGateThresholdDbu ?? ranges.noiseGateThresholdDbu.min ?? 0 })
-        }
-        onUnset={() => set({ noiseGateEnabled: null, noiseGateThresholdDbu: null })}
-      >
-        <Toggle label="Noise gate" value={p.noiseGateEnabled ?? false} onChange={(v) => set({ noiseGateEnabled: v })} />
-        {capability.firmware.noiseGateThreshold && (
-          <div className="w-40">
-            <CommitNumberInput
-              value={p.noiseGateThresholdDbu ?? 0}
-              min={ranges.noiseGateThresholdDbu.min ?? undefined}
-              max={ranges.noiseGateThresholdDbu.max ?? undefined}
-              step={1}
-              suffix=" dBu"
-              onCommit={(v) => set({ noiseGateThresholdDbu: v })}
-            />
-          </div>
-        )}
+      <Field label="Noise gate">
+        <Toggle label="Noise gate" value={p.noiseGateEnabled} onChange={(v) => set({ noiseGateEnabled: v })} />
+        {/* Always editable: a speaker carries it even for amps whose firmware has no threshold. */}
+        <Hint
+          text={
+            capability.firmware.noiseGateThreshold
+              ? "Noise gate threshold"
+              : "The reference firmware has no threshold; amps without one keep their own"
+          }
+          className="w-40"
+        >
+          <CommitNumberInput
+            value={p.noiseGateThresholdDbu ?? 0}
+            min={ranges.noiseGateThresholdDbu.min ?? undefined}
+            max={ranges.noiseGateThresholdDbu.max ?? undefined}
+            step={1}
+            suffix=" dBu"
+            onCommit={(v) => set({ noiseGateThresholdDbu: v })}
+          />
+        </Hint>
       </Field>
-      <Field
-        label="Power mode"
-        set={p.powerMode != null}
-        onSet={() => set({ powerMode: capability.topology.powerModes[0] ?? "lowOhm" })}
-        onUnset={() => set({ powerMode: null })}
-      >
+      <Field label="Power mode">
         <div className="w-40">
           <SimpleSelect
             data={capability.topology.powerModes.map((mode) => ({ value: mode, label: POWER_MODE_LABELS[mode] }))}
-            value={p.powerMode ?? null}
+            value={p.powerMode}
             onChange={(v) => v && set({ powerMode: v as PowerMode })}
           />
         </div>
       </Field>
-      <Field
-        label="FIR bypassed"
-        set={p.firBypassed != null}
-        onSet={() => set({ firBypassed: false })}
-        onUnset={() => set({ firBypassed: null })}
-      >
-        <Toggle label="FIR bypassed" value={p.firBypassed ?? false} onChange={(v) => set({ firBypassed: v })} />
+      <Field label="FIR bypassed">
+        <Toggle label="FIR bypassed" value={p.firBypassed} onChange={(v) => set({ firBypassed: v })} />
       </Field>
     </div>
   );
@@ -762,56 +876,12 @@ const DETAIL_FIELDS = [
   ["application", "Application", false],
 ] as const;
 
-function detailsOf(entry: SpeakerLibraryEntry): SpeakerDetails {
-  const { brand, model, family, application, notes } = entry;
-  return { brand, model, family, application, notes, wayLabels: entry.ways.map((w) => w.label) };
-}
-
-/** Name, notes and way labels. Saved together, never touching the values. */
-function DetailsSection({ entry }: { entry: SpeakerLibraryEntry }) {
-  const [draft, setDraft] = useState(() => detailsOf(entry));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const saved = JSON.stringify(detailsOf(entry));
-  // Follows the library (a way added or removed) without dropping unsaved
-  // edits; with nothing unsaved it simply takes the new details.
-  const [base, setBase] = useState(saved);
-  if (saved !== base) {
-    setBase(saved);
-    if (JSON.stringify(draft) === base) setDraft(detailsOf(entry));
-    else setDraft((d) => ({ ...d, wayLabels: entry.ways.map((w, i) => d.wayLabels[i] ?? w.label) }));
-  }
-  const dirty = JSON.stringify(draft) !== saved;
-  const set = (patch: Partial<SpeakerDetails>) => setDraft((d) => ({ ...d, ...patch }));
-
-  async function save() {
-    setSaving(true);
-    const r = await commands.speakersUpdateDetails(entry.id, draft);
-    setSaving(false);
-    setError(r.status === "ok" ? null : r.error.message);
-  }
-
+/** The speaker's name and notes, edited in the same draft as the values.
+ * Anything per way (its label) lives with the way, under Ways. */
+function DetailsSection({ draft, update }: { draft: SpeakerLibraryEntry; update: Update }) {
+  const set = (patch: Partial<SpeakerLibraryEntry>) => update((d) => ({ ...d, ...patch }));
   return (
-    <Section
-      title="Details"
-      trailing={
-        <>
-          {dirty && (
-            <Button size="sm" variant="ghost" isDisabled={saving} onPress={() => setDraft(detailsOf(entry))}>
-              Revert
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="primary"
-            isDisabled={!dirty || saving || !draft.brand.trim() || !draft.model.trim()}
-            onPress={() => void save()}
-          >
-            {saving ? <Spinner size="sm" /> : "Save details"}
-          </Button>
-        </>
-      }
-    >
+    <Section title="Details">
       <div className="flex flex-col gap-3">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {DETAIL_FIELDS.map(([key, label, required]) => (
@@ -824,12 +894,10 @@ function DetailsSection({ entry }: { entry: SpeakerLibraryEntry }) {
             </label>
           ))}
         </div>
-        <WayLabelFields labels={draft.wayLabels} onChange={(wayLabels) => set({ wayLabels })} />
         <label className="flex flex-col gap-1">
           <span className={MUTED}>Notes</span>
           <textarea className={FIELD_INPUT} rows={2} value={draft.notes} onChange={(e) => set({ notes: e.currentTarget.value })} />
         </label>
-        {error && <span className="text-sm text-danger">{error}</span>}
       </div>
     </Section>
   );
@@ -853,7 +921,6 @@ function WayLabelFields({ labels, onChange }: { labels: string[]; onChange: (lab
   );
 }
 
-const MAX_NEW_WAYS = 4;
 const EMPTY_DETAILS: SpeakerDetails = { brand: "", model: "", family: "", application: "", notes: "", wayLabels: [""] };
 
 /** A new speaker from scratch: name and way count. Every way starts neutral
@@ -907,7 +974,7 @@ function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () 
               </div>
               <SimpleSelect
                 label="Ways"
-                data={Array.from({ length: MAX_NEW_WAYS }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))}
+                data={Array.from({ length: MAX_WAYS }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))}
                 value={String(draft.wayLabels.length)}
                 onChange={(v) => {
                   const n = Number(v ?? 1);

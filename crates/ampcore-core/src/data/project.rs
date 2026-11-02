@@ -34,7 +34,7 @@ pub struct MatrixCrosspoint {
 /// `filter_type` (e.g. "BW-12" always means Q=1/sqrt(2), never a
 /// user-settable independent value), confirmed against the old app's
 /// reference UI. Has `active` — HP/LP slots are independently bypassable.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CrossoverSlot {
     pub filter_type: CrossoverFilterType,
@@ -45,7 +45,7 @@ pub struct CrossoverSlot {
 /// One of the 8 parametric bands (bands 1-8 of the fixed 10-band chain).
 /// `active` mirrors `MatrixCrosspoint.active` — lets a band be fully
 /// disengaged independent of its stored gain/freq/Q.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EqBand {
     pub filter_type: EqFilterType,
@@ -61,7 +61,7 @@ pub struct EqBand {
 /// `bands.len()` == `AmpDspTopology.eq_bands_per_channel - 2`; grown/shrunk
 /// alongside `channels` whenever the assigned model's topology changes, see
 /// `reconcile_eq_bands`.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelEq {
     pub hp: CrossoverSlot,
@@ -124,7 +124,7 @@ pub struct CrossoverSlotPatch {
 }
 
 /// RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RmsLimiter {
     pub enabled: bool,
@@ -140,7 +140,7 @@ pub struct RmsLimiter {
 }
 
 /// Instantaneous peak limiter stage — ranged by `AmpParamRanges.peak_limiter_*`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PeakLimiter {
     pub enabled: bool,
@@ -155,7 +155,7 @@ pub struct PeakLimiter {
 /// A channel's output protection: independent RMS and Peak limiter stages,
 /// ported from the old app's `limiter-panel.tsx` (both stages can be engaged
 /// simultaneously, each with its own enable flag).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Limiter {
     pub rms: RmsLimiter,
