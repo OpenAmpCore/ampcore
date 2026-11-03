@@ -26,6 +26,7 @@ use ampcore_core::data::validation::{check_push_action, AmpLimits, LimiterCeilin
 use ampcore_core::data::edit_lock::LiveAmpReading;
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp, FingerprintRow};
 use ampcore_core::data::project::{AmpAssignment, Project};
+use crate::data::store;
 use crate::data::store::{save_project_file, ProjectDataState};
 use ampcore_core::error::AppError;
 use ampcore_core::live::cvr::channel_config::ChannelConfigSnapshot;
@@ -159,16 +160,8 @@ fn push_context(
     assignment_id: &str,
 ) -> Result<PushContext, AppError> {
     let mac = {
-        let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-        let assignment = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?
-            .amp_assignments
-            .iter()
-            .find(|a| a.id == assignment_id)
-            .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+        let inner = project_data.lock()?;
+        let assignment = store::assignment(store::project(&inner.projects, &project_id)?, &assignment_id)?;
         assignment.mac.clone().ok_or_else(|| AppError::from("This amp isn't linked to a network amp".to_string()))?
     };
 
@@ -179,17 +172,9 @@ fn push_context(
         return Err(AppError::from("The linked amp's settings haven't been read yet".to_string()));
     }
 
-    let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let inner = project_data.lock()?;
+    let project = store::project(&inner.projects, &project_id)?;
+    let assignment = store::assignment(project, &assignment_id)?;
     // The link can change while the live store is being read.
     if assignment.mac.as_deref().map(normalize_mac) != Some(normalize_mac(&mac)) {
         return Err(AppError::from("The amp's link changed — try again".to_string()));
@@ -251,16 +236,8 @@ fn build_plan(
     assignment_id: &str,
     candidate: Option<&AmpAssignment>,
 ) -> Result<PushPlan, AppError> {
-    let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let stored = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?
-        .amp_assignments
-        .iter()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let inner = project_data.lock()?;
+    let stored = store::assignment(store::project(&inner.projects, &project_id)?, &assignment_id)?;
     let assignment = candidate.unwrap_or(stored);
     let snapshot = context.reading.snapshot.as_ref().expect("guarded in push_context");
     let bridged = context.reading.bridge.as_ref().map(|b| b.bridged.clone()).unwrap_or_default();
@@ -372,7 +349,7 @@ async fn wait_for_fresh_snapshot(
     let deadline = std::time::Instant::now() + FRESH_SNAPSHOT_TIMEOUT;
     loop {
         {
-            let inner = live.0.lock().map_err(|e| e.to_string())?;
+            let inner = live.lock()?;
             if let Some(snapshot) = inner.channel_config.get(device_id) {
                 if snapshot.received_at > after {
                     return Ok(snapshot.clone());
@@ -650,19 +627,16 @@ async fn push_polled(
     };
     let packets_sent = tally.finish().packets;
     let bridge = {
-        let inner = live.0.lock().map_err(|e| e.to_string())?;
+        let inner = live.lock()?;
         inner.bridge.get(&context.device_id).cloned()
     };
 
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
     let models = inner.amp_models.clone();
     let links = inner.device_model_links.clone();
     let data_dir = inner.data_dir.clone();
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
     let slot = project
         .amp_assignments
         .iter()
@@ -716,7 +690,7 @@ async fn push_polled(
         save_project_file(&data_dir, project).map_err(AppError::from)?;
     }
     let project = project.clone();
-    drop(inner);
+    drop(guard);
     app.emit("project:updated", &project).ok();
 
     let (failed_stage_id, failed_stage_label, error) = match failure {

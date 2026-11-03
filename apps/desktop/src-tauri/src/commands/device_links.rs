@@ -22,7 +22,7 @@ pub fn device_model_link_auto_match(
     digital_input_channels: u32,
     output_channels: u32,
 ) -> Result<Option<AmpModelCatalogEntry>, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.lock()?;
 
     if let Some(existing) = inner.device_model_links.iter().find(|l| l.mac == mac) {
         if !existing.auto_matched {
@@ -67,7 +67,7 @@ pub fn device_model_link_set(
     mac: String,
     amp_model_id: Option<String>,
 ) -> Result<Option<DeviceModelLink>, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.lock()?;
 
     inner.device_model_links.retain(|l| l.mac != mac);
     let result = amp_model_id.map(|amp_model_id| DeviceModelLink {
@@ -87,6 +87,6 @@ pub fn device_model_link_set(
 #[tauri::command]
 #[specta::specta]
 pub fn device_model_link_get_all(state: State<ProjectDataState>) -> Result<Vec<DeviceModelLink>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.device_model_links.clone())
 }

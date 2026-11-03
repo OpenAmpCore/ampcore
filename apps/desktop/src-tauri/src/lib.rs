@@ -37,20 +37,26 @@ use commands::live_control::{
 };
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_duplicate, projects_export, projects_get,
-    projects_import, projects_list, projects_load_problems,
-    projects_remove_amp_assignment, projects_set_amp_device_name, projects_set_amp_model, projects_set_channel_delay_in,
-    projects_set_channel_fir, projects_set_channel_fir_bypass, projects_set_channel_input_mute, projects_set_channel_limiter, projects_copy_channel_section,
-    projects_paste_channel_section, projects_set_channel_name,
+    projects_import, projects_list, projects_load_problems, projects_remove_amp_assignment, projects_set_amp_model,
+    projects_update,
+};
+use commands::amp_settings::{
+    projects_copy_channel_section, projects_paste_channel_section, projects_set_amp_device_name,
+    projects_set_backup_priority, projects_set_channel_delay_in, projects_set_channel_fir, projects_set_channel_fir_bypass,
+    projects_set_channel_input_mute, projects_set_channel_limiter, projects_set_channel_name,
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
-    projects_set_channel_source, projects_set_crossover_slot, projects_set_eq_band,
-    projects_set_matrix_crosspoint, projects_set_output_bridge, projects_update,
-    projects_set_source_trim, projects_set_backup_priority,
+    projects_set_channel_source, projects_set_crossover_slot, projects_set_eq_band, projects_set_matrix_crosspoint,
+    projects_set_output_bridge, projects_set_source_trim,
 };
 use commands::speakers::{
-    projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_speaker_position, projects_set_channel_speaker, speakers_apply, speakers_channel_states, speakers_delete, speakers_export, speakers_fit, speakers_import_profiles, speakers_list,
-    speakers_save_from_outputs, speakers_update_details, speakers_update_from_output,
-    speakers_create, speakers_duplicate, speakers_save, speakers_neutral_processing,
+    projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_channel_speaker,
+    projects_set_speaker_position, speakers_apply, speakers_channel_states, speakers_fit,
+};
+use commands::speaker_library::{
+    speakers_create, speakers_delete, speakers_duplicate, speakers_export, speakers_import_profiles, speakers_list,
+    speakers_neutral_processing, speakers_save, speakers_save_from_outputs, speakers_update_details,
+    speakers_update_from_output,
 };
 use ampcore_core::live::state::LiveDeviceState;
 use data::store::ProjectDataState;

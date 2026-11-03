@@ -1,5 +1,6 @@
-//! The speaker library (`speakers.json`) and project outputs' references into
-//! it. The logic lives in `ampcore_core::data::speaker`; these are the thin
+//! Speakers on project outputs: fitting a library speaker to an amp, applying
+//! it, and the project speakers the Workspace places. The library itself is
+//! `speaker_library.rs`. The logic lives in `ampcore_core::data::speaker`; these are the thin
 //! Tauri wrappers.
 //!
 //! `speakers_apply` is the one way values get in, and it has no write path of
@@ -7,318 +8,25 @@
 //! (`amp_push::push_assignment`), the same endpoint the online/offline sync
 //! uses. Offline, the copy is simply saved.
 
+
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use ampcore_core::live::state::LiveDeviceState;
 
-use ampcore_core::data::project::{AmpAssignment, CanvasPosition, Project, ProjectSpeaker, SpeakerRef, MAX_PARALLEL};
+use ampcore_core::data::project::{CanvasPosition, Project, ProjectSpeaker, SpeakerRef, MAX_PARALLEL};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
-    check_way_count, remap_way_refs, speaker_states, ChannelSpeakerState, OldProfile, SpeakerDetails, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
+    speaker_states, ChannelSpeakerState, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
 };
 use ampcore_core::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use ampcore_core::error::AppError;
 
 use super::amp_write::save_or_push;
-use crate::data::exchange::{add_missing, export_library, import_library};
-use crate::data::store::{save_project_file, save_speakers, ProjectDataInner, ProjectDataState};
-
-fn saved_library(app: &AppHandle, inner: &ProjectDataInner) -> Result<(), AppError> {
-    save_speakers(&inner.data_dir, &inner.speakers).map_err(AppError::from)?;
-    app.emit("speakers:updated", &inner.speakers).ok();
-    Ok(())
-}
-
-/// `edit_assignment` (see `projects.rs`) with the library in reach, for the
-/// commands that touch both. The library is saved first only when `edit`
-/// reports it changed it.
-fn edit_with_library(
-    app: &AppHandle,
-    state: &State<ProjectDataState>,
-    project_id: &str,
-    assignment_id: &str,
-    edit: impl FnOnce(&mut Vec<SpeakerLibraryEntry>, &mut AmpAssignment) -> Result<bool, AppError>,
-) -> Result<Project, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    let inner = &mut *guard;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {project_id} not found")))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {assignment_id} not found")))?;
-    let library_changed = edit(&mut inner.speakers, assignment)?;
-    project.touch();
-    let project = project.clone();
-
-    if library_changed {
-        saved_library(app, inner)?;
-    }
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
-}
-
-fn find_entry<'a>(library: &'a mut [SpeakerLibraryEntry], id: &str) -> Result<&'a mut SpeakerLibraryEntry, AppError> {
-    library.iter_mut().find(|e| e.id == id).ok_or_else(|| AppError::from("That speaker is no longer in the library"))
-}
-
-fn channel_mut(
-    assignment: &mut AmpAssignment,
-    channel_index: u32,
-) -> Result<&mut ampcore_core::data::project::AmpChannel, AppError> {
-    assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {channel_index} not found")))
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_list(state: State<ProjectDataState>) -> Result<Vec<SpeakerLibraryEntry>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(inner.speakers.clone())
-}
-
-#[derive(Debug, Clone, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileUpload {
-    pub file_name: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileImportResult {
-    pub file_name: String,
-    /// Why the file can't be imported; `None` when it can (or was).
-    pub error: Option<String>,
-    /// The entry the file makes. Not in the library unless `commit` was set.
-    pub entry: Option<SpeakerLibraryEntry>,
-    /// Brand, family and model already exist in the library — imported anyway.
-    pub duplicate: bool,
-}
-
-/// The whole library as an export file's text (`data/exchange.rs`), for the
-/// caller to save where the user picks.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_export(state: State<ProjectDataState>) -> Result<String, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    export_library(&inner.speakers).map_err(AppError::from)
-}
-
-/// Parses the old app's speaker preset files (JSON) and this app's exported
-/// libraries — one result per speaker, so a library file gives several. A
-/// library speaker keeps its id, so projects that reference it find it; one
-/// this library already has (same id) is reported and left out. With
-/// `commit`, every importable speaker is added to the library; without,
-/// nothing is saved (the import preview).
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_import_profiles(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    files: Vec<ProfileUpload>,
-    commit: bool,
-) -> Result<Vec<ProfileImportResult>, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let key = |e: &SpeakerLibraryEntry| (e.brand.to_lowercase(), e.family.to_lowercase(), e.model.to_lowercase());
-    let results: Vec<ProfileImportResult> = files
-        .into_iter()
-        .flat_map(|file| match import_library(&file.text) {
-            Some(Ok(entries)) => entries
-                .into_iter()
-                .map(|entry| {
-                    if inner.speakers.iter().any(|e| e.id == entry.id) {
-                        ProfileImportResult {
-                            file_name: file.file_name.clone(),
-                            error: Some(format!("{} {} is already in this library", entry.brand, entry.model)),
-                            entry: None,
-                            duplicate: false,
-                        }
-                    } else {
-                        ProfileImportResult {
-                            duplicate: inner.speakers.iter().any(|e| key(e) == key(&entry)),
-                            file_name: file.file_name.clone(),
-                            error: None,
-                            entry: Some(entry),
-                        }
-                    }
-                })
-                .collect::<Vec<_>>(),
-            Some(Err(error)) => vec![ProfileImportResult { file_name: file.file_name, error: Some(error), entry: None, duplicate: false }],
-            None => vec![import_profile(&inner.speakers, file, key)],
-        })
-        .collect();
-
-    if commit {
-        add_missing(&mut inner.speakers, results.iter().filter_map(|r| r.entry.clone()).collect(), |e| &e.id);
-        saved_library(&app, &inner)?;
-    }
-    Ok(results)
-}
-
-/// One old-app speaker preset file as an import result.
-fn import_profile(
-    library: &[SpeakerLibraryEntry],
-    file: ProfileUpload,
-    key: impl Fn(&SpeakerLibraryEntry) -> (String, String, String),
-) -> ProfileImportResult {
-    let parsed = serde_json::from_str::<OldProfile>(&file.text)
-        .map_err(|e| format!("not a speaker preset file: {e}"))
-        .and_then(|profile| SpeakerLibraryEntry::from_profile(&profile));
-    match parsed {
-        Ok(entry) => ProfileImportResult {
-            duplicate: library.iter().any(|e| key(e) == key(&entry)),
-            file_name: file.file_name,
-            error: None,
-            entry: Some(entry),
-        },
-        Err(error) => ProfileImportResult { file_name: file.file_name, error: Some(error), entry: None, duplicate: false },
-    }
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_update_details(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    id: String,
-    details: SpeakerDetails,
-) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = find_entry(&mut inner.speakers, &id)?;
-    entry.set_details(details)?;
-    let entry = entry.clone();
-    saved_library(&app, &inner)?;
-    Ok(entry)
-}
-
-/// A new entry from scratch: one way per label, each with neutral values
-/// (`SpeakerProcessing::neutral`), edited afterwards in the Presets tab.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_create(app: AppHandle, state: State<ProjectDataState>, details: SpeakerDetails) -> Result<SpeakerLibraryEntry, AppError> {
-    check_way_count(details.way_labels.len())?;
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let processing = details.way_labels.iter().map(|_| SpeakerProcessing::neutral()).collect();
-    let entry = SpeakerLibraryEntry::new(details, processing)?;
-    inner.speakers.push(entry.clone());
-    saved_library(&app, &inner)?;
-    Ok(entry)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_duplicate(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let copy = find_entry(&mut inner.speakers, &id)?.duplicate();
-    inner.speakers.push(copy.clone());
-    saved_library(&app, &inner)?;
-    Ok(copy)
-}
-
-/// Stores the library editor's edit of an entry in one go; see
-/// `SpeakerLibraryEntry::save_edit` for `origins` and when the revision
-/// moves. Outputs in every project set up from the entry follow their way
-/// (`remap_way_refs`); those on a removed way lose the speaker.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_save(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    id: String,
-    entry: SpeakerLibraryEntry,
-    origins: Vec<Option<u32>>,
-) -> Result<SpeakerLibraryEntry, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    let inner = &mut *guard;
-    let stored = find_entry(&mut inner.speakers, &id)?;
-    stored.save_edit(entry, &origins)?;
-    let stored = stored.clone();
-    saved_library(&app, inner)?;
-    for project in inner.projects.iter_mut().filter_map(|p| remap_way_refs(p, &id, &origins).then_some(p)) {
-        project.touch();
-        save_project_file(&inner.data_dir, project).map_err(AppError::from)?;
-        app.emit("project:updated", &*project).ok();
-    }
-    Ok(stored)
-}
-
-/// A fresh output's values, for a way the editor adds from scratch.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_neutral_processing() -> SpeakerProcessing {
-    SpeakerProcessing::neutral()
-}
-
-/// Outputs set up from the entry keep their values and read as detached.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_delete(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<(), AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    inner.speakers.retain(|e| e.id != id);
-    saved_library(&app, &inner)
-}
-
-/// Creates a library entry from consecutive outputs — one way per output, in
-/// order — and sets those outputs up from it.
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_save_from_outputs(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    project_id: String,
-    assignment_id: String,
-    channel_indices: Vec<u32>,
-    details: SpeakerDetails,
-) -> Result<Project, AppError> {
-    edit_with_library(&app, &state, &project_id, &assignment_id, |library, assignment| {
-        let processing = channel_indices
-            .iter()
-            .map(|&i| channel_mut(assignment, i).map(|c| SpeakerProcessing::from_channel(c)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut entry = SpeakerLibraryEntry::new(details, processing)?;
-        for (way, &i) in channel_indices.iter().enumerate() {
-            let channel = channel_mut(assignment, i)?;
-            // The output's load is the best guess at the speaker's impedance.
-            entry.ways[way].nominal_ohms = Some(channel.ohms).filter(|o| *o > 0.0);
-            channel.speaker = Some(entry.reference(way as u32)?);
-        }
-        library.push(entry);
-        Ok(true)
-    })
-}
-
-/// Replaces one way of an entry with an output's current values. Only that
-/// output is marked current; every other output set up from the entry then
-/// reads "library updated".
-#[tauri::command]
-#[specta::specta]
-pub fn speakers_update_from_output(
-    app: AppHandle,
-    state: State<ProjectDataState>,
-    project_id: String,
-    assignment_id: String,
-    channel_index: u32,
-) -> Result<Project, AppError> {
-    edit_with_library(&app, &state, &project_id, &assignment_id, |library, assignment| {
-        let channel = channel_mut(assignment, channel_index)?;
-        let speaker = channel.speaker.clone().ok_or("This output has no speaker")?;
-        let entry = find_entry(library, &speaker.library_id)?;
-        entry.set_way_processing(speaker.way_index, SpeakerProcessing::from_channel(channel))?;
-        channel.speaker = Some(entry.reference(speaker.way_index)?);
-        Ok(true)
-    })
-}
+use super::speaker_library::{edit_with_library, find_entry};
+use crate::data::store;
+use crate::data::store::ProjectDataState;
 
 /// One output's way, fitted to the amp it is going onto.
 struct FittedWay {
@@ -392,7 +100,7 @@ fn fit_ways(
     assignment_id: &str,
     items: &[SpeakerItem],
 ) -> Result<Vec<FittedWay>, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.lock()?;
     let inner = &mut *guard;
     let project = inner.projects.iter().find(|p| p.id == project_id).ok_or_else(|| AppError::from("amp not found"))?;
     let assignment =
@@ -484,7 +192,7 @@ pub async fn speakers_apply(
 
     save_or_push(&app, &state, &live, project_id, assignment_id, "the speaker", |candidate, _| {
         for f in fitted {
-            let channel = channel_mut(candidate, f.channel_index)?;
+            let channel = store::channel_mut(candidate, f.channel_index)?;
             f.processing.apply_to(channel);
             channel.speaker = Some(f.reference);
             if f.output_name.is_some() {
@@ -511,7 +219,7 @@ pub fn projects_set_channel_speaker(
     channel_index: u32,
 ) -> Result<Project, AppError> {
     edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
-        channel_mut(assignment, channel_index)?.speaker = None;
+        store::channel_mut(assignment, channel_index)?.speaker = None;
         Ok(false)
     })
 }
@@ -523,19 +231,11 @@ fn edit_project(
     project_id: &str,
     edit: impl FnOnce(&[SpeakerLibraryEntry], &mut Project) -> Result<(), AppError>,
 ) -> Result<Project, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.lock()?;
     let inner = &mut *guard;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {project_id} not found")))?;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
     edit(&inner.speakers, project)?;
-    project.touch();
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    store::commit(&app, &inner.data_dir, project)
 }
 
 /// Places a library speaker in the project, linked to nothing yet — a group
@@ -629,7 +329,7 @@ pub fn speakers_channel_states(
     project_id: String,
     assignment_id: String,
 ) -> Result<Vec<ChannelSpeakerState>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     let assignment = inner
         .projects
         .iter()

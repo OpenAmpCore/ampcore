@@ -11,7 +11,7 @@
 //!
 //! Load (`ohms`) is local, never written or hashed, so it is saved directly.
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::capability::cvr::{cvr_param_ranges, CvrFirmwareCapability};
@@ -20,7 +20,7 @@ use ampcore_core::data::project::{AmpAssignment, Project};
 use ampcore_core::data::validation::AmpLimits;
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
-use crate::data::store::{save_project_file, ProjectDataState};
+use crate::data::store::{assignment, assignment_mut, commit, project, project_mut, ProjectDataState};
 
 use super::amp_links::{amp_lock, pull_from_live, read_linked_amp};
 use super::amp_push::{push_assignment, Candidate};
@@ -51,26 +51,13 @@ pub(crate) fn edit_plan(
     assignment_id: &str,
     edit: impl FnOnce(&mut AmpAssignment, &AmpLimits) -> Result<(), AppError>,
 ) -> Result<Project, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.lock()?;
     let inner = &mut *guard;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let project = project_mut(&mut inner.projects, project_id)?;
+    let assignment = assignment_mut(project, assignment_id)?;
     let limits = assignment_limits(&inner.amp_models, assignment);
     edit(assignment, &limits)?;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    commit(app, &inner.data_dir, project)
 }
 
 /// A copy of the project amp as stored now, with its limits.
@@ -79,14 +66,8 @@ fn candidate_of(
     project_id: &str,
     assignment_id: &str,
 ) -> Result<(AmpAssignment, AmpLimits), AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    let assignment = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
-        .cloned()
-        .ok_or_else(|| AppError::from("amp not found"))?;
+    let inner = state.lock()?;
+    let assignment = assignment(project(&inner.projects, project_id)?, assignment_id)?.clone();
     let limits = assignment_limits(&inner.amp_models, &assignment);
     Ok((assignment, limits))
 }
