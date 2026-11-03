@@ -372,6 +372,21 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
     }
 }
 
+/// Every CVR amp on `firmware_version`, no model: the ranges are the
+/// firmware's alone (`cvr_param_ranges`), every power mode is offered, and
+/// there is no rated voltage, so limiter thresholds are bounded by the range.
+/// For a library speaker, whose values `SpeakerProcessing::fit` bounds to
+/// the real amp when it is applied.
+pub fn resolve_firmware(firmware_version: Option<&str>) -> AmpCapability {
+    let firmware = CvrFirmwareCapability::from_version(firmware_version);
+    AmpCapability {
+        topology: builtin_topology("", 1, false),
+        firmware,
+        param_ranges: cvr_param_ranges(&firmware),
+        eq_filter_capabilities: super::eq_filter_capabilities(),
+    }
+}
+
 /// `resolve_live` for a CVR amp: everything comes from the firmware string,
 /// rated voltage included.
 pub fn resolve_live(firmware_version: &str) -> LiveCapability {
@@ -465,6 +480,20 @@ mod tests {
 
     fn ranges(fw: Option<&str>) -> AmpParamRanges {
         cvr_param_ranges(&CvrFirmwareCapability::from_version(fw))
+    }
+
+    /// Without a model: the firmware's own ranges and features, every power
+    /// mode, and no rated voltage to cap the limiter.
+    #[test]
+    fn a_firmware_alone_gives_its_ranges_without_a_rating() {
+        let model = crate::data::test_fixtures::models().remove(0);
+        for fw in ["1.1.8", "1.1.9"] {
+            let (bare, with_model) = (resolve_firmware(Some(fw)), resolve(&model, Some(fw)));
+            assert_eq!(bare.firmware.v_num, with_model.firmware.v_num, "{fw}");
+            assert_eq!(bare.param_ranges.delay_in_ms.max, with_model.param_ranges.delay_in_ms.max, "{fw}");
+            assert_eq!(bare.topology.rated_rms_voltage, None);
+            assert_eq!(bare.topology.power_modes, [PowerMode::LowOhm, PowerMode::V70, PowerMode::V100]);
+        }
     }
 
     /// 1.1.9 raises the input delay ceiling to 300 ms (vendor

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from "react";
 import {
   Popover,
   Button,
@@ -478,7 +478,7 @@ const OUTPUT_ROW_MAX_WIDTH = 1180;
  * so this standalone-controlled form (a `triggerRef` div wrapping the tile,
  * `isOpen`/`onOpenChange` driven by the caller) is repeated at every call
  * site — centralized here once rather than by hand ~20 times over. */
-function TilePopover({
+export function TilePopover({
   opened,
   onOpenChange,
   trigger,
@@ -1021,7 +1021,23 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
   v100: "100V",
 };
 
-function OutputChannelRow({
+/** A thread through the centre of every wrapped line of 52px tiles (8px
+ * gap): the Speaker Library's "pearl necklace". CSS only, so it follows
+ * `flex-wrap` without measuring anything. */
+const PEARL_THREAD: CSSProperties = {
+  backgroundImage:
+    "linear-gradient(to bottom, transparent 25px, var(--amp-color-default-border) 25px, var(--amp-color-default-border) 27px, transparent 27px)",
+  backgroundSize: "100% 60px",
+  backgroundRepeat: "repeat-y",
+};
+
+/** The pearls: tiles are see-through, so each one gets the page behind it,
+ * or the thread would run across its face. Every child of the cluster is
+ * exactly one tile's box (see `TilePopover`'s `flex` wrapper). */
+const PEARLS = "[&>*]:rounded-md [&>*]:bg-[var(--background)]";
+
+export function OutputChannelRow({
+  preset,
   rmsThresholdRangeMax,
   channel,
   speaker,
@@ -1049,6 +1065,10 @@ function OutputChannelRow({
   onMuteToggle,
   onRename,
 }: {
+  /** A speaker way in the Speaker Library rather than a live output: no
+   * meter, readouts, Mute or Vol (volume is never part of a speaker), LIM
+   * lit while a limiter stage is on, and the tiles strung on a thread. */
+  preset?: { defaultLabel: string; trailing: ReactNode };
   channel: AmpAssignment["channels"][number];
   /** The library speaker this output was set up from, if any. */
   speaker?: ChannelSpeakerState;
@@ -1129,12 +1149,12 @@ function OutputChannelRow({
   return (
     <div>
       <RenameableLabel
-        defaultLabel={`Out${outputLetter(channel.channelIndex)}`}
+        defaultLabel={preset?.defaultLabel ?? `Out${outputLetter(channel.channelIndex)}`}
         name={channel.outputName}
         maxLength={nameMaxLength}
         onRename={onRename}
         trailing={
-          <>
+          preset ? preset.trailing : <>
             {speaker && (
               <div className="flex min-w-0 items-center gap-1.5">
                 <Hint text="Open in the Speakers tab" className="min-w-0">
@@ -1158,7 +1178,7 @@ function OutputChannelRow({
         }
       />
       <div className="flex items-center gap-2">
-        <ChannelLevelMeter
+        {!preset && <ChannelLevelMeter
           level={scale.reading(telemetry)}
           scale={scale}
           disabled={muted}
@@ -1172,7 +1192,7 @@ function OutputChannelRow({
                 }
               : undefined
           }
-        />
+        />}
         {/* The tiles wrap as their own cluster, never mixed in with the meter.
          * Every tile is exactly `STAT_TILE_W`, so a wrapped line starts a new
          * row of the same columns — a grid, rather than the single orphan tile
@@ -1186,7 +1206,11 @@ function OutputChannelRow({
          * speaker tuning (EQ/FIR/Delay/Pol), dynamics (LIM/Gate), and the amp
          * hardware setting (Mode) last. Deliberately not a signal-flow order —
          * the CVR DSP chain order is not confirmed. */}
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div
+          className={`flex min-w-0 flex-wrap items-center gap-2 ${preset ? PEARLS : ""}`}
+          style={preset ? PEARL_THREAD : undefined}
+        >
+          {!preset && <>
           <StatReadout
             value={
               telemetry.outputVoltage === null
@@ -1253,6 +1277,7 @@ function OutputChannelRow({
             </div>
           </TilePopover>
           </LinkTarget>
+          </>}
           <LinkTarget scope="trimOut" channel={channel.channelIndex}>
           <TilePopover
             opened={openPopover === "trim"}
@@ -1302,6 +1327,9 @@ function OutputChannelRow({
             onClick={onOpenEq}
           />
           </LinkTarget>
+          {/* Wrapped like its neighbours: `PEARLS` paints a direct child, and a
+              tile's own inline `background` would win over it. */}
+          <div className="flex">
           <StatEditorTile
             label="FIR"
             opens="view"
@@ -1309,6 +1337,7 @@ function OutputChannelRow({
             icon={<Waves size={16} />}
             onClick={onOpenFir}
           />
+          </div>
           <LinkTarget scope="delayOut" channel={channel.channelIndex}>
           <TilePopover
             opened={openPopover === "delay"}
@@ -1361,6 +1390,7 @@ function OutputChannelRow({
             icon={<FlipVertical2 size={16} />}
           />
           </LinkTarget>
+          <div className="flex">
           <StatEditorTile
             label="LIM"
             opens="view"
@@ -1372,11 +1402,14 @@ function OutputChannelRow({
             // momentary number that stops mattering the instant you look away;
             // the accent alone answers "is it limiting right now."
             modified={
-              telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0
+              preset
+                ? limiter.rms.enabled || limiter.peak.enabled
+                : telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0
             }
-            accent="var(--amp-color-red-6)"
+            accent={preset ? "var(--accent)" : "var(--amp-color-red-6)"}
             icon={<ListPlus size={16} />}
           />
+          </div>
           {/* Firmware without an adjustable threshold (1.1.8) has nothing to
            * put in a dropdown but the same on/off state the pill already
            * shows — a popover there was a second click to reach a switch that
@@ -1617,7 +1650,7 @@ function MainSection({
 }
 
 /** Which per-channel editor the Main tab has open in its dialog. */
-type EditorTarget = { kind: "inputEq" | "outputEq" | "fir" | "limiter"; channelIndex: number };
+export type EditorTarget = { kind: "inputEq" | "outputEq" | "fir" | "limiter"; channelIndex: number };
 
 const EDITOR_TITLES: Record<EditorTarget["kind"], string> = {
   inputEq: "Input EQ",
@@ -1639,7 +1672,7 @@ const EDITOR_MAX_WIDTH: Record<EditorTarget["kind"], string> = {
 /** The EQ, FIR and limiter editors, opened from a channel row's tile as in the
  * old app. The channel switcher at the top keeps each axis's convention —
  * inputs numbered, outputs lettered — and leaves out a bridged follower. */
-function ChannelEditorModal({
+export function ChannelEditorModal({
   target,
   onTargetChange,
   assignment,
@@ -1648,14 +1681,22 @@ function ChannelEditorModal({
   telemetry,
   deviceId,
   locked,
+  channelLabel,
+  limiterMeters,
 }: Pick<ConfigurableTabProps, "assignment" | "capability" | "actions" | "telemetry" | "deviceId" | "locked"> & {
   target: EditorTarget | null;
   onTargetChange: (target: EditorTarget | null) => void;
+  /** The switcher's and title's name for a channel, in place of the usual
+   * number or letter (the Speaker Library names its ways). */
+  channelLabel?: (channelIndex: number) => string;
+  /** `LimiterEditor`'s sliders and meters; off in the Speaker Library. */
+  limiterMeters?: boolean;
 }) {
   const compact = useIsCompact();
   const isInput = target?.kind === "inputEq";
   const channel = assignment.channels.find((c) => c.channelIndex === target?.channelIndex) ?? assignment.channels[0];
-  const label = (channelIndex: number) => (isInput ? String(channelIndex + 1) : outputLetter(channelIndex));
+  const label = (channelIndex: number) =>
+    channelLabel?.(channelIndex) ?? (isInput ? String(channelIndex + 1) : outputLetter(channelIndex));
   const channels = isInput
     ? assignment.channels
     : assignment.channels.filter(
@@ -1719,6 +1760,7 @@ function ChannelEditorModal({
                       telemetry={channelTelemetry(telemetry, channel.channelIndex, capability.topology.ratedRmsVoltage)}
                       capability={capability}
                       actions={actions}
+                      meters={limiterMeters}
                     />
                   ) : (
                     <EqEditor

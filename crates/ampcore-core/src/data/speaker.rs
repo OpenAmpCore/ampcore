@@ -101,10 +101,12 @@ impl SpeakerProcessing {
         }
     }
 
-    /// A fresh output's values — flat EQ, both limiters off, no delay, no
-    /// FIR: what a way created from scratch starts from.
+    /// A fresh output's values — flat EQ, both limiters off, no delay — with
+    /// the FIR bypassed, since its filter is empty: what a way created from
+    /// scratch starts from.
     pub fn neutral() -> Self {
-        Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0])
+        let fresh = Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0]);
+        Self { fir_bypassed: fresh.fir.same_taps(&[1.0]), ..fresh }
     }
 
     /// The peak floor is applied here, once (`with_peak_floor`). The blob's
@@ -885,6 +887,7 @@ mod tests {
         let entry = SpeakerLibraryEntry::from_profile(&profile).unwrap();
         let way = &entry.ways[0].processing;
         let neutral = SpeakerProcessing::neutral();
+        assert!(neutral.fir_bypassed, "a fresh way's empty FIR starts bypassed");
         assert_eq!(
             (way.output_trim_db, way.noise_gate_enabled, way.power_mode),
             (neutral.output_trim_db, neutral.noise_gate_enabled, neutral.power_mode)

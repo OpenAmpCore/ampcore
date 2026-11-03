@@ -89,6 +89,10 @@ interface LimiterEditorProps {
   telemetry?: ChannelTelemetry;
   capability: AmpCapability;
   actions: ConfigureActions;
+  /** The threshold sliders and level meters above the fields. Off for a
+   * Speaker Library way: nothing is live there, and the fields below set the
+   * same thresholds. */
+  meters?: boolean;
 }
 
 /** Output protection editor for one channel — independent RMS and Peak
@@ -106,6 +110,7 @@ export function LimiterEditor({
   capability,
   actions,
   telemetry,
+  meters = true,
 }: LimiterEditorProps) {
   const tight = useIsTight();
   const channel = assignment.channels.find((c) => c.channelIndex === channelIndex) ?? assignment.channels[0];
@@ -277,6 +282,8 @@ export function LimiterEditor({
           />
         ))}
       </div>
+      {meters && (
+        <>
       {/* `1fr` is `minmax(auto, 1fr)`, so four columns can't shrink below
        * their content and would push the window into a horizontal scroll.
        * Below `useIsTight` they fold to 2x2 — same order, two rows. */}
@@ -339,6 +346,8 @@ export function LimiterEditor({
           }}
         />
       </div>
+        </>
+      )}
 
       {/* Folds to a single column rather than 2x2: the Load input's `span 2`
        * would strand an On/Off button on a row of its own in two columns, so
@@ -352,7 +361,7 @@ export function LimiterEditor({
           alignItems: "end",
         }}
       >
-        <OnOffButton enabled={limiter.rms.enabled} onClick={() => patch({ rmsEnabled: !limiter.rms.enabled })} />
+        <StageToggle label={meters ? null : "RMS"} enabled={limiter.rms.enabled} onClick={() => patch({ rmsEnabled: !limiter.rms.enabled })} />
         <div style={{ gridColumn: tight ? "span 1" : "span 2" }}>
           <LimiterNumberField
             label="Load"
@@ -363,7 +372,7 @@ export function LimiterEditor({
             onCommit={(value) => handleOhmsChange(value)}
           />
         </div>
-        <OnOffButton enabled={limiter.peak.enabled} onClick={() => patch({ peakEnabled: !limiter.peak.enabled })} />
+        <StageToggle label={meters ? null : "Peak"} enabled={limiter.peak.enabled} onClick={() => patch({ peakEnabled: !limiter.peak.enabled })} />
       </div>
 
       <hr className="m-0 w-full border-t border-[var(--amp-color-default-border)]" />
@@ -608,6 +617,28 @@ function LimiterMeterColumn({
 /** Green/gray ON-OFF pill for a limiter stage — same halved-green tint as
  * `EqEditor`'s `ActiveStateButton` for visual consistency across the app,
  * with "ON"/"OFF" wording matching the reference layout for this panel. */
+/** A stage's ON/OFF button, named above it when the slider column that
+ * would name it isn't shown (`meters` off). */
+function StageToggle({ label, enabled, onClick }: { label: string | null; enabled: boolean; onClick: () => void }) {
+  if (!label) return <OnOffButton enabled={enabled} onClick={onClick} />;
+  return (
+    <div className="flex flex-col gap-1">
+      <span
+        style={{
+          fontSize: "var(--amp-font-size-sm)",
+          fontWeight: 700,
+          color: "var(--amp-color-dimmed)",
+          textTransform: "uppercase",
+          textAlign: "center",
+        }}
+      >
+        {label}
+      </span>
+      <OnOffButton enabled={enabled} onClick={onClick} />
+    </div>
+  );
+}
+
 function OnOffButton({ enabled, onClick }: { enabled: boolean; onClick: () => void }) {
   return (
     <Button

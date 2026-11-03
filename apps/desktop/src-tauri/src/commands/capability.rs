@@ -1,6 +1,7 @@
 use tauri::State;
 
-use ampcore_core::data::capability::{resolve, AmpCapability};
+use ampcore_core::data::amp_model::AmpProtocol;
+use ampcore_core::data::capability::{resolve, resolve_for_firmware, AmpCapability};
 use ampcore_core::data::filter_response::{fir_response_curve as fir_curve, response_curves, EqStageRef, ResponseCurves, ResponsePoint, DEFAULT_CURVE_POINTS};
 use ampcore_core::data::project::ChannelEq;
 use crate::data::store::ProjectDataState;
@@ -24,6 +25,14 @@ pub fn amp_capability_resolve(
         .find(|m| m.id == amp_model_id)
         .ok_or_else(|| AppError::from(format!("amp model {} not found", amp_model_id)))?;
     Ok(resolve(model, firmware_version.as_deref()))
+}
+
+/// What any CVR amp on this firmware offers, with no model behind it — the
+/// Speaker Library's reference, since a speaker belongs to no amp.
+#[tauri::command]
+#[specta::specta]
+pub fn amp_capability_for_firmware(firmware_version: Option<String>) -> AmpCapability {
+    resolve_for_firmware(AmpProtocol::CvrUdp, firmware_version.as_deref())
 }
 
 /// Magnitude response of one EQ chain for the EQ graph — the whole chain, and

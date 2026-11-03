@@ -267,6 +267,11 @@ export const commands = {
 	 */
 	ampCapabilityResolve: (ampModelId: string, firmwareVersion: string | null) => typedError<AmpCapability_Serialize, AppError>(__TAURI_INVOKE("amp_capability_resolve", { ampModelId, firmwareVersion })),
 	/**
+	 *  What any CVR amp on this firmware offers, with no model behind it — the
+	 *  Speaker Library's reference, since a speaker belongs to no amp.
+	 */
+	ampCapabilityForFirmware: (firmwareVersion: string | null) => __TAURI_INVOKE<AmpCapability_Serialize>("amp_capability_for_firmware", { firmwareVersion }),
+	/**
 	 *  Magnitude response of one EQ chain for the EQ graph — the whole chain, and
 	 *  one stage isolated when `stage` is given. Pure math over the passed-in
 	 *  values (a live preview of an uncommitted drag included), shared with the
