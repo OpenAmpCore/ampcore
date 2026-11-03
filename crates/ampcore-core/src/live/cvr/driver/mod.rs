@@ -22,6 +22,13 @@ use super::request::{
 };
 use super::telemetry;
 
+mod sockets;
+mod stats;
+mod inbound;
+use sockets::*;
+use stats::*;
+pub use inbound::*;
+
 // Faster than the reference implementation's `TimerRefresh.Interval = 4000`,
 // deliberately: discovery is the *only* evidence that an amp has come back
 // (heartbeats go to online, subscribed amps alone), so its cadence is the
@@ -34,7 +41,9 @@ use super::telemetry;
 // faster than the reference's 140ms cycle — an async Rust task has no
 // event-loop/GC contention to worry about at this rate.
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(1000);
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
+
 // Four discovery cycles. Only subscribed amps get heartbeats, so every other
 // discovered amp stays "online" purely on its discovery reply — the timeout
 // has to tolerate a few lost broadcast replies in a row, which is what ties
@@ -42,7 +51,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 // 12s to 4s *because* the cadence went from 4s to 1s: shortening one without
 // the other either flickers amps offline or leaves them stale for seconds.
 const OFFLINE_TIMEOUT_MS: f64 = 4_000.0;
+
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
 /// FC=27 is far heavier than a 6-byte heartbeat (~2.4KB for a 4-channel amp,
 /// requiring fragmentation + reassembly + a full round trip), but the
 /// config-poll tick's own `has_pending` check (see the tick handler below)
@@ -70,8 +81,11 @@ const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// longer queues behind the FC=27 poll either (see
 /// `RequestRegistry::conflicts_with`).
 const BRIDGE_PRIME_INTERVAL: Duration = Duration::from_millis(200);
+
 const BRIDGE_STEADY_INTERVAL: Duration = Duration::from_millis(1500);
+
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 /// Drives the request registry's settle/hard-timeout checks — finer than
 /// `SETTLE_MS` (20ms) so a settled request resolves promptly.
 const DEADLINE_TICK_INTERVAL: Duration = Duration::from_millis(10);
@@ -101,6 +115,7 @@ struct BridgeCursor {
 /// `FIR_STEADY_INTERVAL`: a filter changed by another tool shows up within
 /// `output_channels × 2 s`, for the price of one settings poll in ten.
 const FIR_PRIME_INTERVAL: Duration = Duration::from_millis(400);
+
 const FIR_STEADY_INTERVAL: Duration = Duration::from_millis(2000);
 
 /// Whether background polling has to stay off the wire right now: a write is
@@ -115,175 +130,6 @@ fn polls_blocked(writes: &WriteRegistry, sink: &LiveEventSink) -> bool {
 struct FirCursor {
     next_channel: u32,
     last_sent: Instant,
-}
-
-#[derive(Default)]
-struct DeviceStats {
-    sent: u32,
-    received: u32,
-    last_received_at: Option<f64>,
-    delta_sum_ms: f64,
-    delta_sq_sum_ms: f64,
-    delta_count: u32,
-}
-
-impl DeviceStats {
-    fn record_received(&mut self) {
-        self.received += 1;
-        let now = now_millis();
-        if let Some(last) = self.last_received_at {
-            let delta = now - last;
-            self.delta_sum_ms += delta;
-            self.delta_sq_sum_ms += delta * delta;
-            self.delta_count += 1;
-        }
-        self.last_received_at = Some(now);
-    }
-
-    /// Standard deviation of inter-arrival time over the current window — a
-    /// cheap jitter proxy, not RFC 3550's EWMA jitter estimator.
-    fn jitter_ms(&self) -> f64 {
-        if self.delta_count == 0 {
-            return 0.0;
-        }
-        let mean = self.delta_sum_ms / self.delta_count as f64;
-        let variance = (self.delta_sq_sum_ms / self.delta_count as f64) - mean * mean;
-        variance.max(0.0).sqrt()
-    }
-
-    fn mean_interval_ms(&self) -> f64 {
-        if self.delta_count == 0 {
-            0.0
-        } else {
-            self.delta_sum_ms / self.delta_count as f64
-        }
-    }
-
-    fn reset_window(&mut self) {
-        self.sent = 0;
-        self.received = 0;
-        self.delta_sum_ms = 0.0;
-        self.delta_sq_sum_ms = 0.0;
-        self.delta_count = 0;
-    }
-}
-
-/// One socket bound to one adapter's address, and the task feeding its
-/// datagrams into the driver loop.
-struct AdapterSocket {
-    socket: Arc<UdpSocket>,
-    broadcast: Ipv4Addr,
-    reader: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for AdapterSocket {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
-}
-
-type Inbound = (Ipv4Addr, SocketAddr, Vec<u8>);
-
-/// The driver's sockets, one per adapter in use. Bound to the adapter's address
-/// as the vendor app does, because a single 0.0.0.0 socket leaves the choice of
-/// adapter to the OS routing table.
-struct AdapterSockets {
-    open: BTreeMap<Ipv4Addr, AdapterSocket>,
-    /// Which local socket each amp last answered on, so that traffic to it
-    /// leaves the same way.
-    routes: HashMap<String, Ipv4Addr>,
-    inbound: mpsc::UnboundedSender<Inbound>,
-}
-
-impl AdapterSockets {
-    /// Opens and closes sockets to match the adapters in use now: hot-plugged
-    /// adapters, changed addresses and a changed selection all land here, and a
-    /// bind that failed is retried. Returns what failed. Needs a tokio context.
-    fn reconcile(&mut self, selected: Option<&str>) -> Option<String> {
-        let wanted = wanted_adapters(selected);
-        self.open.retain(|ip, _| wanted.iter().any(|(_, wanted_ip, _)| wanted_ip == ip));
-        self.routes.retain(|_, local| self.open.contains_key(local));
-        let mut errors = Vec::new();
-        for (name, ip, broadcast) in wanted {
-            if self.open.contains_key(&ip) {
-                continue;
-            }
-            match bind_adapter(ip) {
-                Ok(socket) => {
-                    let reader = tokio::spawn(read_socket(socket.clone(), ip, self.inbound.clone()));
-                    self.open.insert(ip, AdapterSocket { socket, broadcast, reader });
-                }
-                Err(e) => errors.push(format!(
-                    "Couldn't open UDP port {PC_LISTEN_PORT} on {name}. Another program, such as the amp vendor's software or a second AmpCore, may be using it. ({e})"
-                )),
-            }
-        }
-        (!errors.is_empty()).then(|| errors.join(" "))
-    }
-
-    /// Sends to one amp through the socket it last answered on. An amp not heard
-    /// from yet (a device list that outlived a driver restart) goes through the
-    /// first socket; its next discovery reply corrects that.
-    async fn send(&self, packet: &[u8], ip: &str) -> std::io::Result<usize> {
-        let socket = self.routes.get(ip).and_then(|local| self.open.get(local)).or_else(|| self.open.values().next());
-        match socket {
-            Some(s) => s.socket.send_to(packet, (ip, AMP_PORT)).await,
-            None => Err(std::io::ErrorKind::NotConnected.into()),
-        }
-    }
-
-    /// Both broadcasts on every socket: an amp on a subnet other than the
-    /// adapter's only hears the limited one, which is all the vendor app sends.
-    /// Failures are routine on a disconnected adapter.
-    async fn broadcast(&self, packet: &[u8]) {
-        for s in self.open.values() {
-            let _ = s.socket.send_to(packet, (s.broadcast, AMP_PORT)).await;
-            let _ = s.socket.send_to(packet, (Ipv4Addr::BROADCAST, AMP_PORT)).await;
-        }
-    }
-}
-
-fn bind_adapter(ip: Ipv4Addr) -> std::io::Result<Arc<UdpSocket>> {
-    let socket = std::net::UdpSocket::bind((ip, PC_LISTEN_PORT))?;
-    socket.set_broadcast(true)?;
-    socket.set_nonblocking(true)?;
-    Ok(Arc::new(UdpSocket::from_std(socket)?))
-}
-
-/// `(name, address, broadcast)` of each socket to hold. `selected` is an adapter
-/// name; `None` is all of them. A selected adapter that is gone means no sockets
-/// rather than some other adapter. Mobile keeps the single wildcard socket, as
-/// does a machine with no adapters at all, so that one joining is still seen.
-fn wanted_adapters(selected: Option<&str>) -> Vec<(String, Ipv4Addr, Ipv4Addr)> {
-    let wildcard = || vec![("this device".to_string(), Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST)];
-    if cfg!(any(target_os = "android", target_os = "ios")) {
-        return wildcard();
-    }
-    let adapters = network_adapters();
-    if adapters.is_empty() && selected.is_none() {
-        return wildcard();
-    }
-    adapters
-        .into_iter()
-        .filter(|(adapter, ..)| selected.map_or(true, |name| name == adapter.name))
-        .map(|(adapter, ip, broadcast)| (adapter.name, ip, broadcast))
-        .collect()
-}
-
-async fn read_socket(socket: Arc<UdpSocket>, local: Ipv4Addr, inbound: mpsc::UnboundedSender<Inbound>) {
-    let mut buf = [0u8; 2048];
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, addr)) => {
-                if inbound.send((local, addr, buf[..len].to_vec())).is_err() {
-                    return;
-                }
-            }
-            // Windows reports an ICMP "port unreachable" as a failed receive.
-            // The socket is fine, but don't spin if it isn't.
-            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
-    }
 }
 
 /// Binds the driver's sockets, spawns the CVR driver task on `runtime` and
@@ -315,6 +161,8 @@ pub fn start(sink: LiveEventSink, runtime: &tokio::runtime::Handle) -> DriverHan
     DriverHandle { stop_tx }
 }
 
+// ponytail: one ~420-line select loop, left whole because it is live UDP I/O
+// with no tests; split its tick arms into functions when one next changes.
 #[allow(clippy::too_many_arguments)]
 async fn run(
     mut net: AdapterSockets,
@@ -736,366 +584,4 @@ async fn run(
         }
     }
     Ok(())
-}
-
-/// Parses a resolved FC=27 SYNC_DATA frame, stores it, and broadcasts
-/// `live_channel_config:updated` — shared by the config-poll tick's
-/// `Internal` path here and `live_control_refresh_now`'s `External`
-/// on-demand path (see `commands/live_control.rs`), so both go through
-/// identical validation/parsing instead of two copies drifting apart.
-/// Diagnostic: prints which FC=27 body bytes changed since the previous
-/// poll for this device.
-///
-/// This is how the prior web port located `mute_in` ("empirically confirmed
-/// by diffing live snapshots with known mute states") and it is the only
-/// reliable way to locate a field whose offset is otherwise guesswork.
-/// Toggle one setting on the amp and whatever offsets print are that
-/// setting's bytes.
-///
-/// It already earned its keep: bridging pair 0 printed
-/// `34 (ch0+34): 0x01 -> 0x00`, i.e. absolute offset 34 — exactly
-/// `Machine_Dname[32] + Standby[1] + Rotary_lock[1]` from the vendor
-/// `Syncdata_44` struct. So that prefix block is real, and sits at the
-/// *start* of the body rather than after the channel blocks (where an
-/// earlier attempt wrongly placed it, via `trailer_base`). Bridge state is
-/// read from FC=50 rather than from here (see `bridge.rs`), but the finding
-/// puts `Standby`/`Rotary_lock` at absolute offsets 32/33, which is where
-/// `channel_config_v118::parse_channel_config` reads them.
-///
-/// FC=27 carries configuration, not telemetry (levels/temps arrive on their
-/// own function code), so a quiescent amp should print nothing at all and a
-/// single toggle should print a handful of offsets. Offsets are reported
-/// both absolutely and relative to whichever region they fall in, since the
-/// per-channel stride and the trailer base are what the parser actually
-/// indexes against.
-fn log_sync_body_diff(ip: &str, body: &[u8]) {
-    if !wire_log_enabled() {
-        return;
-    }
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static LAST: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
-    let store = LAST.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut store = match store.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-
-    let previous = match store.get(ip) {
-        Some(prev) if prev.len() == body.len() => prev.clone(),
-        // First sight of this device, or the payload changed shape — nothing
-        // meaningful to diff against, so just record and wait for the next.
-        _ => {
-            store.insert(ip.to_string(), body.to_vec());
-            println!("[cvr driver] FC=27 diff baseline for {ip}: {} body bytes", body.len());
-            return;
-        }
-    };
-
-    // Same geometry the v118 parser derives, so reported offsets line up
-    // with the constants in `channel_config_v118.rs`.
-    const BYTES_PER_CHANNEL: usize = 515;
-    const TRAILER: usize = 172;
-    let trailer_base = if body.len() > TRAILER && (body.len() - TRAILER) % BYTES_PER_CHANNEL == 0 {
-        Some(body.len() - TRAILER)
-    } else {
-        None
-    };
-
-    let mut changes: Vec<String> = Vec::new();
-    for (abs, (old, new)) in previous.iter().zip(body.iter()).enumerate() {
-        if old == new {
-            continue;
-        }
-        let where_ = match trailer_base {
-            Some(base) if abs >= base => format!("trailer+{}", abs - base),
-            Some(_) => format!("ch{}+{}", abs / BYTES_PER_CHANNEL, abs % BYTES_PER_CHANNEL),
-            None => "?".to_string(),
-        };
-        changes.push(format!("{abs} ({where_}): 0x{old:02x} -> 0x{new:02x}"));
-    }
-
-    if !changes.is_empty() {
-        println!("[cvr driver] FC=27 body changed for {ip}: {}", changes.join(", "));
-    }
-    store.insert(ip.to_string(), body.to_vec());
-}
-
-pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -> Result<channel_config::ChannelConfigSnapshot, String> {
-    if frame.len() < STRUCT_HEADER_LEN + CHECKSUM_LEN {
-        return Err(format!("FC=27 frame too short for {}: {} bytes", ip, frame.len()));
-    }
-    let body = &frame[STRUCT_HEADER_LEN..frame.len() - CHECKSUM_LEN];
-    log_sync_body_diff(ip, body);
-    let device = {
-        let inner = sink.state.lock().unwrap();
-        inner.devices.values().find(|d| d.ip == ip).cloned()
-    };
-    let Some(device) = device else {
-        return Err(format!("no known device for ip {}", ip));
-    };
-    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body, device.output_channels) {
-        Some(mut cfg) => {
-            let gain_from_volume = device.firmware_family.as_deref() == Some("1.1.8");
-            for channel in &mut cfg.channels {
-                if gain_from_volume {
-                    // No gain setting on 1.1.8: derived from the volume, read-only.
-                    channel.amp_gain_db =
-                        amp_gain_v118_db(device.gain_max, channel.power_mode, f64::from(channel.output_volume_db)).map(|g| g as f32);
-                } else {
-                    channel.amp_gain_range_db = amp_gain_range_db(device.gain_max, channel.power_mode);
-                }
-                channel.amp_sensitivity_v =
-                    channel.amp_gain_db.and_then(|g| amp_sensitivity_v(f64::from(g), device.gain_max, channel.power_mode));
-            }
-            sink.set_channel_config(device.id, cfg.clone());
-            Ok(cfg)
-        }
-        None => Err(format!(
-            "FC=27 parse failure for {} (firmware {:?}, {} body bytes)",
-            ip,
-            device.firmware_family,
-            body.len()
-        )),
-    }
-}
-
-/// Delivers one resolved request's result to wherever it needs to go.
-/// `Internal` (the config-poll tick's own requests) is handled synchronously
-/// right here — parsing ~2.5KB of already-in-memory bytes is not actually
-/// async work, so there's no need for a channel/oneshot round trip for this
-/// case. `External` wakes whatever task is awaiting the oneshot `Receiver`
-/// on the other side (a Tauri command, see `live_control_refresh_now`) via a
-/// non-blocking send.
-fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventSink) {
-    match resolved.sink {
-        ResultSink::Internal => {
-            if resolved.function_code == FC_BRIDGE {
-                // Successful replies are wire-log only; the failure
-                // branches still print unconditionally, since "no reply" and
-                // "reply the parser rejected" are indistinguishable from the
-                // UI (an unanswered pair renders the same as an unbridged
-                // one) and are the two things worth knowing about.
-                match resolved.result {
-                    Ok(frame) => {
-                        if wire_log_enabled() {
-                            println!(
-                                "[cvr driver] FC=50 reply <- {} ({} bytes) [{}]",
-                                resolved.ip,
-                                frame.len(),
-                                frame.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-                            );
-                        }
-                        match super::bridge::parse_bridge_reply(&frame) {
-                            Some((pair, bridged)) => {
-                                let device_id = {
-                                    let inner = sink.state.lock().unwrap();
-                                    inner.devices.values().find(|d| d.ip == resolved.ip).map(|d| d.id.clone())
-                                };
-                                match device_id {
-                                    Some(device_id) => {
-                                        if wire_log_enabled() {
-                                            println!(
-                                                "[cvr driver] FC=50 bridge for {}: pair {pair} = {bridged}",
-                                                resolved.ip
-                                            );
-                                        }
-                                        sink.set_bridge_pair(device_id, pair, bridged);
-                                    }
-                                    None => eprintln!(
-                                        "[cvr driver] FC=50 reply from {} dropped: no discovered device has that ip",
-                                        resolved.ip
-                                    ),
-                                }
-                            }
-                            None => eprintln!(
-                                "[cvr driver] FC=50 reply from {} rejected by parser (unexpected shape)",
-                                resolved.ip
-                            ),
-                        }
-                    }
-                    // Timeouts are wire-log only: a model without bridging
-                    // never answers, and that would otherwise print forever.
-                    Err(RequestError::Timeout) => {
-                        if wire_log_enabled() {
-                            println!("[cvr driver] FC=50 request to {} timed out — no bridge reply", resolved.ip);
-                        }
-                    }
-                    Err(RequestError::Busy) => {
-                        if wire_log_enabled() {
-                            println!("[cvr driver] FC=50 request to {} was rejected as busy", resolved.ip);
-                        }
-                    }
-                }
-                return;
-            }
-            if resolved.function_code == FC_FIR_DATA {
-                match resolved.result {
-                    Ok(frame) => match parse_fir_data(&frame, resolved.chx) {
-                        Some(fir) => {
-                            let device_id = {
-                                let inner = sink.state.lock().unwrap();
-                                inner.devices.values().find(|d| d.ip == resolved.ip).map(|d| d.id.clone())
-                            };
-                            if let Some(device_id) = device_id {
-                                sink.set_fir(device_id, fir);
-                            }
-                        }
-                        None => eprintln!(
-                            "[cvr driver] FC=43 reply from {} for channel {} rejected by parser ({} bytes)",
-                            resolved.ip,
-                            resolved.chx,
-                            frame.len()
-                        ),
-                    },
-                    // Retried on the FIR cadence; an amp that keeps failing
-                    // shows as "FIR filter not read yet" in its fingerprint.
-                    Err(_) => {
-                        if wire_log_enabled() {
-                            println!("[cvr driver] FC=43 request to {} channel {} got no reply", resolved.ip, resolved.chx);
-                        }
-                    }
-                }
-                return;
-            }
-            if resolved.function_code != FC_SYNC_DATA {
-                return;
-            }
-            match resolved.result {
-                Ok(frame) => match parse_and_store_sync_data(&resolved.ip, &frame, sink) {
-                    Ok(cfg) => {
-                        if wire_log_enabled() {
-                            println!("[cvr driver] FC=27 config for {}: {} channels", resolved.ip, cfg.channels.len());
-                        }
-                    }
-                    Err(e) => eprintln!("[cvr driver] {e}"),
-                },
-                Err(RequestError::Timeout) => {
-                    eprintln!("[cvr driver] FC=27 request to {} timed out", resolved.ip);
-                }
-                // Never actually produced for a *registered* Internal request —
-                // `Busy` is only ever sent from the `request_rx` arm's rejection
-                // path, before a request is registered at all — but matched
-                // here for exhaustiveness.
-                Err(RequestError::Busy) => {
-                    eprintln!("[cvr driver] FC=27 request to {} unexpectedly resolved as Busy", resolved.ip);
-                }
-            }
-        }
-        ResultSink::External(tx) => {
-            let _ = tx.send(resolved.result);
-        }
-    }
-}
-
-/// Handles a single-fragment (`packets_count <= 1`) datagram exactly as
-/// `handle_packet` always has — this is the trivial passthrough case of the
-/// reassembler, so FC=0/FC=6 dispatch is byte-for-byte unchanged from before
-/// the request/fragmentation engine existed.
-fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'static str, brand: &'static str) -> Option<String> {
-    if raw.len() < NETWORK_HEADER_LEN + STRUCT_HEADER_LEN {
-        return None;
-    }
-    let assembled = &raw[NETWORK_HEADER_LEN..];
-    if !validate_frame(assembled) {
-        return None;
-    }
-
-    match raw[11] {
-        FC_BASIC_INFO => {
-            if let Some(info) = parse_basic_info_reply(raw) {
-                let firmware_family = detect_firmware_family(&info.firmware_version).label().map(String::from);
-                let machine_state_decoded =
-                    channel_state::decode(firmware_family.as_deref(), info.machine_state as i32);
-                sink.upsert(DiscoveredDevice {
-                    id: format!("{protocol_slug}:{}", info.mac),
-                    driver_id: protocol_slug.to_string(),
-                    brand: brand.to_string(),
-                    name: info.name,
-                    mac: info.mac,
-                    ip,
-                    firmware_version: info.firmware_version,
-                    firmware_family,
-                    gain_max: info.gain_max as u32,
-                    analog_input_channels: info.analog_input_channels as u32,
-                    digital_input_channels: info.digital_input_channels as u32,
-                    output_channels: info.output_channels as u32,
-                    machine_state: info.machine_state as u32,
-                    machine_state_decoded,
-                    online: true,
-                    last_seen_at: now_millis(),
-                });
-            }
-            None
-        }
-        FC_HEARTBEAT => {
-            sink.touch_by_ip(&ip);
-            // Firmware string only arrives via BASIC_INFO, not the heartbeat
-            // body itself — dispatch to the firmware-specific adapter
-            // (see `telemetry::parse_heartbeat_telemetry`) by the family already detected
-            // at discovery time. Unrecognized families get no telemetry.
-            let device = {
-                let inner = sink.state.lock().unwrap();
-                inner.devices.values().find(|d| d.ip == ip).cloned()
-            };
-            let device = device?;
-            if let Some(mut parsed) = telemetry::parse_heartbeat_telemetry(device.firmware_family.as_deref(), raw) {
-                // Enrichment step, not part of the wire adapter itself: the
-                // adapters only see raw packet bytes, but a real rated
-                // voltage (needed as the dB reference) can only be looked up
-                // from the device's own firmware string. Stays `None` per
-                // channel — never a guessed default — for any model this
-                // doesn't recognize.
-                if let Some(rated_v) = rated_rms_voltage_from_firmware_string(&device.firmware_version) {
-                    let rated_v_f32 = rated_v as f32;
-                    parsed.output_level_db =
-                        parsed.output_voltages.iter().map(|&v| voltage_to_db(v, 1.0, rated_v_f32)).collect();
-                    parsed.rated_rms_voltage = Some(rated_v);
-                }
-                // Same kind of enrichment for the output state bytes: the
-                // numbering is firmware-specific, and the family is only known
-                // here. (The input bytes are a different, fixed two-value flag
-                // the adapter decodes itself — see `Telemetry::input_clipping`.)
-                let family = device.firmware_family.as_deref();
-                parsed.output_channel_states =
-                    channel_state::decode_all(family, parsed.output_states.iter().map(|&v| v as i32));
-                parsed.machine_state_decoded = channel_state::decode(family, parsed.machine_mode);
-                sink.set_telemetry(device.id.clone(), parsed);
-            }
-            Some(device.id)
-        }
-        _ => None, // out of scope this pass
-    }
-}
-
-#[cfg(test)]
-mod start_tests {
-    use super::*;
-    use crate::live::state::{EventEmitter, LiveDeviceState, LiveEvent};
-
-    struct NoEmit;
-    impl EventEmitter for NoEmit {
-        fn emit(&self, _event: LiveEvent) {}
-    }
-
-    #[test]
-    fn start_reports_a_taken_port() {
-        // Bound to the adapter's address, as the vendor app does. Windows lets a
-        // specific bind coexist with someone else's 0.0.0.0, so that is no clash.
-        // Already taken (a running AmpCore) serves the test just as well.
-        let (_, ip, _) = wanted_adapters(None).remove(0);
-        let _held = std::net::UdpSocket::bind((ip, PC_LISTEN_PORT)).ok();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let state = LiveDeviceState::new();
-        let sink = LiveEventSink { emitter: Arc::new(NoEmit), state: state.0.clone() };
-
-        let error = state.start(sink, runtime.handle()).expect_err("bind should fail");
-
-        assert!(error.message.contains("45454"), "{}", error.message);
-    }
-
-    #[test]
-    fn a_selected_adapter_that_is_gone_opens_nothing() {
-        assert!(wanted_adapters(Some("no such adapter")).is_empty());
-    }
 }
