@@ -1,24 +1,16 @@
 import { Fragment, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button, Modal, Spinner, toast } from "@heroui/react";
 import { ChevronDown, ChevronRight, Copy, FileUp, Pencil, Plus, Save, Trash2, Undo2, Upload } from "lucide-react";
-import {
-  commands,
-  type AmpAssignment,
-  type AmpCapability_Serialize as AmpCapability,
-  type AmpModelCatalogEntry,
-  type Project,
-  type SpeakerDetails,
-  type SpeakerLibraryEntry,
-  type SpeakerProcessing,
-  type SpeakerWay,
-} from "../lib/bindings";
+import { commands, type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type AmpModelCatalogEntry, type Project, type SpeakerDetails, type SpeakerLibraryEntry, type SpeakerProcessing, type SpeakerWay } from "../lib/bindings";
 import { ACTION_OK, actionFailed } from "../lib/actionResult";
 import { useIsCompact } from "../lib/breakpoints";
 import { channelTelemetry } from "../lib/channelTelemetry";
 import type { ConfigureActions } from "../lib/configureActions";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { speakerName, useSpeakerLibrary } from "../lib/speakers";
-import { ChannelEditorModal, OutputChannelRow, TilePopover, type EditorTarget } from "./AmpConfigureView";
+import { ChannelEditorModal, type EditorTarget } from "./configure/ChannelEditorModal";
+import { OutputChannelRow } from "./configure/OutputChannelRow";
+import { TilePopover } from "./configure/parts";
 import { useConfirm } from "./ConfirmDialog";
 import { Hint } from "./Hint";
 import { SimpleSelect } from "./SimpleSelect";

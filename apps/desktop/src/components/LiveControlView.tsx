@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, ButtonGroup, Card, Chip, Drawer, Spinner } from "@heroui/react";
 import { Menu } from "lucide-react";
-import { AmpConfigureView } from "./AmpConfigureView";
+import { AmpConfigureView } from "./configure/AmpConfigureView";
 import { SimpleSelect } from "./SimpleSelect";
 import { DeviceTelemetryPanel } from "./DeviceTelemetryPanel";
 import { Hint } from "./Hint";

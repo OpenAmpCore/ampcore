@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
-import { AmpConfigureView } from "./AmpConfigureView";
+import { AmpConfigureView } from "./configure/AmpConfigureView";
 import { OperatorView } from "./OperatorView";
 import { SpeakerLibraryView } from "./SpeakerLibraryView";
 import { WorkspaceView } from "./WorkspaceView";

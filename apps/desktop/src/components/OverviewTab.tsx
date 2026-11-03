@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Slider } from "@heroui/react";
 import { Volume2, VolumeX } from "lucide-react";
-import type { ConfigurableTabProps } from "./AmpConfigureView";
+import type { ConfigurableTabProps } from "./configure/parts";
 import { ChannelStateBadge } from "./ChannelStateBadge";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { SECTION_TITLE } from "./fieldClasses";
@@ -11,17 +11,7 @@ import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
 import type { ActionResult } from "../lib/actionResult";
 import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../lib/bindings";
-import {
-  channelTelemetry,
-  FALLBACK_LIMITER,
-  outputLetter,
-  OUTPUT_METER_FLOOR_DB,
-  OUTPUT_METER_MARKS,
-  outputMeterScale,
-  rmsCeilingVolts,
-  type ChannelTelemetry,
-  type OutputMeterScale,
-} from "../lib/channelTelemetry";
+import { channelTelemetry, FALLBACK_LIMITER, outputLetter, OUTPUT_METER_FLOOR_DB, OUTPUT_METER_MARKS, outputMeterScale, rmsCeilingVolts, type ChannelTelemetry, type OutputMeterScale, INPUT_METER_FLOOR_DB, INPUT_METER_MARKS } from "../lib/channelTelemetry";
 import { channelStateTone } from "../lib/channelState";
 import { usePreference } from "../lib/preferences";
 
@@ -62,10 +52,6 @@ const LEGEND_W = 56;
 const GAP = 8;
 const LED_ROW_H = 16;
 
-/** The input meters' scale — the same −60..0, re 1 V, the Input / Output tab's
- * horizontal meters use (`LEVEL_MARKS` there). Outputs use `outputMeterScale`. */
-const METER_FLOOR_DB = -60;
-const METER_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
 
 /** The vendor fader's scale (+18 … −80), kept to whatever range the model
  * actually allows. */
@@ -283,7 +269,7 @@ function LevelMeter({
   level,
   peakHold,
   disabled,
-  min = METER_FLOOR_DB,
+  min = INPUT_METER_FLOOR_DB,
   max = 0,
 }: {
   level: number | null;
@@ -643,7 +629,7 @@ export function OverviewTab({
           <Section title="Source">
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
-              <Scale min={METER_FLOOR_DB} max={0} marks={METER_MARKS} />
+              <Scale min={INPUT_METER_FLOOR_DB} max={0} marks={INPUT_METER_MARKS} />
               <Cell height={LED_ROW_H} align="end">
                 <SideText>Clip</SideText>
               </Cell>
