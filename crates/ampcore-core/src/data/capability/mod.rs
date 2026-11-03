@@ -197,6 +197,14 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
     }
 }
 
+/// `resolve()` for something that belongs to no amp (a library speaker): what
+/// any amp of `protocol` on `firmware_version` offers, with no model behind it.
+pub fn resolve_for_firmware(protocol: AmpProtocol, firmware_version: Option<&str>) -> AmpCapability {
+    match protocol {
+        AmpProtocol::CvrUdp => cvr::resolve_firmware(firmware_version),
+    }
+}
+
 /// What a discovered amp takes, known from what it reports about itself —
 /// the counterpart of `AmpCapability` for live writes, which have no catalog
 /// model to resolve against.

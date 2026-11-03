@@ -223,7 +223,7 @@ function cablePath(x1: number, y1: number, x2: number, y2: number): string {
 }
 
 /** A loudspeaker cabinet, front view: one driver per way, largest at the bottom. */
-function CabinetIcon({ ways }: { ways: number }) {
+export function CabinetIcon({ ways }: { ways: number }) {
   const drivers = ways <= 1 ? [[26, 15]] : ways === 2 ? [[13, 6], [35, 13]] : [[9, 4], [22, 7], [39, 10]];
   return (
     <svg width={34} height={44} viewBox="0 0 40 52" className="shrink-0" aria-hidden>

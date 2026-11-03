@@ -199,7 +199,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
             />
           )}
           {activeTab === "operator" && <OperatorView />}
-          {activeTab === "speakerLibrary" && <SpeakerLibraryView project={project} ampModels={ampModels} />}
+          {activeTab === "speakerLibrary" && <SpeakerLibraryView project={project} onProjectUpdate={onProjectUpdate} ampModels={ampModels} />}
           {activeDevice && (
             <AmpConfigureView
               activeTab={configureTabById[activeDevice.id] ?? "overview"}

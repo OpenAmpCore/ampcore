@@ -11,7 +11,7 @@ import {
   type SpeakerLibraryEntry,
 } from "../lib/bindings";
 import { usePreference } from "../lib/preferences";
-import { useSpeakerLibrary } from "../lib/speakers";
+import { speakerFields, useSpeakerLibrary } from "../lib/speakers";
 import { useConfirm } from "./ConfirmDialog";
 import { MUTED, outputRows } from "./SpeakerBench";
 import { CommitNumberInput } from "./CommitNumberInput";
@@ -83,7 +83,9 @@ export function useProjectSpeakers({
     };
   }, [project.id, project.updatedAt, ampIds, library]);
 
-  type Way = { speaker: ProjectSpeaker; entry: SpeakerLibraryEntry; wayIndex: number; target: Output };
+  /** A library way going onto an output; `speaker` is the project speaker it
+   * belongs to, absent for one set up in an amp's own Speakers tab. */
+  type Way = { speaker?: ProjectSpeaker; entry: SpeakerLibraryEntry; wayIndex: number; target: Output };
 
   /** Whether the project amp may be changed now. A linked, online amp must be
    * in step with the project first — the same rule its own tabs follow.
@@ -137,7 +139,7 @@ export function useProjectSpeakers({
           outputLabel: target.label,
           entry,
           wayIndex,
-          projectSpeakerId: speaker.id,
+          projectSpeakerId: speaker?.id,
         })),
         confirm,
         showComparator,
@@ -146,7 +148,7 @@ export function useProjectSpeakers({
       if (!pairs) return false;
       const r = await writing(
         ways.map((w) => w.target.key),
-        [...new Set(ways.map((w) => w.speaker.id))],
+        [...new Set(ways.flatMap((w) => (w.speaker ? [w.speaker.id] : [])))],
         () => commands.speakersApply(project.id, amp.id, pairs, true),
       );
       if (r.status !== "ok") {
@@ -197,19 +199,25 @@ export function useProjectSpeakers({
     return true;
   }
 
-  /** The linked outputs that no longer hold what their library way says. */
+  /** Every output set up from the library that no longer holds what its way
+   * says, project speaker or not. */
   const stale: Way[] = outputs.flatMap((target) => {
-    const speaker = speakers.find((s) => s.id === target.speaker?.projectSpeakerId);
-    const entry = library.find((e) => e.id === speaker?.libraryId);
+    const entry = library.find((e) => e.id === target.speaker?.libraryId);
     const kind = states.get(target.key)?.status.kind;
-    return speaker && entry && (kind === "edited" || kind === "libraryUpdated") ? [{ speaker, entry, wayIndex: target.speaker!.wayIndex, target }] : [];
+    if (!entry || (kind !== "edited" && kind !== "libraryUpdated")) return [];
+    const speaker = speakers.find((s) => s.id === target.speaker?.projectSpeakerId);
+    return [{ speaker, entry, wayIndex: target.speaker!.wayIndex, target }];
   });
 
-  /** Gives those speakers' stale outputs their library values back: one
-   * question and one push per amp. */
-  async function reapply(of: ProjectSpeaker[]) {
+  /** The outputs set up from library speaker `entryId` that a newer save of
+   * it left behind (not those edited on the amp). */
+  const behindLibrary = (entryId: string) =>
+    stale.filter((w) => w.entry.id === entryId && states.get(w.target.key)?.status.kind === "libraryUpdated");
+
+  /** Gives stale outputs their library values back: one question and one
+   * push per amp. */
+  async function reapplyWays(ways: Way[]) {
     if (busy) return;
-    const ways = stale.filter((w) => of.includes(w.speaker));
     for (const ampId of new Set(ways.map((w) => w.target.amp.id))) {
       const onAmp = ways.filter((w) => w.target.amp.id === ampId);
       const outputsText = `${onAmp.length} ${onAmp.length === 1 ? "output" : "outputs"} of ${nameFor(onAmp[0].target.amp)}`;
@@ -223,7 +231,8 @@ export function useProjectSpeakers({
               <ul className="max-h-48 list-disc overflow-auto pl-5">
                 {onAmp.map((w) => (
                   <li key={w.target.key}>
-                    {w.target.row.label}: {w.speaker.name}
+                    {w.target.row.label}: {w.speaker?.name ?? w.target.speaker?.label}
+                    {fieldsText(w.target.key)}
                   </li>
                 ))}
               </ul>
@@ -234,6 +243,13 @@ export function useProjectSpeakers({
         `${outputsText} not re-applied`,
       );
     }
+  }
+
+  /** " (Delay, EQ · Band 3)": what re-applying changes on that output. */
+  function fieldsText(key: string) {
+    const status = states.get(key)?.status;
+    const fields = status ? speakerFields(status) : [];
+    return fields.length ? ` (${fields.join(", ")})` : "";
   }
 
   async function rename(speaker: ProjectSpeaker, name: string) {
@@ -269,7 +285,11 @@ export function useProjectSpeakers({
     bridge,
     /** The project speakers with an output to re-apply. */
     staleSpeakers: speakers.filter((sp) => stale.some((w) => w.speaker === sp)),
-    reapply,
+    /** Re-applies those speakers' stale outputs. */
+    reapply: (of: ProjectSpeaker[]) => reapplyWays(stale.filter((w) => w.speaker && of.includes(w.speaker))),
+    /** Output labels behind a newer save of a library speaker, and their update. */
+    behindLibrary: (entryId: string) => behindLibrary(entryId).map((w) => w.target.label),
+    updateFromLibrary: (entryId: string) => reapplyWays(behindLibrary(entryId)),
     /** Removes the speaker from the output, so it is free again; its values stay. */
     unlink: async (output: Output) => {
       const owner = output.speaker?.projectSpeakerId;

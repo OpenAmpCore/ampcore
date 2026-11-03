@@ -35,7 +35,7 @@ use super::validation;
 use super::fingerprint::{
     canonical_eq, format_band, format_crossover, round_to_step, DELAY_STEPS, GAIN_STEPS, VOLT_STEPS, WHOLE_STEPS,
 };
-use super::project::{AmpAssignment, AmpChannel, ChannelEq, ChannelFir, Limiter, SpeakerRef};
+use super::project::{AmpAssignment, AmpChannel, ChannelEq, ChannelFir, Limiter, Project, SpeakerRef};
 use crate::live::cvr::speaker_data::{decode_speaker_data, hex_to_bytes, SpeakerData};
 
 /// The speaker library's format, in `speakers.json` and export files. Separate
@@ -44,31 +44,28 @@ use crate::live::cvr::speaker_data::{decode_speaker_data, hex_to_bytes, SpeakerD
 ///
 /// 0: a bare list of entries, before the format had a version.
 /// 1: the same entries, wrapped with this version.
-pub const CURRENT_SPEAKER_LIBRARY_VERSION: u32 = 1;
+/// 2: every way carries the whole output: trim, noise gate, power mode, FIR
+///    bypass and FIR are no longer optional (`null` was "the amp keeps its own").
+pub const CURRENT_SPEAKER_LIBRARY_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerProcessing {
     pub output_eq: ChannelEq,
     pub limiter: Limiter,
     pub delay_out_ms: f64,
     pub phase_inverted: bool,
-    // The rest of the output. `None` = not in this preset (an imported blob,
-    // or a way saved before these existed): the amp keeps its own value.
-    #[serde(default)]
-    pub output_trim_db: Option<f64>,
-    #[serde(default)]
-    pub noise_gate_enabled: Option<bool>,
-    #[serde(default)]
-    pub noise_gate_threshold_dbu: Option<f64>,
-    #[serde(default)]
-    pub power_mode: Option<PowerMode>,
-    #[serde(default)]
-    pub fir_bypassed: Option<bool>,
-    /// The FIR filter itself. An imported blob always carries one (a unit
-    /// impulse is the preset saying "no FIR").
-    #[serde(default)]
-    pub fir: Option<ChannelFir>,
+    // The rest of the output. A speaker always carries all of it, so applying
+    // one leaves nothing of the output's own behind (volume and load aside).
+    // Library version 1 allowed `null` here; `store.rs::migrate_speakers`
+    // fills those in.
+    pub output_trim_db: f64,
+    pub noise_gate_enabled: bool,
+    pub noise_gate_threshold_dbu: f64,
+    pub power_mode: PowerMode,
+    pub fir_bypassed: bool,
+    /// The FIR filter itself; a unit impulse is "no FIR".
+    pub fir: ChannelFir,
 }
 
 /// The peak floor (`Vp >= √2 · Vrms`, the rule every limiter edit keeps), for
@@ -95,36 +92,35 @@ impl SpeakerProcessing {
             limiter: channel.limiter,
             delay_out_ms: channel.delay_out_ms,
             phase_inverted: channel.output_phase_inverted,
-            output_trim_db: Some(channel.output_trim_db),
-            noise_gate_enabled: Some(channel.noise_gate_enabled),
-            noise_gate_threshold_dbu: Some(channel.noise_gate_threshold_dbu),
-            power_mode: Some(channel.power_mode),
-            fir_bypassed: Some(channel.fir_bypassed),
-            fir: Some(channel.fir.clone()),
+            output_trim_db: channel.output_trim_db,
+            noise_gate_enabled: channel.noise_gate_enabled,
+            noise_gate_threshold_dbu: channel.noise_gate_threshold_dbu,
+            power_mode: channel.power_mode,
+            fir_bypassed: channel.fir_bypassed,
+            fir: channel.fir.clone(),
         }
     }
 
-    /// A fresh output's values — flat EQ, both limiters off, no delay, no
-    /// FIR: what a way created from scratch starts from.
+    /// A fresh output's values — flat EQ, both limiters off, no delay — with
+    /// the FIR bypassed, since its filter is empty: what a way created from
+    /// scratch starts from.
     pub fn neutral() -> Self {
-        Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0])
+        let fresh = Self::from_channel(&AmpAssignment::new(None, None, 1, None, None).channels[0]);
+        Self { fir_bypassed: fresh.fir.same_taps(&[1.0]), ..fresh }
     }
 
-    /// The peak floor is applied here, once (`with_peak_floor`).
+    /// The peak floor is applied here, once (`with_peak_floor`). The blob's
+    /// volume and mute are never taken (see the module doc), and it carries no
+    /// trim, gate or power mode: those start at a fresh output's values.
     pub fn from_speaker_data(data: &SpeakerData) -> Self {
         Self {
             output_eq: data.eq.clone(),
             limiter: with_peak_floor(data.limiter),
             delay_out_ms: data.delay_ms as f64,
             phase_inverted: data.phase_inverted,
-            fir_bypassed: Some(data.fir_bypassed),
-            fir: Some(ChannelFir { name: data.fir_name.clone().unwrap_or_default(), coefficients: data.fir_taps.clone() }),
-            // The blob's volume and mute are never taken (see the module doc),
-            // and it carries no trim, gate or power mode.
-            output_trim_db: None,
-            noise_gate_enabled: None,
-            noise_gate_threshold_dbu: None,
-            power_mode: None,
+            fir_bypassed: data.fir_bypassed,
+            fir: ChannelFir { name: data.fir_name.clone().unwrap_or_default(), coefficients: data.fir_taps.clone() },
+            ..Self::neutral()
         }
     }
 
@@ -196,41 +192,34 @@ impl SpeakerProcessing {
         }
         out.delay_out_ms = clamp(&mut issues, "Delay", " ms", out.delay_out_ms, r.delay_out_ms);
 
-        // The rest of the output: what the amp can't hold is dropped (its own
-        // value stays), and what the preset lacks is the amp's own, so the
-        // result is always a complete output.
+        // The rest of the output: what the amp can't hold is dropped, and the
+        // output keeps its own value there.
         let fw = &cap.firmware;
-        if !fw.noise_gate_threshold {
-            if let Some(t) = out.noise_gate_threshold_dbu.filter(|t| (t - current.noise_gate_threshold_dbu).abs() > 1e-6) {
-                issues.push(format!("Noise gate threshold: {t:.0} dBu dropped, this firmware has none"));
+        if fw.noise_gate_threshold {
+            out.noise_gate_threshold_dbu =
+                clamp(&mut issues, "Noise gate threshold", " dBu", out.noise_gate_threshold_dbu.round(), r.noise_gate_threshold_dbu);
+        } else {
+            if (out.noise_gate_threshold_dbu - current.noise_gate_threshold_dbu).abs() > 1e-6 {
+                issues.push(format!("Noise gate threshold: {:.0} dBu dropped, this firmware has none", out.noise_gate_threshold_dbu));
             }
-            out.noise_gate_threshold_dbu = None;
-        }
-        if !fw.fir_filters && out.fir_bypassed.is_some_and(|b| b != current.fir_bypassed) {
-            issues.push("FIR bypass: dropped, this firmware has no FIR".into());
-            out.fir_bypassed = None;
+            out.noise_gate_threshold_dbu = current.noise_gate_threshold_dbu;
         }
         if !fw.fir_filters {
-            if out.fir.as_ref().is_some_and(|f| !f.same_taps(&[1.0])) {
+            if out.fir_bypassed != current.fir_bypassed {
+                issues.push("FIR bypass: dropped, this firmware has no FIR".into());
+            }
+            if !out.fir.same_taps(&[1.0]) {
                 issues.push("FIR filter: dropped, this firmware has no FIR".into());
             }
-            out.fir = None;
+            out.fir_bypassed = current.fir_bypassed;
+            out.fir = current.fir.clone();
         }
         let modes = &cap.topology.power_modes;
-        if let Some(mode) = out.power_mode.filter(|m| !modes.is_empty() && !modes.contains(m)) {
-            issues.push(format!("Power mode: {mode:?} dropped, this amp has no such mode"));
-            out.power_mode = None;
+        if !modes.is_empty() && !modes.contains(&out.power_mode) {
+            issues.push(format!("Power mode: {:?} dropped, this amp has no such mode", out.power_mode));
+            out.power_mode = current.power_mode;
         }
-        out.output_trim_db = out.output_trim_db.map(|v| clamp(&mut issues, "Output trim", " dB", v, r.output_trim_db));
-        out.noise_gate_threshold_dbu =
-            out.noise_gate_threshold_dbu.map(|v| clamp(&mut issues, "Noise gate threshold", " dBu", v.round(), r.noise_gate_threshold_dbu));
-        let own = SpeakerProcessing::from_channel(current);
-        out.output_trim_db = out.output_trim_db.or(own.output_trim_db);
-        out.noise_gate_enabled = out.noise_gate_enabled.or(own.noise_gate_enabled);
-        out.noise_gate_threshold_dbu = out.noise_gate_threshold_dbu.or(own.noise_gate_threshold_dbu);
-        out.power_mode = out.power_mode.or(own.power_mode);
-        out.fir_bypassed = out.fir_bypassed.or(own.fir_bypassed);
-        out.fir = out.fir.or(own.fir);
+        out.output_trim_db = clamp(&mut issues, "Output trim", " dB", out.output_trim_db, r.output_trim_db);
         Ok((out, issues))
     }
 
@@ -243,12 +232,12 @@ impl SpeakerProcessing {
         channel.output_eq = self.output_eq.clone();
         channel.delay_out_ms = self.delay_out_ms;
         channel.output_phase_inverted = self.phase_inverted;
-        if let Some(v) = self.output_trim_db { channel.output_trim_db = v; }
-        if let Some(v) = self.noise_gate_enabled { channel.noise_gate_enabled = v; }
-        if let Some(v) = self.noise_gate_threshold_dbu { channel.noise_gate_threshold_dbu = v; }
-        if let Some(v) = self.power_mode { channel.power_mode = v; }
-        if let Some(v) = self.fir_bypassed { channel.fir_bypassed = v; }
-        if let Some(v) = &self.fir { channel.fir = v.clone(); }
+        channel.output_trim_db = self.output_trim_db;
+        channel.noise_gate_enabled = self.noise_gate_enabled;
+        channel.noise_gate_threshold_dbu = self.noise_gate_threshold_dbu;
+        channel.power_mode = self.power_mode;
+        channel.fir_bypassed = self.fir_bypassed;
+        channel.fir = self.fir.clone();
     }
 
     /// Labelled, display-ready values, compared entry by entry. Uses the
@@ -292,14 +281,12 @@ impl SpeakerProcessing {
         ));
         out.push(("Delay".to_string(), format!("{:.2} ms", round_to_step(self.delay_out_ms, DELAY_STEPS))));
         out.push(("Polarity".to_string(), if self.phase_inverted { "inverted" } else { "normal" }.to_string()));
-        let show = |v: Option<String>| v.unwrap_or_else(|| "—".to_string());
-        let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
-        out.push(("Output trim".into(), show(self.output_trim_db.map(|v| format!("{:.2} dB", round_to_step(v, GAIN_STEPS))))));
-        out.push(("Noise gate".into(), show(self.noise_gate_enabled.map(on_off))));
-        out.push(("Noise gate threshold".into(), show(self.noise_gate_threshold_dbu.map(|v| format!("{v:.0} dBu")))));
-        out.push(("Power mode".into(), show(self.power_mode.map(|m| format!("{m:?}")))));
-        out.push(("FIR".into(), show(self.fir_bypassed.map(|b| if b { "bypassed" } else { "active" }.to_string()))));
-        out.push(("FIR filter".into(), show(self.fir.as_ref().map(ChannelFir::summary))));
+        out.push(("Output trim".into(), format!("{:.2} dB", round_to_step(self.output_trim_db, GAIN_STEPS))));
+        out.push(("Noise gate".into(), if self.noise_gate_enabled { "on" } else { "off" }.to_string()));
+        out.push(("Noise gate threshold".into(), format!("{:.0} dBu", self.noise_gate_threshold_dbu)));
+        out.push(("Power mode".into(), format!("{:?}", self.power_mode)));
+        out.push(("FIR".into(), if self.fir_bypassed { "bypassed" } else { "active" }.to_string()));
+        out.push(("FIR filter".into(), self.fir.summary()));
         out
     }
 
@@ -309,8 +296,7 @@ impl SpeakerProcessing {
         if a.len() != b.len() {
             return vec!["EQ bands".to_string()];
         }
-        // "—" is a field `self` doesn't carry: nothing to compare.
-        a.into_iter().zip(b).filter(|(x, y)| x.1 != "—" && x.1 != y.1).map(|(x, _)| x.0).collect()
+        a.into_iter().zip(b).filter(|(x, y)| x.1 != y.1).map(|(x, _)| x.0).collect()
     }
 }
 
@@ -407,6 +393,18 @@ impl SpeakerDetails {
             return Err(format!("{} way labels for {way_count} ways", self.way_labels.len()));
         }
         Ok(())
+    }
+}
+
+/// Most ways a speaker made or edited here can have.
+pub const MAX_WAYS: usize = 4;
+
+/// 1 to `MAX_WAYS` ways, for a speaker created or edited by hand.
+pub fn check_way_count(count: usize) -> Result<(), String> {
+    match count {
+        0 => Err("A speaker needs at least one way".into()),
+        n if n > MAX_WAYS => Err(format!("A speaker has at most {MAX_WAYS} ways")),
+        _ => Ok(()),
     }
 }
 
@@ -524,41 +522,52 @@ impl SpeakerLibraryEntry {
         }
     }
 
-    /// Appends a way: a copy of way `copy_from`, or neutral values. Existing
-    /// ways keep their index, so no output's reference moves.
-    pub fn add_way(&mut self, copy_from: Option<u32>) -> Result<(), String> {
-        let processing = match copy_from {
-            Some(i) => self.ways.get(i as usize).ok_or("No such way")?.processing.clone(),
-            None => SpeakerProcessing::neutral(),
+    /// Takes the library editor's edit of this entry as a whole: details, way
+    /// labels, values, impedances and ways. Edited way `i` was stored way
+    /// `origins[i]` (`None`: added), so ways can be removed from anywhere;
+    /// `remap_way_refs` then moves the outputs along. The revision moves once,
+    /// and only when what an output would get changed: values or ways, never
+    /// metadata or impedance.
+    pub fn save_edit(&mut self, edited: SpeakerLibraryEntry, origins: &[Option<u32>]) -> Result<(), String> {
+        check_way_count(edited.ways.len())?;
+        let known = origins.iter().flatten();
+        if origins.len() != edited.ways.len()
+            || known.clone().any(|&o| o as usize >= self.ways.len())
+            || known.clone().collect::<std::collections::HashSet<_>>().len() != known.count()
+        {
+            return Err("The edited ways don't match this speaker any more".into());
+        }
+        let mut changed = origins.iter().enumerate().any(|(i, o)| *o != Some(i as u32)) || origins.len() != self.ways.len();
+        let mut ways = Vec::with_capacity(edited.ways.len());
+        for (mut way, origin) in edited.ways.into_iter().zip(origins) {
+            if way.nominal_ohms.is_some_and(|o| !(o.is_finite() && o > 0.0)) {
+                return Err("Impedance must be above 0 Ω".into());
+            }
+            way.processing.limiter = with_peak_floor(way.processing.limiter);
+            match origin.and_then(|o| self.ways.get(o as usize)) {
+                // Exact, not `differences`: that one skips fields the way leaves out.
+                Some(old) if old.processing == way.processing => way.fc57_hex = old.fc57_hex.clone(),
+                _ => {
+                    changed = true;
+                    way.fc57_hex = None; // no longer what the blob says
+                }
+            }
+            ways.push(way);
+        }
+        let details = SpeakerDetails {
+            brand: edited.brand,
+            family: edited.family,
+            model: edited.model,
+            application: edited.application,
+            notes: edited.notes,
+            way_labels: ways.iter().map(|w| w.label.clone()).collect(),
         };
-        let count = self.ways.len() + 1;
-        let nominal_ohms = copy_from.and_then(|i| self.ways[i as usize].nominal_ohms);
-        self.ways.push(SpeakerWay { label: way_label(&[], count - 1, count), processing, fc57_hex: None, nominal_ohms });
-        self.revision += 1;
-        self.updated_at = now_millis();
-        Ok(())
-    }
-
-    /// Removes the last way — only the last, so the ways before it keep their
-    /// index and the outputs set up from them their reference. Outputs set up
-    /// from the removed way read as detached.
-    pub fn remove_last_way(&mut self) -> Result<(), String> {
-        if self.ways.len() <= 1 {
-            return Err("A speaker needs at least one way".into());
+        details.validate(ways.len())?;
+        self.ways = ways;
+        self.set_details(details)?;
+        if changed {
+            self.revision += 1;
         }
-        self.ways.pop();
-        self.revision += 1;
-        self.updated_at = now_millis();
-        Ok(())
-    }
-
-    /// Sets a way's nominal impedance. Display only, so no revision bump.
-    pub fn set_way_nominal_ohms(&mut self, way_index: u32, ohms: Option<f64>) -> Result<(), String> {
-        if ohms.is_some_and(|o| !(o.is_finite() && o > 0.0)) {
-            return Err("Impedance must be above 0 Ω".into());
-        }
-        self.ways.get_mut(way_index as usize).ok_or("No such way")?.nominal_ohms = ohms;
-        self.updated_at = now_millis();
         Ok(())
     }
 
@@ -575,6 +584,31 @@ impl SpeakerLibraryEntry {
     }
 }
 
+/// Moves the outputs set up from library speaker `library_id` along after a
+/// `save_edit` with these `origins`: an output on a way that moved points at
+/// its new index, and one on a removed way loses its speaker (its values
+/// stay). Whether anything changed, so the caller knows to save `project`.
+pub fn remap_way_refs(project: &mut Project, library_id: &str, origins: &[Option<u32>]) -> bool {
+    let mut changed = false;
+    for channel in project.amp_assignments.iter_mut().flat_map(|a| a.channels.iter_mut()) {
+        let Some(old) = channel.speaker.as_ref().filter(|r| r.library_id == library_id).map(|r| r.way_index) else {
+            continue;
+        };
+        match origins.iter().position(|o| *o == Some(old)) {
+            Some(new) if new as u32 == old => {}
+            Some(new) => {
+                channel.speaker.as_mut().unwrap().way_index = new as u32;
+                changed = true;
+            }
+            None => {
+                channel.speaker = None;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SpeakerStatus {
@@ -583,7 +617,7 @@ pub enum SpeakerStatus {
     /// The output was changed after it was set up.
     Edited { fields: Vec<String> },
     /// The library way changed after the output was set up. `fields` is what
-    /// re-applying would change (empty when only the revision moved).
+    /// re-applying would change; a revision that changes nothing here is `Match`.
     LibraryUpdated { fields: Vec<String> },
     /// The entry or way is gone from this machine's library.
     Detached,
@@ -614,10 +648,11 @@ pub fn speaker_status(
     };
     let fitted = cap.and_then(|cap| way.processing.fit(channel, cap).ok()).map(|(fitted, _)| fitted);
     let fields = fitted.as_ref().unwrap_or(&way.processing).differences(&SpeakerProcessing::from_channel(channel));
-    if entry.revision != speaker.revision {
-        SpeakerStatus::LibraryUpdated { fields }
-    } else if fields.is_empty() {
+    // A newer revision that leaves this output's values as they are is no news.
+    if fields.is_empty() {
         SpeakerStatus::Match
+    } else if entry.revision != speaker.revision {
+        SpeakerStatus::LibraryUpdated { fields }
     } else {
         SpeakerStatus::Edited { fields }
     }
@@ -662,6 +697,42 @@ mod tests {
         }
     }
 
+    /// `save_edit` with the edit's ways in stored order (any beyond the
+    /// stored ones count as added).
+    fn save(entry: &mut SpeakerLibraryEntry, edit: SpeakerLibraryEntry) -> Result<(), String> {
+        let stored = entry.ways.len() as u32;
+        let origins: Vec<_> = (0..edit.ways.len() as u32).map(|i| Some(i).filter(|&i| i < stored)).collect();
+        entry.save_edit(edit, &origins)
+    }
+
+    /// Removing a middle way: its outputs lose the speaker, later ways' outputs
+    /// follow their way, and stale origins are refused.
+    #[test]
+    fn removing_a_middle_way_moves_its_outputs_along() {
+        let p = SpeakerProcessing::from_channel(&channel());
+        let mut entry = SpeakerLibraryEntry::new(details(3), vec![p.clone(), p.clone(), p]).unwrap();
+        let mut project = Project::new("P".into(), String::new());
+        let mut amp = AmpAssignment::new(None, None, 4, None, None);
+        for way in 0..3 {
+            amp.channels[way].speaker = Some(entry.reference(way as u32).unwrap());
+        }
+        amp.channels[3].speaker = Some(SpeakerRef { library_id: "other".into(), ..entry.reference(2).unwrap() });
+        project.amp_assignments.push(amp);
+
+        let origins = [Some(0), Some(2)];
+        let mut edit = entry.clone();
+        edit.ways.remove(1);
+        assert!(entry.save_edit(edit.clone(), &[Some(0), Some(5)]).is_err(), "no stored way 5");
+        assert!(entry.save_edit(edit.clone(), &[Some(0), Some(0)]).is_err(), "a way can't come from one twice");
+        entry.save_edit(edit, &origins).unwrap();
+        assert_eq!(entry.ways.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), ["W0", "W2"]);
+
+        assert!(remap_way_refs(&mut project, &entry.id, &origins));
+        let ways: Vec<_> = project.amp_assignments[0].channels.iter().map(|c| c.speaker.as_ref().map(|s| s.way_index)).collect();
+        assert_eq!(ways, [Some(0), None, Some(1), Some(2)], "the other speaker's output is left alone");
+        assert!(!remap_way_refs(&mut project, &entry.id, &[Some(0), Some(1)]), "nothing left to move");
+    }
+
     #[test]
     fn status_follows_values_and_revision() {
         let mut ch = channel();
@@ -683,9 +754,15 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
+        // The library catching up with the output is no news.
         entry.set_way_processing(0, SpeakerProcessing::from_channel(&ch)).unwrap();
+        assert!(matches!(speaker_status(&ch, &speaker, &[entry.clone()], None), SpeakerStatus::Match));
+
+        let mut moved = SpeakerProcessing::from_channel(&ch);
+        moved.delay_out_ms = 4.0;
+        entry.set_way_processing(0, moved).unwrap();
         match speaker_status(&ch, &speaker, &[entry.clone()], None) {
-            SpeakerStatus::LibraryUpdated { fields } => assert!(fields.is_empty()),
+            SpeakerStatus::LibraryUpdated { fields } => assert_eq!(fields, ["Delay"]),
             other => panic!("{other:?}"),
         }
 
@@ -797,14 +874,40 @@ mod tests {
         target.noise_gate_threshold_dbu = -60.0;
         let (fitted, issues) = way.fit(&target, &capability("1.1.8")).unwrap();
         assert!(issues.iter().any(|i| i.starts_with("Noise gate threshold")), "{issues:?}");
-        assert_eq!(fitted.noise_gate_threshold_dbu, Some(-60.0), "the amp keeps its own");
+        assert_eq!(fitted.noise_gate_threshold_dbu, -60.0, "the amp keeps its own");
         assert!(way.fit(&target, &capability("1.1.9")).unwrap().1.is_empty());
+    }
 
-        // A field the preset lacks is never a difference.
-        let mut partial = way.clone();
-        partial.output_trim_db = None;
-        target.output_trim_db = -6.0;
-        assert!(!partial.differences(&SpeakerProcessing::from_channel(&target)).contains(&"Output trim".to_string()));
+    /// A speaker carries the whole output: an imported one starts trim, gate
+    /// and power mode at a fresh output's values, applying writes them, and
+    /// any of them changed on the output afterwards reads Edited.
+    #[test]
+    fn a_speaker_owns_the_whole_output() {
+        let profile: OldProfile = serde_json::from_str(&profile_json(&["00".repeat(2310).as_str()])).unwrap();
+        let entry = SpeakerLibraryEntry::from_profile(&profile).unwrap();
+        let way = &entry.ways[0].processing;
+        let neutral = SpeakerProcessing::neutral();
+        assert!(neutral.fir_bypassed, "a fresh way's empty FIR starts bypassed");
+        assert_eq!(
+            (way.output_trim_db, way.noise_gate_enabled, way.power_mode),
+            (neutral.output_trim_db, neutral.noise_gate_enabled, neutral.power_mode)
+        );
+
+        let mut ch = channel();
+        ch.output_trim_db = -3.0;
+        ch.noise_gate_enabled = true;
+        ch.power_mode = PowerMode::V70;
+        way.apply_to(&mut ch);
+        assert_eq!((ch.output_trim_db, ch.noise_gate_enabled, ch.power_mode), (0.0, false, neutral.power_mode));
+
+        let speaker = entry.reference(0).unwrap();
+        let library = [entry.clone()];
+        assert!(matches!(speaker_status(&ch, &speaker, &library, None), SpeakerStatus::Match));
+        ch.power_mode = PowerMode::V100;
+        match speaker_status(&ch, &speaker, &library, None) {
+            SpeakerStatus::Edited { fields } => assert_eq!(fields, ["Power mode"]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -815,14 +918,14 @@ mod tests {
         hex.replace_range(128..136, "0000003f");
         let profile: OldProfile = serde_json::from_str(&profile_json(&[&hex])).unwrap();
         let entry = SpeakerLibraryEntry::from_profile(&profile).unwrap();
-        let fir = entry.ways[0].processing.fir.clone().expect("an imported way carries its FIR");
+        let fir = entry.ways[0].processing.fir.clone();
         assert_eq!((fir.name.as_str(), fir.coefficients[0], fir.coefficients.len()), ("top", 0.5, 512));
 
         // Applied, the output matches; with another filter on it, it doesn't.
         let mut ch = channel();
         let (fitted, issues) = entry.ways[0].processing.fit(&ch, &capability("1.1.8")).unwrap();
         assert!(!issues.iter().any(|i| i.starts_with("FIR")), "{issues:?}");
-        assert!(fitted.fir.as_ref().is_some_and(|f| f.same_taps(&fir.coefficients)), "1.1.8 has FIR, so it is kept");
+        assert!(fitted.fir.same_taps(&fir.coefficients), "1.1.8 has FIR, so it is kept");
         entry.ways[0].processing.apply_to(&mut ch);
         let speaker = entry.reference(0).unwrap();
         assert!(matches!(speaker_status(&ch, &speaker, &[entry.clone()], None), SpeakerStatus::Match));
@@ -865,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_and_way_count() {
+    fn duplicate_is_a_fresh_entry() {
         let mut ch = channel();
         ch.delay_out_ms = 1.5;
         let mut entry = SpeakerLibraryEntry::new(details(1), vec![SpeakerProcessing::from_channel(&ch)]).unwrap();
@@ -876,23 +979,54 @@ mod tests {
         assert_eq!(copy.model, "Hi (copy)");
         assert_eq!(copy.revision, 1);
         assert_eq!(copy.ways[0].processing.delay_out_ms, 1.5);
+    }
 
-        assert!(entry.remove_last_way().is_err(), "the last way stays");
+    /// One editor save is one revision, and only when an output would get
+    /// something new.
+    #[test]
+    fn a_save_bumps_the_revision_once_and_only_for_values() {
+        let p = SpeakerProcessing::from_channel(&channel());
+        let mut entry = SpeakerLibraryEntry::new(details(2), vec![p.clone(), p]).unwrap();
+        entry.ways[0].fc57_hex = Some("00".into());
+        entry.ways[1].fc57_hex = Some("00".into());
         let rev = entry.revision;
-        entry.add_way(Some(0)).unwrap();
-        entry.add_way(None).unwrap();
-        assert_eq!(entry.ways.len(), 3);
-        assert_eq!(entry.ways[1].processing.delay_out_ms, 1.5, "copied from way 0");
-        assert_eq!(entry.ways[2].processing.delay_out_ms, 0.0, "neutral");
-        assert_eq!(entry.ways[2].label, "Way 3");
-        entry.remove_last_way().unwrap();
-        assert_eq!(entry.ways.len(), 2);
-        assert_eq!(entry.revision, rev + 3, "every way change bumps the revision");
 
-        entry.set_way_nominal_ohms(1, Some(4.0)).unwrap();
-        assert_eq!(entry.revision, rev + 3, "impedance is display only");
-        assert!(entry.set_way_nominal_ohms(1, Some(0.0)).is_err());
-        entry.add_way(Some(1)).unwrap();
-        assert_eq!(entry.ways[2].nominal_ohms, Some(4.0), "a copied way keeps its impedance");
+        let same = entry.clone();
+        save(&mut entry, same).unwrap();
+        assert_eq!(entry.revision, rev, "a save that changes nothing");
+
+        let mut edit = entry.clone();
+        edit.model = "Renamed".into();
+        edit.ways[0].label = String::new();
+        edit.ways[1].nominal_ohms = Some(4.0);
+        save(&mut entry, edit).unwrap();
+        assert_eq!(entry.revision, rev, "metadata and impedance are not values");
+        assert_eq!((entry.model.as_str(), entry.ways[0].label.as_str()), ("Renamed", "Way 1"));
+
+        let mut edit = entry.clone();
+        edit.ways[0].processing.delay_out_ms = 1.0;
+        edit.ways[1].processing.phase_inverted = true;
+        edit.ways[1].processing.limiter.rms.threshold_vrms = 100.0;
+        edit.ways[1].processing.limiter.peak.threshold_vp = 50.0;
+        save(&mut entry, edit).unwrap();
+        assert_eq!(entry.revision, rev + 1, "two ways changed, one revision");
+        assert_eq!(entry.ways[0].fc57_hex, None, "a changed way drops its blob");
+        let peak = entry.ways[1].processing.limiter.peak.threshold_vp;
+        assert!((peak - 100.0 * std::f64::consts::SQRT_2).abs() < 1e-9, "peak floor applied");
+
+        let mut edit = entry.clone();
+        edit.ways.pop();
+        save(&mut entry, edit).unwrap();
+        assert_eq!((entry.ways.len(), entry.revision), (1, rev + 2), "way count is a change");
+
+        let mut bad = entry.clone();
+        bad.ways[0].nominal_ohms = Some(0.0);
+        assert!(save(&mut entry, bad).is_err());
+        let mut bad = entry.clone();
+        bad.ways.clear();
+        assert!(save(&mut entry, bad).is_err());
+        let mut bad = entry.clone();
+        bad.ways = vec![bad.ways[0].clone(); MAX_WAYS + 1];
+        assert!(save(&mut entry, bad).is_err(), "at most {MAX_WAYS} ways");
     }
 }
