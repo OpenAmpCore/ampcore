@@ -2,7 +2,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::data::amp_link::{normalize_mac, validate_amp_link, AmpLinkValidation};
 use ampcore_core::data::amp_merge::{mirror_live_into_assignment, AmpMergeResult};
-use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, LiveAmpReading};
+use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, AmpEditLockState, LiveAmpReading};
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp};
 use ampcore_core::data::device_link::resolve_device_model;
 use ampcore_core::data::project::{AmpAssignment, Project};
@@ -11,7 +11,7 @@ use ampcore_core::error::AppError;
 use ampcore_core::live::state::{DiscoveredDevice, LiveDeviceState};
 use ampcore_core::live::cvr::write_v118::DEVICE_NAME_FIELD_LEN;
 use ampcore_core::live::write_helpers::validate_name;
-use super::speakers::{candidate_of, save_or_push};
+use super::amp_write::save_or_push;
 
 /// Clones the device out of the live store and releases that lock before the
 /// project lock is taken — the two are never held together (same rule as
@@ -113,6 +113,19 @@ pub fn projects_amp_edit_lock(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpEditLock, AppError> {
+    amp_lock(&project_data, &live, &project_id, &assignment_id)
+}
+
+/// The edit lock, and the live session it implies: a session starts when the
+/// two fingerprints match and ends when the amp goes away or is disengaged —
+/// a passing difference keeps it (see `AmpEditLock.following`). Resolved on
+/// every lock read, so any caller sees the same session.
+pub(crate) fn amp_lock(
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpEditLock, AppError> {
     let (project, models, links) = {
         let inner = project_data.0.lock().map_err(|e| e.to_string())?;
         let project = inner
@@ -131,10 +144,22 @@ pub fn projects_amp_edit_lock(
 
     let reading = match assignment.mac.as_deref() {
         None => None,
-        Some(mac) => read_linked_amp(&live, mac)?,
+        Some(mac) => read_linked_amp(live, mac)?,
     };
 
-    Ok(resolve_edit_lock(&project, assignment, &models, &links, reading.as_ref()))
+    let mut lock = resolve_edit_lock(&project, assignment, &models, &links, reading.as_ref());
+    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    match lock.state {
+        AmpEditLockState::Matches => {
+            inner.following.insert(assignment_id.to_string());
+        }
+        AmpEditLockState::Unlinked | AmpEditLockState::Offline | AmpEditLockState::Disengaged => {
+            inner.following.remove(assignment_id);
+        }
+        AmpEditLockState::Checking | AmpEditLockState::Mismatch | AmpEditLockState::Unreadable => {}
+    }
+    lock.following = inner.following.contains(assignment_id);
+    Ok(lock)
 }
 
 /// Shared with `amp_push.rs` rather than duplicated: a pull and a push need
@@ -171,6 +196,32 @@ pub fn projects_merge_amp_from_live(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpMergeResult, AppError> {
+    pull_from_live(&app, &project_data, &live, &project_id, &assignment_id)
+}
+
+/// `merge_from_live`, ending the amp's live session when it doesn't merge: a
+/// followed amp the project can't mirror is no longer followed.
+pub(crate) fn pull_from_live(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpMergeResult, AppError> {
+    let result = merge_from_live(app, project_data, live, project_id, assignment_id);
+    if !matches!(&result, Ok(r) if r.merged) {
+        project_data.0.lock().map_err(|e| e.to_string())?.following.remove(assignment_id);
+    }
+    result
+}
+
+fn merge_from_live(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpMergeResult, AppError> {
     // The MAC comes from the project store and the reading from the live
     // store — the two locks are never held together.
     let mac = {
@@ -188,7 +239,7 @@ pub fn projects_merge_amp_from_live(
             assignment.mac.clone().ok_or_else(|| AppError::from("This amp isn't linked to a network amp".to_string()))?;
         mac
     };
-    let reading = read_linked_amp(&live, &mac)?
+    let reading = read_linked_amp(live, &mac)?
         .filter(|r| r.device.online)
         .ok_or_else(|| AppError::from("The linked amp is offline".to_string()))?;
     let snapshot = reading
@@ -423,16 +474,18 @@ pub async fn projects_edit_amp(
     device_name: Option<String>,
     firmware_version: Option<String>,
 ) -> Result<Project, AppError> {
-    let mut candidate = candidate_of(&project_data, &project_id, &assignment_id)?;
-    let name = validate_name("Device name", device_name.as_deref().unwrap_or(""), DEVICE_NAME_FIELD_LEN)?;
-    let linked = candidate.mac.is_some();
-    if linked && name.is_empty() {
-        return Err(AppError::from("A linked amp needs a name — the amp always has one"));
-    }
-    if linked && firmware_version != candidate.firmware_version {
-        return Err(AppError::from("The firmware comes from the linked amp"));
-    }
-    candidate.device_name = Some(name.to_string()).filter(|n| !n.is_empty());
-    candidate.firmware_version = firmware_version;
-    save_or_push(&app, &project_data, &live, project_id, assignment_id, candidate, "the name").await
+    let name = validate_name("Device name", device_name.as_deref().unwrap_or(""), DEVICE_NAME_FIELD_LEN)?.to_string();
+    save_or_push(&app, &project_data, &live, project_id, assignment_id, "the name", |candidate, _| {
+        let linked = candidate.mac.is_some();
+        if linked && name.is_empty() {
+            return Err(AppError::from("A linked amp needs a name — the amp always has one"));
+        }
+        if linked && firmware_version != candidate.firmware_version {
+            return Err(AppError::from("The firmware comes from the linked amp"));
+        }
+        candidate.device_name = Some(name).filter(|n| !n.is_empty());
+        candidate.firmware_version = firmware_version;
+        Ok(())
+    })
+    .await
 }

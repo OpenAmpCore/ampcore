@@ -37,15 +37,17 @@ import {
   type Tool,
 } from "./WorkspaceNodes";
 import { useProjectSpeakers, type ProjectOutput } from "./useProjectSpeakers";
-import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
+import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project, type ProjectSpeaker } from "../lib/bindings";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { useIsCompact } from "../lib/breakpoints";
-import { arrange, type Arrangement, type Rect } from "../lib/arrange";
+import { arrange, freeSpot, type Arrangement, type Rect } from "../lib/arrange";
 import { NO_GUIDES, snapToGuides, type Guides } from "../lib/helperLines";
 import { useLiveDevices } from "../hooks/useLiveDevices";
 
 const PANE_HEADING = { fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" } as const;
 const SPEAKER_GAP = 16;
+/** Where new speakers wrap to the next row on the canvas. */
+const PLACE_ROW_W = 600;
 // Wide enough for an amp card with four outputs and for the amp bar's one row: Add, Live and five icons.
 const AMP_PANE_W = 380;
 
@@ -286,7 +288,15 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   }
 
   const built = useMemo(() => {
-    return speakers.speakers.map((speaker, index): Node => {
+    // A parallel group is one tile, wider for its row of cabinets and taller per row of four.
+    const sizeOf = (speaker: ProjectSpeaker) => {
+      const count = speaker.parallel ?? 1;
+      return count > 1 ? { width: GROUP_TILE_W, height: TILE_W + 22 * Math.floor((count - 1) / 4) } : { width: TILE_W, height: TILE_W };
+    };
+    const taken: Rect[] = speakers.speakers.flatMap((s) =>
+      s.position ? [{ id: s.id, x: s.position.x ?? 0, y: s.position.y ?? 0, ...sizeOf(s) }] : [],
+    );
+    return speakers.speakers.map((speaker): Node => {
       const entry = entryOf(speaker.libraryId);
       const links = speakers.outputs.filter((o) => o.speaker?.projectSpeakerId === speaker.id);
       const linkView = (o: ProjectOutput) => ({ output: { key: o.key, label: o.label }, state: speakers.states.get(o.key) });
@@ -296,10 +306,12 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
             return { wayIndex, label: way.label, ...(link ? linkView(link) : { output: null }) };
           })
         : links.map((o) => ({ wayIndex: o.speaker!.wayIndex, label: o.speaker!.label, ...linkView(o) }));
-      // A speaker that was never dragged sits in a cascade, so new ones don't hide each other.
-      const position = speaker.position
-        ? { x: speaker.position.x ?? 0, y: speaker.position.y ?? 0 }
-        : { x: SPEAKER_GAP, y: SPEAKER_GAP + index * 40 };
+      // A speaker with no position yet takes the first free spot (saved below, so it stays there).
+      let position = speaker.position ? { x: speaker.position.x ?? 0, y: speaker.position.y ?? 0 } : null;
+      if (!position) {
+        position = freeSpot(sizeOf(speaker), taken, SPEAKER_GAP, PLACE_ROW_W);
+        taken.push({ id: speaker.id, ...position, ...sizeOf(speaker) });
+      }
       const data: SpeakerNodeData = {
         speaker,
         brand: entry?.brand ?? "",
@@ -311,9 +323,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
         pending: speakers.pending.speakers.includes(speaker.id),
         ways,
       };
-      // A parallel group is one tile, wider for its row of cabinets.
-      const width = (speaker.parallel ?? 1) > 1 ? GROUP_TILE_W : TILE_W;
-      return { id: speaker.id, type: "speaker", position, width, deletable: false, data };
+      return { id: speaker.id, type: "speaker", position, width: sizeOf(speaker).width, deletable: false, data };
     });
     // `speakers.outputs` follows `project`; `nameFor` follows `modelsById`.
   }, [project, modelsById, speakers.library, speakers.states, speakers.busy, speakers.pending]);
@@ -329,6 +339,11 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       }),
     );
   }, [built, setNodes]);
+  // Speakers just given a free spot keep it: it no longer depends on the others.
+  useEffect(() => {
+    const unplaced = built.filter((n) => !speakers.speakers.find((s) => s.id === n.id)?.position);
+    if (unplaced.length) savePositions(unplaced.map((n) => ({ id: n.id, position: n.position })));
+  }, [built]);
 
   const selectedNodes = nodes.filter((n) => n.selected);
   const rectOf = (n: Node): Rect => ({ id: n.id, x: n.position.x, y: n.position.y, width: n.measured?.width ?? TILE_W, height: n.measured?.height ?? TILE_W });

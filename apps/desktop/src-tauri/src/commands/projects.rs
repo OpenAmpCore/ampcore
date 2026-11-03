@@ -20,69 +20,23 @@ use crate::data::store::{
 };
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
-use super::speakers::{candidate_of, save_or_push};
+use super::amp_write::{assignment_limits, edit_plan, save_or_push};
 
 fn find_amp_model<'a>(models: &'a [AmpModelCatalogEntry], id: &str) -> Option<&'a AmpModelCatalogEntry> {
     models.iter().find(|m| m.id == id)
 }
 
-/// What an assignment's values are checked against: its planned firmware's
-/// ranges and its model's rated voltage. CVR is the only protocol, so the
-/// ranges don't need the model itself.
-fn assignment_limits(models: &[AmpModelCatalogEntry], assignment: &AmpAssignment) -> AmpLimits {
-    AmpLimits {
-        ranges: cvr_param_ranges(&CvrFirmwareCapability::from_version(assignment.firmware_version.as_deref())),
-        rated_rms_voltage: assignment
-            .amp_model_id
-            .as_deref()
-            .and_then(|id| find_amp_model(models, id))
-            .and_then(|m| m.topology.rated_rms_voltage),
-    }
-}
-
-/// The mutation pipeline every amp-level command shares: lock → find project →
-/// find assignment → `edit` → touch → save → emit `project:updated`. An error
-/// from `edit` aborts before anything is saved. `edit` gets the assignment's
-/// limits, so a setter can refuse a value before storing it.
-fn edit_assignment(
+/// One channel's edit, routed through `save_or_push` like every amp change.
+async fn edit_channel(
     app: &AppHandle,
-    state: &State<ProjectDataState>,
-    project_id: &str,
-    assignment_id: &str,
-    edit: impl FnOnce(&mut AmpAssignment, &AmpLimits) -> Result<(), AppError>,
-) -> Result<Project, AppError> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    let inner = &mut *guard;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
-    let limits = assignment_limits(&inner.amp_models, assignment);
-    edit(assignment, &limits)?;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
-}
-
-/// `edit_assignment` narrowed to one channel.
-fn edit_channel(
-    app: &AppHandle,
-    state: &State<ProjectDataState>,
+    state: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
     project_id: &str,
     assignment_id: &str,
     channel_index: u32,
     edit: impl FnOnce(&mut AmpChannel, &AmpLimits) -> Result<(), AppError>,
 ) -> Result<Project, AppError> {
-    edit_assignment(app, state, project_id, assignment_id, |assignment, limits| {
+    save_or_push(app, state, live, project_id.to_string(), assignment_id.to_string(), "the change", |assignment, limits| {
         let channel = assignment
             .channels
             .iter_mut()
@@ -90,6 +44,7 @@ fn edit_channel(
             .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
         edit(channel, limits)
     })
+    .await
 }
 
 #[tauri::command]
@@ -386,10 +341,16 @@ pub fn projects_set_channel_ohms(
     channel_index: u32,
     ohms: f64,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
-        if !(ohms.is_finite() && ohms > 0.0) {
-            return Err(AppError::from(format!("Load {ohms} Ω must be a positive number")));
-        }
+    if !(ohms.is_finite() && ohms > 0.0) {
+        return Err(AppError::from(format!("Load {ohms} Ω must be a positive number")));
+    }
+    // Load is local: never written to the amp, never hashed.
+    edit_plan(&app, &state, &project_id, &assignment_id, |assignment, _| {
+        let channel = assignment
+            .channels
+            .iter_mut()
+            .find(|c| c.channel_index == channel_index)
+            .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
         channel.ohms = ohms;
         Ok(())
     })
@@ -400,22 +361,24 @@ pub fn projects_set_channel_ohms(
 /// defaults to physical input 0 of that kind.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_source(
+pub async fn projects_set_channel_source(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     kind: SourceKind,
     index: Option<u32>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         if kind == SourceKind::Aes3 {
             return Err(AppError::from("AES3 is shown as the amp reports it, but can't be selected here"));
         }
         channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
         Ok(())
     })
+    .await
 }
 
 /// Partial update of one source's trim/delay pair — Routing tab. Each source
@@ -426,16 +389,17 @@ pub fn projects_set_channel_source(
 /// with its own gain matching, and the amp has no trim slot for it.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_source_trim(
+pub async fn projects_set_source_trim(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     kind: SourceKind,
     patch: SourceTrimPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         let r = &limits.ranges;
         let (trim, trim_range) = match kind {
             SourceKind::Analog => (&mut channel.source_trims.analog, r.source_trim_analog_db),
@@ -460,6 +424,7 @@ pub fn projects_set_source_trim(
         }
         Ok(())
     })
+    .await
 }
 
 /// Partial update of a channel's backup/auto-source switching — Routing tab.
@@ -470,15 +435,16 @@ pub fn projects_set_source_trim(
 /// sources the fallback is never a free choice.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_backup_priority(
+pub async fn projects_set_backup_priority(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     patch: BackupPriorityPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         if let Some(threshold_db) = patch.threshold_db {
             validation::check_range("Backup threshold", " dB", f64::from(threshold_db), limits.ranges.backup_threshold_db)?;
         }
@@ -500,6 +466,7 @@ pub fn projects_set_backup_priority(
         }
         Ok(())
     })
+    .await
 }
 
 /// Partial update of one Matrix-tab crosspoint — only touches the fields the
@@ -510,9 +477,10 @@ pub fn projects_set_backup_priority(
 /// `matrix_input_count`).
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_matrix_crosspoint(
+pub async fn projects_set_matrix_crosspoint(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
@@ -520,7 +488,7 @@ pub fn projects_set_matrix_crosspoint(
     gain_db: Option<f64>,
     active: Option<bool>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         if let Some(gain_db) = gain_db {
             validation::check_range("Matrix gain", " dB", gain_db, limits.ranges.matrix_gain_db)?;
         }
@@ -538,41 +506,46 @@ pub fn projects_set_matrix_crosspoint(
         }
         Ok(())
     })
+    .await
 }
 
 /// Sets a channel's input delay — Input tab.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_delay_in(
+pub async fn projects_set_channel_delay_in(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     delay_in_ms: f64,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         validation::check_range("Input delay", " ms", delay_in_ms, limits.ranges.delay_in_ms)?;
         channel.delay_in_ms = delay_in_ms;
         Ok(())
     })
+    .await
 }
 
 /// Sets whether a channel's input is muted — Input tab.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_input_mute(
+pub async fn projects_set_channel_input_mute(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.input_muted = muted;
         Ok(())
     })
+    .await
 }
 
 /// Partial update of a channel's output trim/volume/delay — Output tab. Only
@@ -580,9 +553,10 @@ pub fn projects_set_channel_input_mute(
 /// `projects_set_matrix_crosspoint`'s per-field-optional convention.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_output(
+pub async fn projects_set_channel_output(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
@@ -590,7 +564,7 @@ pub fn projects_set_channel_output(
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         let r = &limits.ranges;
         if let Some(v) = trim_db {
             validation::check_range("Output trim", " dB", v, r.output_trim_db)?;
@@ -612,6 +586,7 @@ pub fn projects_set_channel_output(
         }
         Ok(())
     })
+    .await
 }
 
 /// Partial update of a channel's HP or LP crossover slot (band 0 / band 9 of
@@ -620,9 +595,10 @@ pub fn projects_set_channel_output(
 /// per-field-optional convention.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_crossover_slot(
+pub async fn projects_set_crossover_slot(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
@@ -630,7 +606,7 @@ pub fn projects_set_crossover_slot(
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         if let Some(freq_hz) = patch.freq_hz {
             let name = match slot {
                 CrossoverSlotKind::Hp => "HP",
@@ -658,6 +634,7 @@ pub fn projects_set_crossover_slot(
         }
         Ok(())
     })
+    .await
 }
 
 /// Partial update of one parametric EQ band (bands 1-8 of the `input_eq`/
@@ -667,9 +644,10 @@ pub fn projects_set_crossover_slot(
 /// pre-populates every band for the model's `eq_bands_per_channel`).
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_eq_band(
+pub async fn projects_set_eq_band(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
@@ -677,7 +655,7 @@ pub fn projects_set_eq_band(
     band_index: u32,
     patch: EqBandPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         let eq = match direction {
             EqDirection::Input => &mut channel.input_eq,
             EqDirection::Output => &mut channel.output_eq,
@@ -692,26 +670,29 @@ pub fn projects_set_eq_band(
         *band = patched;
         Ok(())
     })
+    .await
 }
 
 /// Partial update of a channel's output protection (RMS + Peak limiter
 /// stages) — Output tab's Limiter sub-tab.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_limiter(
+pub async fn projects_set_channel_limiter(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     patch: LimiterPatch,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         let patched = channel.limiter.patched(&patch);
         validation::check_limiter_patch(&patch, &patched, limits.limiter_ceiling(&channel.limiter), &limits.ranges)?;
         channel.limiter = patched;
         Ok(())
     })
+    .await
 }
 
 /// Copies one channel section (an EQ chain or a limiter stage) for pasting —
@@ -746,18 +727,20 @@ pub fn projects_copy_channel_section(
 /// project or a live amp alike.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_paste_channel_section(
+pub async fn projects_paste_channel_section(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     section: ClipSection,
     clip: ChannelClip,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         paste_into_project(channel, section, &clip, &limits.ranges, limits.rated_rms_voltage).map_err(AppError::from)
     })
+    .await
 }
 
 /// Partial update of a channel's noise gate — Output tab. The threshold is
@@ -765,16 +748,17 @@ pub fn projects_paste_channel_section(
 /// user-adjustable when `CvrFirmwareCapability.noise_gate_threshold` is true.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_noise_gate(
+pub async fn projects_set_channel_noise_gate(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     enabled: Option<bool>,
     threshold_dbu: Option<f64>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, limits| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, limits| {
         if let Some(threshold_dbu) = threshold_dbu {
             validation::check_noise_gate_threshold(threshold_dbu, &limits.ranges)?;
         }
@@ -786,40 +770,45 @@ pub fn projects_set_channel_noise_gate(
         }
         Ok(())
     })
+    .await
 }
 
 /// Toggles a channel's output polarity/phase invert — Output tab.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_phase_invert(
+pub async fn projects_set_channel_phase_invert(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     inverted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.output_phase_inverted = inverted;
         Ok(())
     })
+    .await
 }
 
 /// Sets a channel's output power/impedance mode — Output tab.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_power_mode(
+pub async fn projects_set_channel_power_mode(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     power_mode: PowerMode,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.power_mode = power_mode;
         Ok(())
     })
+    .await
 }
 
 /// Renames a channel's input or output label, overriding the default
@@ -827,22 +816,24 @@ pub fn projects_set_channel_power_mode(
 /// the default.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_name(
+pub async fn projects_set_channel_name(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     direction: EqDirection,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         match direction {
             EqDirection::Input => channel.input_name = name,
             EqDirection::Output => channel.output_name = name,
         }
         Ok(())
     })
+    .await
 }
 
 /// Renames an amp's device name — the same name FC=60 writes to the amp
@@ -850,35 +841,39 @@ pub fn projects_set_channel_name(
 /// None` clears it back to unset.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_amp_device_name(
+pub async fn projects_set_amp_device_name(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     name: Option<String>,
 ) -> Result<Project, AppError> {
-    edit_assignment(&app, &state, &project_id, &assignment_id, |assignment, _| {
+    save_or_push(&app, &state, &live, project_id, assignment_id, "the name", |assignment, _| {
         assignment.device_name = name;
         Ok(())
     })
+    .await
 }
 
 /// Toggles a channel's output mute — Output tab. Mirrors
 /// `projects_set_channel_input_mute`.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_output_mute(
+pub async fn projects_set_channel_output_mute(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     muted: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.output_muted = muted;
         Ok(())
     })
+    .await
 }
 
 /// Toggles a channel's FIR bypass — Output tab. The flag is already persisted,
@@ -887,27 +882,30 @@ pub fn projects_set_channel_output_mute(
 /// The filter itself is `projects_set_channel_fir`.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_fir_bypass(
+pub async fn projects_set_channel_fir_bypass(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
     bypassed: bool,
 ) -> Result<Project, AppError> {
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.fir_bypassed = bypassed;
         Ok(())
     })
+    .await
 }
 
 /// Sets an output's FIR filter — the FIR tab's Import, and its Clear (a unit
 /// impulse). Reaches the amp with the next push (`amp_push::plan_fir`).
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_fir(
+pub async fn projects_set_channel_fir(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
@@ -922,10 +920,11 @@ pub fn projects_set_channel_fir(
     if fir.coefficients.iter().any(|c| !c.is_finite()) {
         return Err(AppError::from("FIR coefficients must be finite numbers"));
     }
-    edit_channel(&app, &state, &project_id, &assignment_id, channel_index, |channel, _| {
+    edit_channel(&app, &state, &live, &project_id, &assignment_id, channel_index, |channel, _| {
         channel.fir = fir;
         Ok(())
     })
+    .await
 }
 
 /// Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
@@ -948,31 +947,31 @@ pub async fn projects_set_output_bridge(
     pair_leader_channel_index: u32,
     bridged: bool,
 ) -> Result<Project, AppError> {
-    let mut assignment = candidate_of(&state, &project_id, &assignment_id)?;
     if pair_leader_channel_index % 2 != 0 {
         return Err(AppError::from(format!(
             "channel {} is not a pair leader (must be even-indexed)",
             pair_leader_channel_index
         )));
     }
-    let has_partner = assignment
-        .channels
-        .iter()
-        .any(|c| c.channel_index == pair_leader_channel_index + 1);
-    if !has_partner {
-        return Err(AppError::from(format!(
-            "channel {} has no partner channel {} to bridge with",
-            pair_leader_channel_index,
-            pair_leader_channel_index + 1
-        )));
-    }
-
-    let channel = assignment
-        .channels
-        .iter_mut()
-        .find(|c| c.channel_index == pair_leader_channel_index)
-        .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
-
-    channel.output_bridged = bridged;
-    save_or_push(&app, &state, &live, project_id, assignment_id, assignment, "the bridge").await
+    save_or_push(&app, &state, &live, project_id, assignment_id, "the bridge", |assignment, _| {
+        let has_partner = assignment
+            .channels
+            .iter()
+            .any(|c| c.channel_index == pair_leader_channel_index + 1);
+        if !has_partner {
+            return Err(AppError::from(format!(
+                "channel {} has no partner channel {} to bridge with",
+                pair_leader_channel_index,
+                pair_leader_channel_index + 1
+            )));
+        }
+        let channel = assignment
+            .channels
+            .iter_mut()
+            .find(|c| c.channel_index == pair_leader_channel_index)
+            .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
+        channel.output_bridged = bridged;
+        Ok(())
+    })
+    .await
 }

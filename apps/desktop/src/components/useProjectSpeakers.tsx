@@ -88,11 +88,11 @@ export function useProjectSpeakers({
   type Way = { speaker?: ProjectSpeaker; entry: SpeakerLibraryEntry; wayIndex: number; target: Output };
 
   /** Whether the project amp may be changed now. A linked, online amp must be
-   * in step with the project first — the same rule its own tabs follow.
-   * Says why not when it can't. */
+   * in step with the project first, or followed (the write pulls it in step) —
+   * the same rule `amp_write.rs::save_or_push` applies. Says why not when it can't. */
   async function editable(amp: AmpAssignment): Promise<AmpEditLock | null> {
     const lock = await commands.projectsAmpEditLock(project.id, amp.id);
-    if (lock.status === "ok" && !lock.data.locked) return lock.data;
+    if (lock.status === "ok" && (!lock.data.locked || lock.data.following)) return lock.data;
     toast.danger(`${nameFor(amp)} can't be changed right now`, {
       description:
         lock.status !== "ok" ? lock.error.message

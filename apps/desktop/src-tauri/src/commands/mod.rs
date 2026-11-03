@@ -1,6 +1,7 @@
 pub mod amp_links;
 pub mod amp_models;
 pub mod amp_push;
+pub mod amp_write;
 pub mod bug_report;
 pub mod capability;
 pub mod device_links;

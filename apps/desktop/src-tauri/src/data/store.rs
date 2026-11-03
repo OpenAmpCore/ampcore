@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,9 @@ pub struct ProjectDataInner {
     /// What loading couldn't open, as sentences for the project list — a
     /// file set aside as unreadable, or one saved by a newer AmpCore.
     pub load_problems: Vec<String>,
+    /// Project amps (by assignment id) in a live session with their linked
+    /// amp — see `AmpEditLock.following`. Runtime only, never saved.
+    pub following: HashSet<String>,
 }
 
 /// Builtin CVR amp product line — (model, channel_count). Seeded into the
@@ -134,6 +138,7 @@ impl ProjectDataState {
             device_model_links,
             speakers,
             load_problems,
+            following: HashSet::new(),
         })))
     }
 }

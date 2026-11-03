@@ -61,6 +61,12 @@ pub struct AmpEditLock {
     /// neither ever affects `locked`.
     pub standby: Option<bool>,
     pub standby_locked: Option<bool>,
+    /// In a live session with its amp: the amp is the plan, project writes go
+    /// to it and the project follows what it reports. Starts on `Matches`,
+    /// survives a passing `Mismatch`/`Checking`/`Unreadable`, ends when the amp
+    /// goes away, is disengaged, or a pull fails. Session state, so it is the
+    /// app's to set (`amp_links.rs::amp_lock`); always `false` here.
+    pub following: bool,
     pub project: Option<AmpFingerprint>,
     pub live: Option<AmpFingerprint>,
     pub rows: Vec<FingerprintRow>,
@@ -123,6 +129,7 @@ fn resolve_engaged_lock(
         rotary_locked: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.rotary_locked),
         standby: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.standby),
         standby_locked: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.standby_locked),
+        following: false,
         project: None,
         live: None,
         rows: Vec::new(),

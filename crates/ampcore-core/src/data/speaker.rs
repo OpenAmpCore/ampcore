@@ -20,8 +20,9 @@
 //! - load (`ohms`): a local value on the output, for the limiter editor's
 //!   watts; it says what is connected here, not what the preset is. A way
 //!   keeps the speaker's nominal impedance (`SpeakerWay.nominal_ohms`) for the
-//!   library editor's watt figures only: it never fills in an output's load
-//!   and is never applied or compared;
+//!   library editor's watt figures, and linking a project speaker sets the
+//!   output's load to it divided by the parallel count; it is never written
+//!   to an amp or compared;
 //! - output volume and mute: how loud the system runs tonight, never part of
 //!   a speaker on any make or model — not stored, applied or compared;
 //! - output name and bridging: wiring, not speaker.

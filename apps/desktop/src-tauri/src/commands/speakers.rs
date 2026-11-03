@@ -21,8 +21,7 @@ use ampcore_core::data::speaker::{
 use ampcore_core::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use ampcore_core::error::AppError;
 
-use super::amp_links::read_linked_amp;
-use super::amp_push::push_assignment;
+use super::amp_write::save_or_push;
 use crate::data::exchange::{add_missing, export_library, import_library};
 use crate::data::store::{save_project_file, save_speakers, ProjectDataInner, ProjectDataState};
 
@@ -330,6 +329,9 @@ struct FittedWay {
     /// `None` when it isn't ASCII — the amp can't store that, and a name is
     /// no reason to refuse the speaker — so the output keeps its own.
     output_name: Option<String>,
+    /// The output's Load when linked to a project speaker: the way's nominal
+    /// impedance over its parallel count. Display only, never written.
+    load: Option<f64>,
     issues: Vec<String>,
     rows: Vec<FitRow>,
 }
@@ -392,12 +394,9 @@ fn fit_ways(
 ) -> Result<Vec<FittedWay>, AppError> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     let inner = &mut *guard;
-    let assignment = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
-        .ok_or_else(|| AppError::from("amp not found"))?;
+    let project = inner.projects.iter().find(|p| p.id == project_id).ok_or_else(|| AppError::from("amp not found"))?;
+    let assignment =
+        project.amp_assignments.iter().find(|a| a.id == assignment_id).ok_or_else(|| AppError::from("amp not found"))?;
     let model = assignment
         .amp_model_id
         .as_deref()
@@ -409,7 +408,7 @@ fn fit_ways(
         .map(|item| {
             let (channel_index, way) = (item.channel_index, item.way_index);
             let entry = find_entry(&mut inner.speakers, &item.library_id)?;
-            let SpeakerWay { label, processing, .. } = entry.ways.get(way as usize).ok_or("No such way")?;
+            let SpeakerWay { label, processing, nominal_ohms, .. } = entry.ways.get(way as usize).ok_or("No such way")?;
             let output_name =
                 Some(label.trim()).filter(|l| !l.is_empty() && l.is_ascii()).map(|l| l[..l.len().min(CHANNEL_NAME_FIELD_LEN)].to_string());
             let channel = assignment
@@ -424,7 +423,13 @@ fn fit_ways(
                 let held = channel.speaker.as_ref().filter(|s| s.library_id == item.library_id && s.way_index == way)?;
                 held.project_speaker_id.clone()
             });
-            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, issues, rows })
+            let parallel = reference
+                .project_speaker_id
+                .as_deref()
+                .and_then(|id| project.speakers.iter().find(|s| s.id == id))
+                .map(|s| s.parallel.max(1));
+            let load = nominal_ohms.zip(parallel).map(|(ohms, n)| ohms / n as f64);
+            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, load, issues, rows })
         })
         .collect()
 }
@@ -477,66 +482,21 @@ pub async fn speakers_apply(
         return Err(AppError::from("The speaker doesn't fit this amp as is"));
     }
 
-    let mut candidate = candidate_of(&state, &project_id, &assignment_id)?;
-    for f in fitted {
-        let channel = channel_mut(&mut candidate, f.channel_index)?;
-        f.processing.apply_to(channel);
-        channel.speaker = Some(f.reference);
-        if f.output_name.is_some() {
-            channel.output_name = f.output_name;
+    save_or_push(&app, &state, &live, project_id, assignment_id, "the speaker", |candidate, _| {
+        for f in fitted {
+            let channel = channel_mut(candidate, f.channel_index)?;
+            f.processing.apply_to(channel);
+            channel.speaker = Some(f.reference);
+            if f.output_name.is_some() {
+                channel.output_name = f.output_name;
+            }
+            if let Some(ohms) = f.load {
+                channel.ohms = ohms;
+            }
         }
-    }
-    save_or_push(&app, &state, &live, project_id, assignment_id, candidate, "the speaker").await
-}
-
-/// A copy of the project amp to edit and hand to `save_or_push`.
-pub(crate) fn candidate_of(state: &State<'_, ProjectDataState>, project_id: &str, assignment_id: &str) -> Result<AmpAssignment, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .and_then(|p| p.amp_assignments.iter().find(|a| a.id == assignment_id))
-        .cloned()
-        .ok_or_else(|| AppError::from("amp not found"))
-}
-
-/// Makes `candidate` (an edited copy of the project amp) the project's. With
-/// the linked amp online and engaged it is pushed and only stored once the
-/// amp holds it; otherwise it is saved as the plan. `what` names the change
-/// in the failure text ("the speaker").
-pub(crate) async fn save_or_push(
-    app: &AppHandle,
-    state: &State<'_, ProjectDataState>,
-    live: &State<'_, LiveDeviceState>,
-    project_id: String,
-    assignment_id: String,
-    candidate: AmpAssignment,
-    what: &str,
-) -> Result<Project, AppError> {
-    let online = match candidate.mac.as_deref().filter(|_| !candidate.live_disengaged) {
-        Some(mac) => read_linked_amp(live, mac)?.is_some_and(|r| r.device.online),
-        None => false,
-    };
-    if !online {
-        return edit_with_library(app, state, &project_id, &assignment_id, |_, assignment| {
-            *assignment = candidate;
-            Ok(false)
-        });
-    }
-
-    let result = push_assignment(app, state, live, project_id, assignment_id, Some(candidate)).await?;
-    if result.pushed {
-        return result.project.ok_or_else(|| AppError::from("the push returned no project"));
-    }
-    let differing: Vec<String> =
-        result.remaining.iter().filter(|r| r.differs).map(|r| format!("{} · {}", r.group, r.label)).collect();
-    Err(AppError::from(match (result.failed_stage_label, result.error) {
-        (Some(stage), Some(error)) => {
-            format!("The amp stopped answering while {stage} was written. Check its connection and apply again. ({error})")
-        }
-        _ => format!("The amp doesn't hold {what} after writing it. Still differing: {}", differing.join(", ")),
-    }))
+        Ok(())
+    })
+    .await
 }
 
 /// Removes an output's speaker reference. Its values are left alone —

@@ -18,7 +18,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use ampcore_core::data::amp_link::normalize_mac;
 use ampcore_core::data::common::log_clock;
-use ampcore_core::data::amp_push::{action_packets, adopt_device_facts, plan_fir, plan_push, AmpPushPlan, PushAction, PushPlan};
+use ampcore_core::data::amp_push::{
+    action_packets, adopt_device_facts, plan_fir, plan_push, rebase_candidate, AmpPushPlan, PushAction, PushPlan,
+};
 use ampcore_core::data::capability::cvr::{cvr_param_ranges, CvrFirmwareCapability};
 use ampcore_core::data::validation::{check_push_action, AmpLimits, LimiterCeiling};
 use ampcore_core::data::edit_lock::LiveAmpReading;
@@ -409,6 +411,14 @@ pub async fn projects_push_amp_to_live(
     push_assignment(&app, &project_data, &live, project_id, assignment_id, None).await
 }
 
+/// An edited copy of a project amp to push in place of the stored one.
+/// `base` is what it was copied from: only what `edited` changed is stored,
+/// so edits made while the push runs survive it (`rebase_candidate`).
+pub(crate) struct Candidate {
+    pub base: AmpAssignment,
+    pub edited: AmpAssignment,
+}
+
 /// The push itself — the one way settings reach a linked amp from this side.
 ///
 /// With `candidate`, that assignment is pushed instead of the stored one, and
@@ -417,7 +427,8 @@ pub async fn projects_push_amp_to_live(
 /// (`projects_merge_amp_from_live`). That is how a change (a speaker apply)
 /// reaches the amp and the project as one step, without the project ever
 /// claiming something the amp doesn't hold. A candidate that didn't land is
-/// dropped; the project is left as it was.
+/// dropped; the project is left as it was. One that did is laid over the
+/// project amp as it is by then, not stored whole (see `Candidate`).
 ///
 /// The push verifies itself against readings taken after its writes, and the
 /// driver only reads amps something is subscribed to — so it subscribes its
@@ -428,7 +439,7 @@ pub(crate) async fn push_assignment(
     live: &State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
-    candidate: Option<AmpAssignment>,
+    candidate: Option<Candidate>,
 ) -> Result<AmpPushResult, AppError> {
     let context = push_context(project_data, live, &project_id, &assignment_id)?;
     let token = format!("push:{assignment_id}");
@@ -444,10 +455,10 @@ async fn push_polled(
     live: &State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
-    candidate: Option<AmpAssignment>,
+    candidate: Option<Candidate>,
     mut context: PushContext,
 ) -> Result<AmpPushResult, AppError> {
-    let mut plan = build_plan(&context, project_data, &project_id, &assignment_id, candidate.as_ref())?;
+    let mut plan = build_plan(&context, project_data, &project_id, &assignment_id, candidate.as_ref().map(|c| &c.edited))?;
 
     let (firmware_family, ip, write_tx) = resolve_write_target(live, &context.device_id)?;
     let firmware = firmware_family.as_deref();
@@ -619,7 +630,7 @@ async fn push_polled(
             break (snapshot, fir);
         }
         let again = push_context(project_data, live, &project_id, &assignment_id).and_then(|next| {
-            let plan = build_plan(&next, project_data, &project_id, &assignment_id, candidate.as_ref())?;
+            let plan = build_plan(&next, project_data, &project_id, &assignment_id, candidate.as_ref().map(|c| &c.edited))?;
             Ok((next, plan))
         });
         match again {
@@ -663,7 +674,10 @@ async fn push_polled(
         return Err(AppError::from("The amp's link changed while the push was running".to_string()));
     }
     let is_candidate = candidate.is_some();
-    let mut assignment = candidate.unwrap_or_else(|| project.amp_assignments[slot].clone());
+    let (mut assignment, base) = match candidate {
+        Some(c) => (c.edited, Some(c.base)),
+        None => (project.amp_assignments[slot].clone(), None),
+    };
     adopt_device_facts(&mut assignment, &snapshot);
 
     let project_fp = fingerprint_project_amp(project, &assignment, &models);
@@ -694,6 +708,9 @@ async fn push_polled(
     // A stored assignment is saved either way (see above). A candidate only
     // once the amp is known to hold it.
     if !is_candidate || pushed {
+        if let Some(base) = base {
+            assignment = rebase_candidate(&project.amp_assignments[slot], &base, &assignment).map_err(|e| e.to_string())?;
+        }
         project.amp_assignments[slot] = assignment;
         project.touch();
         save_project_file(&data_dir, project).map_err(AppError::from)?;

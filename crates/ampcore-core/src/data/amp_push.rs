@@ -859,6 +859,51 @@ pub fn action_packets(action: &PushAction, firmware: Option<&str>) -> Option<Vec
     Some(packets)
 }
 
+/// What a pushed candidate stores: `current` (the project amp as it is when the
+/// push ends) with only what `edited` changed from `base` (the copy it was made
+/// from) laid over it. A push runs for seconds; storing `edited` whole would
+/// undo every edit that reached the project meanwhile — a pull, another
+/// Workspace action. Values are compared field by field, arrays index by index
+/// while all three are the same length (else `edited`'s array wins whole).
+pub fn rebase_candidate(
+    current: &AmpAssignment,
+    base: &AmpAssignment,
+    edited: &AmpAssignment,
+) -> Result<AmpAssignment, serde_json::Error> {
+    use serde_json::{to_value, Value};
+
+    fn lay(current: &mut Value, base: &Value, edited: &Value) {
+        if base == edited {
+            return;
+        }
+        match (current, base, edited) {
+            (Value::Object(c), Value::Object(b), Value::Object(e)) => {
+                for (key, ev) in e {
+                    match (c.get_mut(key), b.get(key)) {
+                        (Some(cv), Some(bv)) => lay(cv, bv, ev),
+                        _ => {
+                            c.insert(key.clone(), ev.clone());
+                        }
+                    }
+                }
+                for key in b.keys().filter(|k| !e.contains_key(*k)) {
+                    c.remove(key);
+                }
+            }
+            (Value::Array(c), Value::Array(b), Value::Array(e)) if c.len() == b.len() && b.len() == e.len() => {
+                for ((cv, bv), ev) in c.iter_mut().zip(b).zip(e) {
+                    lay(cv, bv, ev);
+                }
+            }
+            (c, _, e) => *c = e.clone(),
+        }
+    }
+
+    let mut merged = to_value(current)?;
+    lay(&mut merged, &to_value(base)?, &to_value(edited)?);
+    serde_json::from_value(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::amp_merge::mirror_live_into_assignment;
@@ -1276,5 +1321,25 @@ mod tests {
 
         assert_eq!(snapshot.channels[0].input_eq.bands[1].freq_hz, 777.0, "the ignored band went out too");
         assert_eq!(snapshot.channels[0].input_eq.bands[2].gain_db, 4.5);
+    }
+
+    /// An edit that landed while the push ran survives it; the push's own
+    /// change wins where it made one.
+    #[test]
+    fn a_stored_candidate_keeps_edits_made_meanwhile() {
+        let base = assignment();
+        let mut edited = base.clone();
+        edited.channels[0].output_bridged = true;
+        edited.device_name = Some("Pushed".into());
+        let mut current = base.clone();
+        current.channels[1].output_volume_db = -6.0;
+        current.channels[0].output_name = Some("Meanwhile".into());
+        current.device_name = Some("Meanwhile".into());
+
+        let stored = rebase_candidate(&current, &base, &edited).expect("rebase");
+        assert!(stored.channels[0].output_bridged);
+        assert_eq!(stored.channels[1].output_volume_db, -6.0);
+        assert_eq!(stored.channels[0].output_name.as_deref(), Some("Meanwhile"));
+        assert_eq!(stored.device_name.as_deref(), Some("Pushed"));
     }
 }
