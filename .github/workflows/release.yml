@@ -87,7 +87,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "mobile_version=$MOBILE" >> "$GITHUB_OUTPUT"
-          { echo "notes<<NOTES_EOF"; echo "$NOTES"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
+          # latest.json gets every released section (from the first versioned
+          # heading on): the update dialog shows those between the installed
+          # version and this one, not just this one.
+          HISTORY=$(awk '/^## \[[0-9]/ { on = 1 } on' CHANGELOG.md)
+          { echo "notes<<NOTES_EOF"; echo "$HISTORY"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
 
   desktop:
     needs: version
@@ -141,7 +145,8 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ needs.version.outputs.tag }}
-          # Goes into latest.json's "notes": the update dialog shows it.
+          # Goes into latest.json's "notes": the update dialog shows the
+          # versions it holds between the installed one and this one.
           releaseBody: ${{ needs.version.outputs.notes }}
           releaseDraft: true
           uploadUpdaterSignatures: false

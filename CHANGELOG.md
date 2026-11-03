@@ -4,7 +4,10 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-03
+
 ### Added
+- The update dialog lists what changed in every version between the installed one and the update.
 - Speaker Library: edit speakers as drafts and save them in one step; add or remove ways.
 - Speakers carry the whole output (EQ, limiters, delay, polarity, trim, noise gate, power mode, FIR) apart from volume and load.
 - Speaker ways are laid out like an output row, with EQ, FIR and limiter tiles that open the usual editors.
