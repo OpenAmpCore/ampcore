@@ -4,13 +4,17 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-03
+
 ### Changed
 - Linking a project speaker sets the output's load to the speaker's nominal impedance divided by the number of cabinets in parallel, so the limiter's watt figures match.
+- Core: the fingerprint, push planning and CVR driver are split into modules; no behaviour change.
 
 ### Fixed
 - Speakers added to the Workspace canvas no longer pile up on top of each other: each takes the next free spot and stays there.
 - Applying a speaker, bridging or renaming an online amp no longer undoes project changes to that amp made while it was being written.
 - A change to a project amp made outside its editor now reaches the amp the project is following, instead of being saved to the project and then undone by the amp's next reading. An amp locked by a difference refuses such changes rather than having the whole project written over it.
+- Removing an amp from the Workspace that fails now says why, instead of leaving the dialog open with no message.
 
 ## [0.3.11] - 2026-11-03
 
