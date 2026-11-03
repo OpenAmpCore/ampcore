@@ -143,7 +143,7 @@ impl LiveDeviceState {
         })))
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, LiveDeviceInner>, AppError> {
+    pub fn lock(&self) -> Result<std::sync::MutexGuard<'_, LiveDeviceInner>, AppError> {
         self.0.lock().map_err(|e| AppError::from(e.to_string()))
     }
 

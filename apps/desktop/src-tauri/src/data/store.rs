@@ -1,18 +1,20 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use serde::Serialize;
 use serde_json::Value;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use ampcore_core::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use ampcore_core::data::common::now_millis;
 use ampcore_core::data::capability::cvr::builtin_topology;
 use ampcore_core::data::device_link::DeviceModelLink;
-use ampcore_core::data::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
+use ampcore_core::data::project::{AmpAssignment, AmpChannel, Project, CURRENT_PROJECT_SCHEMA_VERSION};
+use ampcore_core::error::AppError;
 use ampcore_core::data::speaker::{SpeakerLibraryEntry, SpeakerProcessing, CURRENT_SPEAKER_LIBRARY_VERSION};
 
 /// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
@@ -20,6 +22,12 @@ use ampcore_core::data::speaker::{SpeakerLibraryEntry, SpeakerProcessing, CURREN
 /// coarse lock is fine; this is deliberately kept independent from the
 /// (future, separate) live-device-state domain.
 pub struct ProjectDataState(pub Mutex<ProjectDataInner>);
+
+impl ProjectDataState {
+    pub fn lock(&self) -> Result<MutexGuard<'_, ProjectDataInner>, AppError> {
+        self.0.lock().map_err(|e| AppError::from(e.to_string()))
+    }
+}
 
 pub struct ProjectDataInner {
     pub data_dir: PathBuf,
@@ -32,6 +40,41 @@ pub struct ProjectDataInner {
     /// What loading couldn't open, as sentences for the project list — a
     /// file set aside as unreadable, or one saved by a newer AmpCore.
     pub load_problems: Vec<String>,
+    /// Project amps (by assignment id) in a live session with their linked
+    /// amp — see `AmpEditLock.following`. Runtime only, never saved.
+    pub following: HashSet<String>,
+}
+
+// Lookups over the fields rather than methods on `ProjectDataInner`, so a
+// caller can hold one project mutably while reading `amp_models` or `data_dir`.
+
+pub fn project<'a>(projects: &'a [Project], id: &str) -> Result<&'a Project, AppError> {
+    projects.iter().find(|p| p.id == id).ok_or_else(|| AppError::from(format!("project {id} not found")))
+}
+
+pub fn project_mut<'a>(projects: &'a mut [Project], id: &str) -> Result<&'a mut Project, AppError> {
+    projects.iter_mut().find(|p| p.id == id).ok_or_else(|| AppError::from(format!("project {id} not found")))
+}
+
+pub fn assignment<'a>(project: &'a Project, id: &str) -> Result<&'a AmpAssignment, AppError> {
+    project.amp_assignments.iter().find(|a| a.id == id).ok_or_else(|| AppError::from(format!("assignment {id} not found")))
+}
+
+pub fn assignment_mut<'a>(project: &'a mut Project, id: &str) -> Result<&'a mut AmpAssignment, AppError> {
+    project.amp_assignments.iter_mut().find(|a| a.id == id).ok_or_else(|| AppError::from(format!("assignment {id} not found")))
+}
+
+pub fn channel_mut(assignment: &mut AmpAssignment, index: u32) -> Result<&mut AmpChannel, AppError> {
+    assignment.channels.iter_mut().find(|c| c.channel_index == index).ok_or_else(|| AppError::from(format!("channel {index} not found")))
+}
+
+/// The end of every project mutation: touch, save, emit `project:updated`,
+/// and hand back the saved copy.
+pub fn commit(app: &AppHandle, data_dir: &Path, project: &mut Project) -> Result<Project, AppError> {
+    project.touch();
+    save_project_file(data_dir, project).map_err(AppError::from)?;
+    app.emit("project:updated", &*project).ok();
+    Ok(project.clone())
 }
 
 /// Builtin CVR amp product line — (model, channel_count). Seeded into the
@@ -134,6 +177,7 @@ impl ProjectDataState {
             device_model_links,
             speakers,
             load_problems,
+            following: HashSet::new(),
         })))
     }
 }

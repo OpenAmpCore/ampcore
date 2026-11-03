@@ -12,6 +12,20 @@ export type Arrangement = "left" | "top" | "right" | "bottom" | "centerH" | "cen
 /** The space Pack leaves between two tiles. */
 export const PACK_GAP = 4;
 
+/** The first top-left, row by row from (`gap`, `gap`), where a tile of `size`
+ * keeps `gap` clear of every `taken` rect; rows wrap at `rowWidth`. */
+export function freeSpot(size: { width: number; height: number }, taken: Rect[], gap: number, rowWidth: number): { x: number; y: number } {
+  for (let y = gap; ; y += size.height + gap) {
+    for (let x = gap; x === gap || x + size.width <= rowWidth; ) {
+      const hit = taken.find(
+        (r) => x < r.x + r.width + gap && r.x < x + size.width + gap && y < r.y + r.height + gap && r.y < y + size.height + gap,
+      );
+      if (!hit) return { x, y };
+      x = hit.x + hit.width + gap;
+    }
+  }
+}
+
 /** New top-left positions for `rects` under one Align, Distribute or Pack, by
  * id. Align moves every tile to the selection's outer edge (or onto the middle
  * of its bounding box); Distribute keeps the two outermost tiles and gives the

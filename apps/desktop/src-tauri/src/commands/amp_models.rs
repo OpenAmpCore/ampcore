@@ -8,7 +8,7 @@ use ampcore_core::error::AppError;
 #[tauri::command]
 #[specta::specta]
 pub fn amp_models_list(state: State<ProjectDataState>) -> Result<Vec<AmpModelCatalogEntry>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.amp_models.clone())
 }
 
@@ -23,7 +23,7 @@ pub fn amp_models_create(
     is_dante: bool,
     protocol: AmpProtocol,
 ) -> Result<AmpModelCatalogEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.lock()?;
     let entry = AmpModelCatalogEntry::new(brand, model, channel_count, is_dante, protocol);
     inner.amp_models.push(entry.clone());
     save_amp_models(&inner.data_dir, &inner.amp_models).map_err(AppError::from)?;
@@ -42,7 +42,7 @@ pub fn amp_models_update(
     state: State<ProjectDataState>,
     mut entry: AmpModelCatalogEntry,
 ) -> Result<AmpModelCatalogEntry, AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.lock()?;
     let existing = inner
         .amp_models
         .iter_mut()
@@ -59,7 +59,7 @@ pub fn amp_models_update(
 #[tauri::command]
 #[specta::specta]
 pub fn amp_models_archive(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<(), AppError> {
-    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let mut inner = state.lock()?;
     let entry = inner
         .amp_models
         .iter_mut()

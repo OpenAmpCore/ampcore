@@ -1,6 +1,8 @@
 pub mod amp_links;
 pub mod amp_models;
 pub mod amp_push;
+pub mod amp_settings;
+pub mod amp_write;
 pub mod bug_report;
 pub mod capability;
 pub mod device_links;
@@ -8,4 +10,5 @@ pub mod files;
 pub mod fingerprint;
 pub mod live_control;
 pub mod projects;
+pub mod speaker_library;
 pub mod speakers;

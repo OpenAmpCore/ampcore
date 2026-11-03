@@ -1025,6 +1025,14 @@ export type AmpEditLock = {
 	 */
 	standby: boolean | null,
 	standbyLocked: boolean | null,
+	/**
+	 *  In a live session with its amp: the amp is the plan, project writes go
+	 *  to it and the project follows what it reports. Starts on `Matches`,
+	 *  survives a passing `Mismatch`/`Checking`/`Unreadable`, ends when the amp
+	 *  goes away, is disengaged, or a pull fails. Session state, so it is the
+	 *  app's to set (`amp_links.rs::amp_lock`); always `false` here.
+	 */
+	following: boolean,
 	project: AmpFingerprint | null,
 	live: AmpFingerprint | null,
 	rows: FingerprintRow[],

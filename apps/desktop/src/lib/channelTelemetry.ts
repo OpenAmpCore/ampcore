@@ -147,6 +147,15 @@ export const OUTPUT_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map
   label: String(value),
 }));
 
+/** The dB scale of every input level meter (Input row, Routing, Overview),
+ * where `0` is 1 V (`inputDbv`). The floor is also where a `null` reading
+ * renders. */
+export const INPUT_METER_FLOOR_DB = -60;
+export const INPUT_METER_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({
+  value,
+  label: String(value),
+}));
+
 /** What an output level meter draws: dB re rated output, or, behind the
  * "Show output meters in volts" setting, the amp's own volts on a linear
  * `0..max` scale with no conversion at all. Thresholds go through `fromVolts`

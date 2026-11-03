@@ -3,6 +3,7 @@ use tauri::State;
 use ampcore_core::data::amp_model::AmpModelCatalogEntry;
 use ampcore_core::data::device_link::DeviceModelLink;
 use ampcore_core::data::fingerprint::{self as fp, AmpFingerprint};
+use crate::data::store;
 use crate::data::store::ProjectDataState;
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::LiveDeviceState;
@@ -16,17 +17,9 @@ pub fn fingerprint_project_amp(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpFingerprint, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("amp assignment {} not found", assignment_id)))?;
+    let inner = state.lock()?;
+    let project = store::project(&inner.projects, &project_id)?;
+    let assignment = store::assignment(project, &assignment_id)?;
     Ok(fp::fingerprint_project_amp(project, assignment, &inner.amp_models))
 }
 
@@ -34,12 +27,8 @@ pub fn fingerprint_project_amp(
 #[tauri::command]
 #[specta::specta]
 pub fn fingerprint_project(state: State<ProjectDataState>, project_id: String) -> Result<Vec<AmpFingerprint>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let inner = state.lock()?;
+    let project = store::project(&inner.projects, &project_id)?;
     Ok(project
         .amp_assignments
         .iter()
@@ -58,7 +47,7 @@ pub fn fingerprint_live_device(
     device_id: String,
 ) -> Result<AmpFingerprint, AppError> {
     let (models, links) = catalog_snapshot(&project_data)?;
-    let inner = live.0.lock().map_err(|e| e.to_string())?;
+    let inner = live.lock()?;
     let fir = inner.fir_of(&device_id);
     let device = inner
         .devices
@@ -80,7 +69,7 @@ pub fn fingerprint_live_devices(
     live: State<LiveDeviceState>,
 ) -> Result<Vec<AmpFingerprint>, AppError> {
     let (models, links) = catalog_snapshot(&project_data)?;
-    let inner = live.0.lock().map_err(|e| e.to_string())?;
+    let inner = live.lock()?;
     let mut devices: Vec<_> = inner.devices.values().collect();
     devices.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(devices
@@ -98,6 +87,6 @@ pub fn fingerprint_live_devices(
 fn catalog_snapshot(
     project_data: &State<ProjectDataState>,
 ) -> Result<(Vec<AmpModelCatalogEntry>, Vec<DeviceModelLink>), AppError> {
-    let inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let inner = project_data.lock()?;
     Ok((inner.amp_models.clone(), inner.device_model_links.clone()))
 }

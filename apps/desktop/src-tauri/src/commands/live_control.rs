@@ -23,7 +23,7 @@ use ampcore_core::live::write_helpers::{
 
 /// How many analog inputs `device_id` reported in BASIC_INFO (0 when unknown).
 fn analog_input_count(state: &LiveDeviceState, device_id: &str) -> Result<u32, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.devices.get(device_id).map(|d| d.analog_input_channels).unwrap_or(0))
 }
 
@@ -51,7 +51,7 @@ pub fn live_control_list_adapters() -> Vec<NetworkAdapter> {
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_set_adapter(state: State<LiveDeviceState>, name: Option<String>) -> Result<(), AppError> {
-    state.0.lock().map_err(|e| e.to_string())?.adapter = name;
+    state.lock()?.adapter = name;
     Ok(())
 }
 
@@ -90,14 +90,14 @@ pub fn live_control_set_poll_subscription(
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_list_devices(state: State<LiveDeviceState>) -> Result<Vec<DiscoveredDevice>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.devices.values().cloned().collect())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_get_telemetry(state: State<LiveDeviceState>) -> Result<Vec<DeviceTelemetry>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner
         .telemetry
         .iter()
@@ -108,7 +108,7 @@ pub fn live_control_get_telemetry(state: State<LiveDeviceState>) -> Result<Vec<D
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_get_channel_config(state: State<LiveDeviceState>) -> Result<Vec<DeviceChannelConfig>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner
         .channel_config
         .iter()
@@ -128,7 +128,7 @@ pub fn live_control_get_channel_config(state: State<LiveDeviceState>) -> Result<
 #[specta::specta]
 pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDeviceState>, device_id: String) -> Result<DeviceChannelConfig, AppError> {
     let (ip, request_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let inner = state.lock()?;
         let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
         let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
         (device.ip, request_tx)
@@ -177,7 +177,7 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_get_bridge(state: State<LiveDeviceState>) -> Result<Vec<DeviceBridge>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.bridge.iter().map(|(device_id, bridge)| DeviceBridge { device_id: device_id.clone(), bridge: bridge.clone() }).collect())
 }
 
@@ -201,7 +201,7 @@ pub async fn live_control_fetch_bridge(
     device_id: String,
 ) -> Result<DeviceBridge, AppError> {
     let (ip, request_tx) = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let inner = state.lock()?;
         let device = inner
             .devices
             .get(&device_id)
@@ -231,7 +231,7 @@ pub async fn live_control_fetch_bridge(
     }
 
     let bridge = {
-        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let inner = state.lock()?;
         inner
             .bridge
             .get(&device_id)
@@ -246,7 +246,7 @@ pub async fn live_control_fetch_bridge(
 #[tauri::command]
 #[specta::specta]
 pub fn live_control_get_presets(state: State<LiveDeviceState>) -> Result<Vec<DevicePresets>, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     Ok(inner.presets.iter().map(|(device_id, presets)| DevicePresets { device_id: device_id.clone(), presets: presets.clone() }).collect())
 }
 

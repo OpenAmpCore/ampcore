@@ -1,23 +1,24 @@
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use ampcore_core::data::amp_link::{normalize_mac, validate_amp_link, AmpLinkValidation};
 use ampcore_core::data::amp_merge::{mirror_live_into_assignment, AmpMergeResult};
-use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, LiveAmpReading};
+use ampcore_core::data::edit_lock::{resolve_edit_lock, AmpEditLock, AmpEditLockState, LiveAmpReading};
 use ampcore_core::data::fingerprint::{compare_fingerprints, fingerprint_live_device, fingerprint_project_amp};
 use ampcore_core::data::device_link::resolve_device_model;
 use ampcore_core::data::project::{AmpAssignment, Project};
-use crate::data::store::{save_project_file, ProjectDataState};
+use crate::data::store;
+use crate::data::store::ProjectDataState;
 use ampcore_core::error::AppError;
 use ampcore_core::live::state::{DiscoveredDevice, LiveDeviceState};
 use ampcore_core::live::cvr::write_v118::DEVICE_NAME_FIELD_LEN;
 use ampcore_core::live::write_helpers::validate_name;
-use super::speakers::{candidate_of, save_or_push};
+use super::amp_write::save_or_push;
 
 /// Clones the device out of the live store and releases that lock before the
 /// project lock is taken — the two are never held together (same rule as
 /// `commands/fingerprint.rs::catalog_snapshot`).
 fn live_device(live: &State<LiveDeviceState>, device_id: &str) -> Result<DiscoveredDevice, AppError> {
-    let inner = live.0.lock().map_err(|e| e.to_string())?;
+    let inner = live.lock()?;
     let device = inner.devices.get(device_id).cloned();
     device.ok_or_else(|| AppError::from(format!("device {} not found", device_id)))
 }
@@ -34,17 +35,9 @@ pub fn projects_validate_amp_link(
     device_id: String,
 ) -> Result<AmpLinkValidation, AppError> {
     let device = live_device(&live, &device_id)?;
-    let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let inner = project_data.lock()?;
+    let project = store::project(&inner.projects, &project_id)?;
+    let assignment = store::assignment(&project, &assignment_id)?;
     Ok(validate_amp_link(project, assignment, &device, &inner.amp_models, &inner.device_model_links))
 }
 
@@ -63,43 +56,23 @@ pub fn projects_link_amp(
     device_id: String,
 ) -> Result<Project, AppError> {
     let device = live_device(&live, &device_id)?;
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
 
     let validation = {
-        let project = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-        let assignment = project
-            .amp_assignments
-            .iter()
-            .find(|a| a.id == assignment_id)
-            .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+        let project = store::project(&inner.projects, &project_id)?;
+        let assignment = store::assignment(&project, &assignment_id)?;
         validate_amp_link(project, assignment, &device, &inner.amp_models, &inner.device_model_links)
     };
     if let Some(failed) = validation.first_failure() {
         return Err(AppError::from(failed.detail.clone()));
     }
 
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
+    let assignment = store::assignment_mut(project, &assignment_id)?;
 
     assignment.mac = Some(device.mac);
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    store::commit(&app, &inner.data_dir, project)
 }
 
 /// Read-only: whether this project amp is editable right now, with both
@@ -113,28 +86,45 @@ pub fn projects_amp_edit_lock(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpEditLock, AppError> {
+    amp_lock(&project_data, &live, &project_id, &assignment_id)
+}
+
+/// The edit lock, and the live session it implies: a session starts when the
+/// two fingerprints match and ends when the amp goes away or is disengaged —
+/// a passing difference keeps it (see `AmpEditLock.following`). Resolved on
+/// every lock read, so any caller sees the same session.
+pub(crate) fn amp_lock(
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpEditLock, AppError> {
     let (project, models, links) = {
-        let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-        let project = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .cloned()
-            .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+        let inner = project_data.lock()?;
+        let project = store::project(&inner.projects, &project_id)?.clone();
         (project, inner.amp_models.clone(), inner.device_model_links.clone())
     };
-    let assignment = project
-        .amp_assignments
-        .iter()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let assignment = store::assignment(&project, &assignment_id)?;
 
     let reading = match assignment.mac.as_deref() {
         None => None,
-        Some(mac) => read_linked_amp(&live, mac)?,
+        Some(mac) => read_linked_amp(live, mac)?,
     };
 
-    Ok(resolve_edit_lock(&project, assignment, &models, &links, reading.as_ref()))
+    let mut lock = resolve_edit_lock(&project, assignment, &models, &links, reading.as_ref());
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
+    match lock.state {
+        AmpEditLockState::Matches => {
+            inner.following.insert(assignment_id.to_string());
+        }
+        AmpEditLockState::Unlinked | AmpEditLockState::Offline | AmpEditLockState::Disengaged => {
+            inner.following.remove(assignment_id);
+        }
+        AmpEditLockState::Checking | AmpEditLockState::Mismatch | AmpEditLockState::Unreadable => {}
+    }
+    lock.following = inner.following.contains(assignment_id);
+    Ok(lock)
 }
 
 /// Shared with `amp_push.rs` rather than duplicated: a pull and a push need
@@ -147,7 +137,7 @@ pub(crate) fn read_linked_amp(
     mac: &str,
 ) -> Result<Option<LiveAmpReading>, AppError> {
     let mac = normalize_mac(mac);
-    let inner = live.0.lock().map_err(|e| e.to_string())?;
+    let inner = live.lock()?;
     let reading = inner.devices.values().find(|d| normalize_mac(&d.mac) == mac).map(|device| LiveAmpReading {
         device: device.clone(),
         snapshot: inner.channel_config.get(&device.id).cloned(),
@@ -171,24 +161,42 @@ pub fn projects_merge_amp_from_live(
     project_id: String,
     assignment_id: String,
 ) -> Result<AmpMergeResult, AppError> {
+    pull_from_live(&app, &project_data, &live, &project_id, &assignment_id)
+}
+
+/// `merge_from_live`, ending the amp's live session when it doesn't merge: a
+/// followed amp the project can't mirror is no longer followed.
+pub(crate) fn pull_from_live(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpMergeResult, AppError> {
+    let result = merge_from_live(app, project_data, live, project_id, assignment_id);
+    if !matches!(&result, Ok(r) if r.merged) {
+        project_data.lock()?.following.remove(assignment_id);
+    }
+    result
+}
+
+fn merge_from_live(
+    app: &AppHandle,
+    project_data: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<AmpMergeResult, AppError> {
     // The MAC comes from the project store and the reading from the live
     // store — the two locks are never held together.
     let mac = {
-        let inner = project_data.0.lock().map_err(|e| e.to_string())?;
-        let assignment = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?
-            .amp_assignments
-            .iter()
-            .find(|a| a.id == assignment_id)
-            .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+        let inner = project_data.lock()?;
+        let assignment = store::assignment(store::project(&inner.projects, &project_id)?, &assignment_id)?;
         let mac =
             assignment.mac.clone().ok_or_else(|| AppError::from("This amp isn't linked to a network amp".to_string()))?;
         mac
     };
-    let reading = read_linked_amp(&live, &mac)?
+    let reading = read_linked_amp(live, &mac)?
         .filter(|r| r.device.online)
         .ok_or_else(|| AppError::from("The linked amp is offline".to_string()))?;
     let snapshot = reading
@@ -196,18 +204,11 @@ pub fn projects_merge_amp_from_live(
         .as_ref()
         .ok_or_else(|| AppError::from("The linked amp's settings haven't been read yet".to_string()))?;
 
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
     let (candidate, candidate_fp, live_fp) = {
-        let project = inner
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-        let assignment = project
-            .amp_assignments
-            .iter()
-            .find(|a| a.id == assignment_id)
-            .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+        let project = store::project(&inner.projects, &project_id)?;
+        let assignment = store::assignment(&project, &assignment_id)?;
         // The link can change while the live store is being read.
         if assignment.mac.as_deref().map(normalize_mac) != Some(normalize_mac(&mac)) {
             return Err(AppError::from("The amp's link changed — try again".to_string()));
@@ -265,22 +266,10 @@ pub fn projects_merge_amp_from_live(
         });
     }
 
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
+    let assignment = store::assignment_mut(project, &assignment_id)?;
     *assignment = candidate;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
+    let project = store::commit(app, &inner.data_dir, project)?;
     Ok(AmpMergeResult { merged: true, project: Some(project), amp_hash: live_fp.amp_hash, remaining: Vec::new() })
 }
 
@@ -299,25 +288,13 @@ pub fn projects_set_amp_live_disengaged(
     assignment_id: String,
     disengaged: bool,
 ) -> Result<Project, AppError> {
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
+    let assignment = store::assignment_mut(project, &assignment_id)?;
 
     assignment.live_disengaged = disengaged;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    store::commit(&app, &inner.data_dir, project)
 }
 
 /// Clears a project amp's linked MAC. Planned config is left untouched.
@@ -329,29 +306,17 @@ pub fn projects_unlink_amp(
     project_id: String,
     assignment_id: String,
 ) -> Result<Project, AppError> {
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
-    let assignment = project
-        .amp_assignments
-        .iter_mut()
-        .find(|a| a.id == assignment_id)
-        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
+    let assignment = store::assignment_mut(project, &assignment_id)?;
 
     assignment.mac = None;
     // A disengagement from hardware this slot is no longer linked to means
     // nothing, and leaving it set would make a later re-link start silently
     // disengaged.
     assignment.live_disengaged = false;
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    store::commit(&app, &inner.data_dir, project)
 }
 
 /// Adds a discovered amp to the project as what it reports itself to be —
@@ -372,7 +337,8 @@ pub fn projects_add_live_amp(
     if !device.online {
         return Err(AppError::from("The amp is offline".to_string()));
     }
-    let mut inner = project_data.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
 
     let model = resolve_device_model(&inner.amp_models, &inner.device_model_links, &device)
         .cloned()
@@ -382,11 +348,7 @@ pub fn projects_add_live_amp(
         .clone()
         .ok_or_else(|| AppError::from(format!("Firmware \"{}\" is not recognized", device.firmware_version)))?;
 
-    let project = inner
-        .projects
-        .iter_mut()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+    let project = store::project_mut(&mut inner.projects, &project_id)?;
     let mac = normalize_mac(&device.mac);
     if project.amp_assignments.iter().any(|a| a.mac.as_deref().map(normalize_mac).as_deref() == Some(mac.as_str())) {
         return Err(AppError::from("This amp is already linked in this project".to_string()));
@@ -398,12 +360,7 @@ pub fn projects_add_live_amp(
     assignment.reconcile_matrix_size(model.topology.matrix_input_count);
     assignment.reconcile_eq_bands(model.topology.eq_bands_per_channel);
     project.amp_assignments.push(assignment);
-    project.touch();
-
-    let project = project.clone();
-    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
-    app.emit("project:updated", &project).ok();
-    Ok(project)
+    store::commit(&app, &inner.data_dir, project)
 }
 
 /// Renames a project amp and sets the firmware it is planned for — the
@@ -423,16 +380,18 @@ pub async fn projects_edit_amp(
     device_name: Option<String>,
     firmware_version: Option<String>,
 ) -> Result<Project, AppError> {
-    let mut candidate = candidate_of(&project_data, &project_id, &assignment_id)?;
-    let name = validate_name("Device name", device_name.as_deref().unwrap_or(""), DEVICE_NAME_FIELD_LEN)?;
-    let linked = candidate.mac.is_some();
-    if linked && name.is_empty() {
-        return Err(AppError::from("A linked amp needs a name — the amp always has one"));
-    }
-    if linked && firmware_version != candidate.firmware_version {
-        return Err(AppError::from("The firmware comes from the linked amp"));
-    }
-    candidate.device_name = Some(name.to_string()).filter(|n| !n.is_empty());
-    candidate.firmware_version = firmware_version;
-    save_or_push(&app, &project_data, &live, project_id, assignment_id, candidate, "the name").await
+    let name = validate_name("Device name", device_name.as_deref().unwrap_or(""), DEVICE_NAME_FIELD_LEN)?.to_string();
+    save_or_push(&app, &project_data, &live, project_id, assignment_id, "the name", |candidate, _| {
+        let linked = candidate.mac.is_some();
+        if linked && name.is_empty() {
+            return Err(AppError::from("A linked amp needs a name — the amp always has one"));
+        }
+        if linked && firmware_version != candidate.firmware_version {
+            return Err(AppError::from("The firmware comes from the linked amp"));
+        }
+        candidate.device_name = Some(name).filter(|n| !n.is_empty());
+        candidate.firmware_version = firmware_version;
+        Ok(())
+    })
+    .await
 }

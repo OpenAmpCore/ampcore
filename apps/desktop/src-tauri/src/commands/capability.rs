@@ -18,7 +18,7 @@ pub fn amp_capability_resolve(
     amp_model_id: String,
     firmware_version: Option<String>,
 ) -> Result<AmpCapability, AppError> {
-    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let inner = state.lock()?;
     let model = inner
         .amp_models
         .iter()
