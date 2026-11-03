@@ -9,6 +9,22 @@ interface UpdateAvailableModalProps {
   onDisable: () => void;
 }
 
+/** The CHANGELOG.md section the release carries (latest.json's "notes"):
+ * `### ` headings, `- ` items, anything else a line of text. */
+function ReleaseNotes({ text }: { text: string }) {
+  return (
+    <div className="flex max-h-64 flex-col gap-1 overflow-auto" style={{ fontSize: "var(--amp-font-size-sm)" }}>
+      {text.split("\n").map((raw, i) => {
+        const line = raw.trim();
+        if (!line) return null;
+        if (line.startsWith("### ")) return <strong key={i} className="mt-1">{line.slice(4)}</strong>;
+        if (line.startsWith("- ")) return <div key={i} className="pl-3">• {line.slice(2)}</div>;
+        return <div key={i}>{line}</div>;
+      })}
+    </div>
+  );
+}
+
 export function UpdateAvailableModal({
   update,
   installing,
@@ -34,6 +50,7 @@ export function UpdateAvailableModal({
               <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
                 Version {update?.version} is available — you're currently on {update?.currentVersion}.
               </span>
+              {update?.body?.trim() && <ReleaseNotes text={update.body} />}
               <div className="flex items-center justify-between">
                 <Button variant="ghost" onPress={onDisable} isDisabled={installing}>
                   Disable update checks
