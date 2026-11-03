@@ -1,6 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, ButtonGroup, Spinner } from "@heroui/react";
 import { ArrowLeft, ArrowRight, Check, Network, Server, X } from "lucide-react";
+import {
+  commands,
+  type AmpEditLock,
+  type AmpMergeResult,
+  type AmpPushResult,
+  type Project,
+} from "../../lib/bindings";
+import { useHoldToConfirm } from "../../hooks/useHoldToConfirm";
 
 function ThemeIcon({ color, size, className, children }: { color: string; size: number; className?: string; children: ReactNode }) {
   return (
@@ -12,14 +20,6 @@ function ThemeIcon({ color, size, className, children }: { color: string; size: 
     </div>
   );
 }
-import {
-  commands,
-  type AmpEditLock,
-  type AmpMergeResult,
-  type AmpPushResult,
-  type Project,
-} from "../lib/bindings";
-import { useHoldToConfirm } from "../hooks/useHoldToConfirm";
 
 const HOLD_MS = 1000;
 

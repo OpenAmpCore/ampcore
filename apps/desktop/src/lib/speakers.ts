@@ -4,6 +4,7 @@ import {
   commands,
   type ChannelSpeakerState,
   type Project,
+  type SpeakerDetails,
   type SpeakerLibraryEntry,
   type SpeakerStatus,
 } from "./bindings";
@@ -54,6 +55,9 @@ export function useSpeakerStates(
   }, [projectId, assignmentId, updatedAt, library]);
   return states;
 }
+
+/** Details of a speaker not described yet: one unnamed way. */
+export const EMPTY_SPEAKER_DETAILS: SpeakerDetails = { brand: "", family: "", model: "", application: "", notes: "", wayLabels: [""] };
 
 export function speakerName(entry: SpeakerLibraryEntry): string {
   return `${entry.brand} ${entry.model}`;

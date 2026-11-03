@@ -1,8 +1,8 @@
 import { Button, ButtonGroup, Modal } from "@heroui/react";
-import { EqEditor } from "../EqEditor";
-import { LimiterEditor } from "../LimiterEditor";
+import { EqEditor } from "../editors/EqEditor";
+import { LimiterEditor } from "../editors/LimiterEditor";
 import { channelTelemetry, outputLetter } from "../../lib/channelTelemetry";
-import { FirPanel } from "../FirPanel";
+import { FirPanel } from "../editors/FirPanel";
 import { useIsCompact } from "../../lib/breakpoints";
 import type { ConfigurableTabProps } from "./parts";
 

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Button, Modal } from "@heroui/react";
 import { X } from "lucide-react";
-import { outputLetter } from "../lib/channelTelemetry";
-import { NO_LINKS, type LinkConfig, type LinkScope } from "../lib/channelLinks";
-import { setPreference, usePreference } from "../lib/preferences";
-import { useConfirm } from "./ConfirmDialog";
-import { SECTION_TITLE } from "./fieldClasses";
+import { outputLetter } from "../../lib/channelTelemetry";
+import { NO_LINKS, type LinkConfig, type LinkScope } from "../../lib/channelLinks";
+import { setPreference, usePreference } from "../../lib/preferences";
+import { useConfirm } from "../ConfirmDialog";
+import { SECTION_TITLE } from "../fieldClasses";
 
 const INPUT_SCOPES: { scope: LinkScope; label: string }[] = [
   { scope: "muteIn", label: "Mute" },

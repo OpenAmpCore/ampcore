@@ -1,5 +1,5 @@
 import { ViewportPortal, useViewport } from "@xyflow/react";
-import type { Guide, Guides } from "../lib/helperLines";
+import type { Guide, Guides } from "../../lib/helperLines";
 
 /** The stretch at each end of a line over which it fades in — inside the
  * line, so it never reaches past the tiles it joins. Capped for short lines,

@@ -1,21 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Modal, toast } from "@heroui/react";
-import { useIsCompact } from "../lib/breakpoints";
-import {
-  commands,
-  type AmpAssignment,
-  type AmpEditLock,
-  type ChannelSpeakerState,
-  type Project,
-  type ProjectSpeaker,
-  type SpeakerLibraryEntry,
-} from "../lib/bindings";
-import { usePreference } from "../lib/preferences";
-import { speakerFields, useSpeakerLibrary } from "../lib/speakers";
-import { useConfirm } from "./ConfirmDialog";
+import { useIsCompact } from "../../lib/breakpoints";
+import { commands, type AmpAssignment, type AmpEditLock, type ChannelSpeakerState, type Project, type ProjectSpeaker, type SpeakerLibraryEntry } from "../../lib/bindings";
+import { usePreference } from "../../lib/preferences";
+import { speakerFields, useSpeakerLibrary } from "../../lib/speakers";
+import { useConfirm } from "../ConfirmDialog";
 import { MUTED, outputRows } from "./SpeakerBench";
-import { CommitNumberInput } from "./CommitNumberInput";
-import { FIELD_INPUT } from "./fieldClasses";
+import { CommitNumberInput } from "../CommitNumberInput";
+import { FIELD_INPUT } from "../fieldClasses";
 import { bridgeConfirm, confirmFit } from "./speakerApply";
 
 /** Nothing being written: the idle value of `pending`, and an operation still asking its question. */

@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Alert, Button, Chip, Modal, Switch } from "@heroui/react";
 import { ChevronDown } from "lucide-react";
-import type { AmpEditLock, AmpEditLockState, AmpMergeResult, FingerprintRow, Project } from "../lib/bindings";
-import { useIsCompact } from "../lib/breakpoints";
+import type { AmpEditLock, AmpEditLockState, AmpMergeResult, FingerprintRow, Project } from "../../lib/bindings";
+import { useIsCompact } from "../../lib/breakpoints";
 import { AmpMergePanel, type MergeDirection } from "./AmpMergePanel";
 import { AmpPushSteps } from "./AmpPushSteps";
 import { CopyJsonButton } from "./FingerprintInspector";

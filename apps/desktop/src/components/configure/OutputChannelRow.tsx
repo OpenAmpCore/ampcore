@@ -10,7 +10,7 @@ import type { ActionResult } from "../../lib/actionResult";
 import type { AmpAssignment, ChannelSpeakerState, PowerMode } from "../../lib/bindings";
 import { FALLBACK_LIMITER, outputLetter, OUTPUT_METER_FLOOR_DB, OUTPUT_METER_MARKS, outputMeterScale, rmsCeilingVolts, type ChannelTelemetry } from "../../lib/channelTelemetry";
 import { Hint } from "../Hint";
-import { StatusChip } from "../SpeakerBench";
+import { StatusChip } from "../speakers/SpeakerBench";
 import { usePreference } from "../../lib/preferences";
 import { ChannelLevelMeter } from "./meters";
 import { LinkTarget, RenameableLabel, TilePopover, activeFilterCount } from "./parts";

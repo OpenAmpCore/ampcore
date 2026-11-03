@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Spinner, Switch, Tooltip } from "@heroui/react";
 import { RefreshCw } from "lucide-react";
-
-import type { ActionResult } from "../lib/actionResult";
-import { commands, type AmpCapability, type ChannelEq, type ChannelFir, type ChannelFirSnapshot } from "../lib/bindings";
-import { responseCurve } from "../lib/eqResponse";
-import { useFirResponseCurve } from "../lib/filterResponse";
-import { usePreference } from "../lib/preferences";
-import { useConfirm } from "./ConfirmDialog";
+import type { ActionResult } from "../../lib/actionResult";
+import { commands, type AmpCapability, type ChannelEq, type ChannelFir, type ChannelFirSnapshot } from "../../lib/bindings";
+import { responseCurve } from "../../lib/eqResponse";
+import { useFirResponseCurve } from "../../lib/filterResponse";
+import { usePreference } from "../../lib/preferences";
+import { useConfirm } from "../ConfirmDialog";
 import { formatDb, FrequencyPlot, toPlotPoints, type PlotAxis, type PlotCurve } from "./FrequencyPlot";
-import { RowMenu } from "./SpeakerBench";
+import { RowMenu } from "../speakers/SpeakerBench";
 
 /** Parses an imported FIR file: one coefficient per line, tolerating the
  * vendor's own `"index value"`/`"index, value"` export shapes by taking the

@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { toast } from "@heroui/react";
-import { commands, type FitRow, type SpeakerItem, type SpeakerLibraryEntry } from "../lib/bindings";
-import type { useConfirm } from "./ConfirmDialog";
+import { commands, type FitRow, type SpeakerItem, type SpeakerLibraryEntry } from "../../lib/bindings";
+import type { useConfirm } from "../ConfirmDialog";
 import { MUTED } from "./SpeakerBench";
-import { outputLetter } from "../lib/channelTelemetry";
+import { outputLetter } from "../../lib/channelTelemetry";
 
 /** One output of one project amp to set up from a library way. */
 export interface FitItem {

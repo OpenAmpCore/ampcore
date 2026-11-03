@@ -1,10 +1,10 @@
 import { useRef, useState } from "react";
 import { Button, Chip, Dropdown, dropdownVariants } from "@heroui/react";
 import { MoreHorizontal } from "lucide-react";
-import type { AmpAssignment, ChannelSpeakerState, ProjectSpeaker, SpeakerLibraryEntry } from "../lib/bindings";
-import { speakerFields, speakerName } from "../lib/speakers";
-import { Hint } from "./Hint";
-import { outputLetter } from "../lib/channelTelemetry";
+import type { AmpAssignment, ChannelSpeakerState, ProjectSpeaker, SpeakerLibraryEntry } from "../../lib/bindings";
+import { speakerFields, speakerName } from "../../lib/speakers";
+import { Hint } from "../Hint";
+import { outputLetter } from "../../lib/channelTelemetry";
 
 const DROPDOWN_SLOTS = dropdownVariants();
 export const MUTED = "text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]";

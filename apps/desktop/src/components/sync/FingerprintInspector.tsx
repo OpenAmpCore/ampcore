@@ -1,13 +1,9 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Chip, Modal, Spinner, Tooltip } from "@heroui/react";
 import { Fingerprint, RefreshCw } from "lucide-react";
-import {
-  commands,
-  type AmpFingerprint,
-  type ChannelFingerprint,
-} from "../lib/bindings";
-import { useIsCompact } from "../lib/breakpoints";
-import { Hint } from "./Hint";
+import { commands, type AmpFingerprint, type ChannelFingerprint } from "../../lib/bindings";
+import { useIsCompact } from "../../lib/breakpoints";
+import { Hint } from "../Hint";
 
 /** Which amp to fingerprint — a planned project assignment or a live device.
  * Both go through the same backend canonicalization (`data/fingerprint.rs`),

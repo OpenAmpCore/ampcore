@@ -1,48 +1,24 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Button, ButtonGroup, Input, Label, Modal, Spinner, Switch, TextField, toast } from "@heroui/react";
+import { Button, ButtonGroup, Spinner, Switch, toast } from "@heroui/react";
 import { Controls, ReactFlow, useNodesState, type ColorMode, type Node, type NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import {
-  AlignCenterHorizontal,
-  AlignCenterVertical,
-  AlignEndHorizontal,
-  AlignEndVertical,
-  AlignHorizontalDistributeCenter,
-  AlignHorizontalSpaceAround,
-  AlignStartHorizontal,
-  AlignStartVertical,
-  AlignVerticalDistributeCenter,
-  Columns3,
-  Group,
-  Rows3,
-} from "lucide-react";
+import { AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignHorizontalDistributeCenter, AlignHorizontalSpaceAround, AlignStartHorizontal, AlignStartVertical, AlignVerticalDistributeCenter, Columns3, Group, Rows3 } from "lucide-react";
 import { GitCompare, Link, Link2, Link2Off, MousePointer2, Pencil, Plus, RotateCcw, SlidersHorizontal, SplitSquareVertical, Trash2 } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { AmpLinkModal } from "./AmpLinkModal";
-import { FingerprintMismatchModal, STATE_BADGE } from "./FingerprintMismatchModal";
-import { useContextMenu } from "./ContextMenu";
+import { FingerprintMismatchModal, STATE_BADGE } from "../sync/FingerprintMismatchModal";
+import { useContextMenu } from "../ContextMenu";
 import { HelperLines } from "./HelperLines";
-import { Hint } from "./Hint";
-import { SimpleSelect } from "./SimpleSelect";
-import {
-  AmpTile,
-  NODE_TYPES,
-  SpeakerCanvasContext,
-  GROUP_TILE_W,
-  TILE_W,
-  type Armed,
-  type OutputBox,
-  type SpeakerCanvas,
-  type SpeakerNodeData,
-  type Tool,
-} from "./WorkspaceNodes";
-import { useProjectSpeakers, type ProjectOutput } from "./useProjectSpeakers";
-import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project, type ProjectSpeaker } from "../lib/bindings";
-import { firmwareOptionsFor } from "../lib/firmwareOptions";
-import { useIsCompact } from "../lib/breakpoints";
-import { arrange, freeSpot, type Arrangement, type Rect } from "../lib/arrange";
-import { NO_GUIDES, snapToGuides, type Guides } from "../lib/helperLines";
-import { useLiveDevices } from "../hooks/useLiveDevices";
+import { Hint } from "../Hint";
+import { useConfirm } from "../ConfirmDialog";
+import { EditAmpModal } from "./EditAmpModal";
+import { AmpTile, NODE_TYPES, SpeakerCanvasContext, GROUP_TILE_W, TILE_W, type Armed, type OutputBox, type SpeakerCanvas, type SpeakerNodeData, type Tool } from "./WorkspaceNodes";
+import { useProjectSpeakers, type ProjectOutput } from "../speakers/useProjectSpeakers";
+import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project, type ProjectSpeaker } from "../../lib/bindings";
+import { useIsCompact } from "../../lib/breakpoints";
+import { arrange, freeSpot, type Arrangement, type Rect } from "../../lib/arrange";
+import { NO_GUIDES, snapToGuides, type Guides } from "../../lib/helperLines";
+import { useLiveDevices } from "../../hooks/useLiveDevices";
 
 const PANE_HEADING = { fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" } as const;
 const SPEAKER_GAP = 16;
@@ -92,13 +68,8 @@ interface WorkspaceViewProps {
 export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice, locks }: WorkspaceViewProps) {
   const compact = useIsCompact();
   const [catalogueOpen, setCatalogueOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [editTarget, setEditTarget] = useState<AmpAssignment | null>(null);
-  const [editDeviceName, setEditDeviceName] = useState("");
-  const [editFirmwareVersion, setEditFirmwareVersion] = useState<string | null>(null);
-  const [savingDeviceName, setSavingDeviceName] = useState(false);
-  const [deviceNameError, setDeviceNameError] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   // By id, so the modal sees the updated assignment (new MAC) after Assign/Unlink.
   const [linkTargetId, setLinkTargetId] = useState<string | null>(null);
 
@@ -455,41 +426,18 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     },
   };
 
-  function openEdit(assignment: AmpAssignment) {
-    setDeviceNameError(null);
-    setEditDeviceName(assignment.deviceName ?? "");
-    setEditFirmwareVersion(assignment.firmwareVersion ?? null);
-    setEditTarget(assignment);
+  async function removeAmp(assignment: AmpAssignment) {
+    const ok = await confirm({
+      title: "Remove Amp",
+      description: `Remove ${nameFor(assignment)} from this project? This can't be undone.`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
+    if (!ok) return;
+    const result = await commands.projectsRemoveAmpAssignment(project.id, assignment.id);
+    if (result.status === "ok") onProjectUpdate(result.data);
+    else toast.danger("Amp not removed", { description: result.error.message });
   }
-
-  async function handleConfirmDelete() {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    const result = await commands.projectsRemoveAmpAssignment(project.id, deleteTarget.id);
-    setDeleting(false);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-      setDeleteTarget(null);
-    }
-  }
-
-  async function handleSaveDeviceName() {
-    if (!editTarget) return;
-    setDeviceNameError(null);
-    setSavingDeviceName(true);
-    // Through the sync push for a linked, online amp: the name is part of its fingerprint.
-    const result = await commands.projectsEditAmp(project.id, editTarget.id, editDeviceName.trim() || null, editFirmwareVersion);
-    setSavingDeviceName(false);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-      setEditTarget(null);
-    } else {
-      setDeviceNameError(result.error.message);
-    }
-  }
-
-  const editModel = editTarget?.ampModelId ? modelsById.get(editTarget.ampModelId) : undefined;
-  const editFirmwareOptions = firmwareOptionsFor(editModel?.protocol);
 
   if (ampModels === null) {
     return (
@@ -549,10 +497,10 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
           {selecting && selectedAmp ? (
             <div className="flex min-w-0 flex-1 items-center justify-end">
               {iconAction("Configure", <SlidersHorizontal size={14} />, () => onOpenDevice(selectedAmp))}
-              {iconAction("Edit name and firmware", <Pencil size={14} />, () => openEdit(selectedAmp))}
+              {iconAction("Edit name and firmware", <Pencil size={14} />, () => setEditTarget(selectedAmp))}
               {iconAction("Link to a network amp", <Link size={14} />, () => setLinkTargetId(selectedAmp.id))}
               {locks.get(selectedAmp.id)?.live && iconAction("Compare with the network amp", <GitCompare size={14} />, () => setCompareId(selectedAmp.id))}
-              {iconAction("Remove amp", <Trash2 size={14} />, () => setDeleteTarget(selectedAmp), true)}
+              {iconAction("Remove amp", <Trash2 size={14} />, () => void removeAmp(selectedAmp), true)}
             </div>
           ) : selecting ? (
             <span className="min-w-0 flex-1 truncate text-right" style={PANE_HEADING}>{linked.length > 0 ? summary : ""}</span>
@@ -758,82 +706,14 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
         onClose={() => setLinkTargetId(null)}
       />
 
-      <Modal.Backdrop isOpen={editTarget !== null} onOpenChange={(open) => !open && setEditTarget(null)}>
-        <Modal.Container placement="center" size="sm">
-          <Modal.Dialog>
-            <Modal.Header>
-              <Modal.Heading>Edit Amp</Modal.Heading>
-              <Modal.CloseTrigger />
-            </Modal.Header>
-            <Modal.Body>
-              <div className="flex flex-col gap-3">
-                <TextField autoFocus>
-                  <Label>Device Name</Label>
-                  <Input
-                    placeholder="Optional"
-                    maxLength={32}
-                    value={editDeviceName}
-                    onChange={(e) => setEditDeviceName(e.target.value)}
-                  />
-                </TextField>
-                {editFirmwareOptions.length > 0 && (
-                  <SimpleSelect
-                    label="Firmware Version"
-                    description={
-                      editTarget?.mac
-                        ? "Taken from the linked amp."
-                        : "Which parameter ranges/units to plan around — not detected, since there's no live device yet."
-                    }
-                    data={editFirmwareOptions.map((v) => ({ value: v, label: v }))}
-                    value={editFirmwareVersion}
-                    onChange={setEditFirmwareVersion}
-                    disabled={!!editTarget?.mac}
-                  />
-                )}
-                {deviceNameError && (
-                  <span style={{ color: "var(--amp-color-red-6)", fontSize: "var(--amp-font-size-sm)" }}>
-                    {deviceNameError}
-                  </span>
-                )}
-                <div className="flex justify-end gap-2">
-                  <Button variant="secondary" onPress={() => setEditTarget(null)} isDisabled={savingDeviceName}>
-                    Cancel
-                  </Button>
-                  <Button variant="primary" onPress={handleSaveDeviceName} isDisabled={savingDeviceName}>
-                    {savingDeviceName ? <Spinner size="sm" /> : "Save"}
-                  </Button>
-                </div>
-              </div>
-            </Modal.Body>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
-
-      <Modal.Backdrop isOpen={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <Modal.Container placement="center" size="sm">
-          <Modal.Dialog>
-            <Modal.Header>
-              <Modal.Heading>Remove Amp</Modal.Heading>
-              <Modal.CloseTrigger />
-            </Modal.Header>
-            <Modal.Body>
-              <div className="flex flex-col gap-3">
-                <span style={{ fontSize: "var(--amp-font-size-sm)" }}>
-                  Remove {deleteTarget ? nameFor(deleteTarget) : ""} from this project? This can't be undone.
-                </span>
-                <div className="flex justify-end gap-2">
-                  <Button variant="secondary" onPress={() => setDeleteTarget(null)} isDisabled={deleting}>
-                    Cancel
-                  </Button>
-                  <Button variant="danger" onPress={handleConfirmDelete} isDisabled={deleting}>
-                    {deleting ? <Spinner size="sm" /> : "Remove"}
-                  </Button>
-                </div>
-              </div>
-            </Modal.Body>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
+      <EditAmpModal
+        projectId={project.id}
+        assignment={editTarget}
+        model={editTarget?.ampModelId ? modelsById.get(editTarget.ampModelId) : undefined}
+        onClose={() => setEditTarget(null)}
+        onProjectUpdate={onProjectUpdate}
+      />
+      {confirmDialog}
     </div>
   );
 });

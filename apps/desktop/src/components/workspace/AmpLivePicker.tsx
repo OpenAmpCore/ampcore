@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { Button, Chip, Spinner } from "@heroui/react";
 import { Check, Server } from "lucide-react";
-import { commands, type AmpModelCatalogEntry, type DiscoveredDevice, type Project } from "../lib/bindings";
-import { normalizeMac } from "../lib/ampLinkStatus";
-import { useScanTimeout } from "../hooks/useScanTimeout";
-import { MUTED } from "./SpeakerBench";
-import { ScanStatus } from "./ScanStatus";
+import { commands, type AmpModelCatalogEntry, type DiscoveredDevice, type Project } from "../../lib/bindings";
+import { normalizeMac } from "../../lib/ampLinkStatus";
+import { useScanTimeout } from "../../hooks/useScanTimeout";
+import { MUTED } from "../speakers/SpeakerBench";
+import { ScanStatus } from "../ScanStatus";
 
 /** Catalog model per discovered device id, resolved exactly like Live Control's
  * model select (`deviceModelLinkAutoMatch`: a manual pick wins, otherwise the

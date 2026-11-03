@@ -2,11 +2,11 @@ import { createContext, useContext, type ReactNode } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
 import { Spinner } from "@heroui/react";
 import { Speaker } from "lucide-react";
-import type { ChannelSpeakerState, ProjectSpeaker } from "../lib/bindings";
-import { speakerFields } from "../lib/speakers";
-import { Hint } from "./Hint";
-import { MUTED } from "./SpeakerBench";
-import { FIELD_INPUT } from "./fieldClasses";
+import type { ChannelSpeakerState, ProjectSpeaker } from "../../lib/bindings";
+import { speakerFields } from "../../lib/speakers";
+import { Hint } from "../Hint";
+import { MUTED } from "../speakers/SpeakerBench";
+import { FIELD_INPUT } from "../fieldClasses";
 
 /** Width of a tile, amp or speaker: a picture and a name, like ArmoníaPlus's.
  * Everything else about it is in its tooltip, and what can be done to it is in

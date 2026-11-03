@@ -1,17 +1,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, ButtonGroup, Input, Label, Modal, Spinner, TextField } from "@heroui/react";
 import { Box, ChevronDown, ChevronRight, Radio, Server } from "lucide-react";
-import {
-  commands,
-  type AmpModelCatalogEntry,
-  type DiscoveredDevice,
-  type Project,
-} from "../lib/bindings";
-import { getAmpSpecSheet } from "../lib/ampSpecSheets";
-import { firmwareOptionsFor } from "../lib/firmwareOptions";
-import { useIsCompact } from "../lib/breakpoints";
+import { commands, type AmpModelCatalogEntry, type DiscoveredDevice, type Project } from "../../lib/bindings";
+import { getAmpSpecSheet } from "../../lib/ampSpecSheets";
+import { firmwareOptionsFor } from "../../lib/firmwareOptions";
+import { useIsCompact } from "../../lib/breakpoints";
 import { AmpLivePicker, unlinkedDevices } from "./AmpLivePicker";
-import { SimpleSelect } from "./SimpleSelect";
+import { SimpleSelect } from "../SimpleSelect";
 
 interface AmpCatalogueModalProps {
   opened: boolean;

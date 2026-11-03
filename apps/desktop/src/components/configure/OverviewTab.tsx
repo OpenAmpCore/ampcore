@@ -1,19 +1,19 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Slider } from "@heroui/react";
 import { Volume2, VolumeX } from "lucide-react";
-import type { ConfigurableTabProps } from "./configure/parts";
-import { ChannelStateBadge } from "./ChannelStateBadge";
-import { CommitNumberInput } from "./CommitNumberInput";
-import { SECTION_TITLE } from "./fieldClasses";
-import { Hint } from "./Hint";
-import { StatToggle } from "./StatTiles";
-import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
-import { NO_AMP_GAIN, type AmpGainReading } from "../lib/ampGain";
-import type { ActionResult } from "../lib/actionResult";
-import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../lib/bindings";
-import { channelTelemetry, FALLBACK_LIMITER, outputLetter, OUTPUT_METER_FLOOR_DB, OUTPUT_METER_MARKS, outputMeterScale, rmsCeilingVolts, type ChannelTelemetry, type OutputMeterScale, INPUT_METER_FLOOR_DB, INPUT_METER_MARKS } from "../lib/channelTelemetry";
-import { channelStateTone } from "../lib/channelState";
-import { usePreference } from "../lib/preferences";
+import type { ConfigurableTabProps } from "./parts";
+import { ChannelStateBadge } from "../ChannelStateBadge";
+import { CommitNumberInput } from "../CommitNumberInput";
+import { SECTION_TITLE } from "../fieldClasses";
+import { StatToggle } from "../StatTiles";
+import type { VuMeterMark } from "../VuMeter";
+import { NO_AMP_GAIN, type AmpGainReading } from "../../lib/ampGain";
+import type { ActionResult } from "../../lib/actionResult";
+import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../../lib/bindings";
+import { channelTelemetry, FALLBACK_LIMITER, outputLetter, OUTPUT_METER_FLOOR_DB, OUTPUT_METER_MARKS, outputMeterScale, rmsCeilingVolts, type ChannelTelemetry, type OutputMeterScale, INPUT_METER_FLOOR_DB, INPUT_METER_MARKS } from "../../lib/channelTelemetry";
+import { channelStateTone } from "../../lib/channelState";
+import { usePreference } from "../../lib/preferences";
+import { Cell, ChannelHeader, Column, HEADER_H, Led, LevelMeter, ROW_H, STRIP_H, Scale, Section, SideText, ValueCell } from "./overviewParts";
 
 /* The vendor app's Main page, rebuilt from this app's own parts: every
  * channel's level and gain on one screen for quick adjustments, with routing
@@ -26,12 +26,6 @@ import { usePreference } from "../lib/preferences";
  * fader's drag value feeds the dB field under it); the matching heights below
  * are what keep the side labels level with them. */
 
-/** Every channel column is the strip tile's own width, so the Mute toggle
- * fills its column exactly and the three cards read as one grid. */
-const COLUMN_W = 72;
-/** Faders and meters share one height and all start right under the header,
- * so their ends line up across cards. */
-const STRIP_H = 200;
 /** How far inside its box a vertical HeroUI slider's thumb stops at either
  * end: the slider grid's 0.5rem row gap plus the track's 0.75rem transparent
  * border (`@heroui/styles` slider.css). The fader scale is inset to match, so
@@ -40,18 +34,16 @@ const STRIP_H = 200;
  * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
  * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
-/** A value row: the dB/Gain/SEN fields and the V/A/°C readouts. */
-const ROW_H = 30;
-/** A column's channel number or letter, with its name under it. */
-const HEADER_H = 36;
+
 /** `StatToggle`'s fixed height — the Mute row. */
 const TOGGLE_H = 52;
+
 /** Label/scale columns, and the Output card's LED legend. */
 const SIDE_W = 44;
-const LEGEND_W = 56;
-const GAP = 8;
-const LED_ROW_H = 16;
 
+const LEGEND_W = 56;
+
+const LED_ROW_H = 16;
 
 /** The vendor fader's scale (+18 … −80), kept to whatever range the model
  * actually allows. */
@@ -125,74 +117,12 @@ function outputTotals(readings: ChannelTelemetry[]): OutputTotals {
 }
 
 const LOW_CURRENT = "Low";
+
 const LOW_CURRENT_HINT = "Current is below what the amp can measure";
 
 function totalCurrentText({ currentA, belowRange }: OutputTotals): string {
   if (!belowRange) return fmt(currentA, 1);
   return currentA ? `≥ ${fmt(currentA, 1)}` : LOW_CURRENT;
-}
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="flex min-w-0 flex-col gap-1.5">
-      <h3 className={SECTION_TITLE}>{title}</h3>
-      {/* `flex-1`: the card row stretches its sections, so every card ends on
-       * the same bottom edge. */}
-      <div
-        className="flex min-w-0 flex-1 overflow-x-auto rounded-xl border border-[var(--amp-color-default-border)] p-3"
-        style={{ gap: GAP }}
-      >
-        {children}
-      </div>
-    </section>
-  );
-}
-
-function Column({ width = COLUMN_W, children }: { width?: number; children: ReactNode }) {
-  return (
-    <div className="flex shrink-0 flex-col" style={{ width, gap: GAP }}>
-      {children}
-    </div>
-  );
-}
-
-/** One fixed-height row of a column. `align` places side labels against the
- * channel columns they describe. */
-function Cell({
-  height,
-  align = "center",
-  children,
-}: {
-  height: number;
-  align?: "start" | "center" | "end";
-  children?: ReactNode;
-}) {
-  return (
-    <div className="flex items-center" style={{ height, justifyContent: align }}>
-      {children}
-    </div>
-  );
-}
-
-function SideText({ children }: { children: ReactNode }) {
-  return (
-    <span style={{ fontSize: "var(--amp-font-size-xs)", color: "var(--amp-color-dimmed)", whiteSpace: "nowrap" }}>
-      {children}
-    </span>
-  );
-}
-
-function ChannelHeader({ label, name }: { label: string; name: string }) {
-  return (
-    <div className="flex min-w-0 flex-col items-center justify-center" style={{ height: HEADER_H }}>
-      <span style={{ fontSize: "var(--amp-font-size-sm)", fontWeight: 600, color: "var(--amp-color-dimmed)" }}>
-        {label}
-      </span>
-      <Hint text={name} className="w-full min-w-0">
-        <span className="block truncate text-center text-[length:var(--amp-font-size-xs)]">{name}</span>
-      </Hint>
-    </div>
-  );
 }
 
 /** The name the amp holds for an input, or its default label. */
@@ -202,96 +132,6 @@ const inputName = (channel: AmpChannel) => channel.inputName?.trim() || `In${cha
  * `split_hash_suffix`). */
 const outputName = (channel: AmpChannel) =>
   channel.outputName?.trim().replace(/_[0-9a-fA-F]{4}$/, "") || `Out${outputLetter(channel.channelIndex)}`;
-
-/** A passive value, recessed like `StatReadout` but one row high. */
-function ValueCell({ value, hint }: { value: string; hint?: string }) {
-  const cell = (
-    <div
-      className="flex w-full items-center justify-center"
-      style={{
-        height: ROW_H,
-        borderRadius: "var(--radius-md)",
-        background: "var(--amp-color-default)",
-        fontSize: "var(--amp-font-size-sm)",
-        fontWeight: 700,
-        fontVariantNumeric: "tabular-nums",
-      }}
-    >
-      {value}
-    </div>
-  );
-  return hint ? (
-    <Hint text={hint} className="w-full">
-      {cell}
-    </Hint>
-  ) : (
-    cell
-  );
-}
-
-function Led({ color, lit, label }: { color: string; lit: boolean; label: string }) {
-  return (
-    <span
-      role="img"
-      aria-label={`${label}: ${lit ? "on" : "off"}`}
-      className="block shrink-0 rounded-full"
-      style={{
-        width: 8,
-        height: 8,
-        background: lit ? color : "var(--amp-color-default)",
-        border: `1px solid ${lit ? color : "var(--amp-color-default-border)"}`,
-        boxShadow: lit ? `0 0 6px ${color}` : undefined,
-      }}
-    />
-  );
-}
-
-/** A meter scale on its own: a `VuMeter` with no track, so its labels sit at
- * exactly the positions a real meter of the same size puts them. `inset`
- * shortens it at both ends, for a fader whose thumb stops short of its box. */
-function Scale({ min, max, marks, inset = 0 }: { min: number; max: number; marks: VuMeterMark[]; inset?: number }) {
-  return (
-    <Cell height={STRIP_H} align="end">
-      <VuMeter
-        orientation="vertical"
-        min={min}
-        max={max}
-        value={min}
-        marks={marks}
-        thickness={0}
-        size={STRIP_H - 2 * inset}
-      />
-    </Cell>
-  );
-}
-
-function LevelMeter({
-  level,
-  peakHold,
-  disabled,
-  min = INPUT_METER_FLOOR_DB,
-  max = 0,
-}: {
-  level: number | null;
-  peakHold: boolean;
-  disabled?: boolean;
-  min?: number;
-  max?: number;
-}) {
-  return (
-    <VuMeter
-      orientation="vertical"
-      min={min}
-      max={max}
-      value={level ?? min}
-      gradient={DEFAULT_LEVEL_GRADIENT}
-      thickness={14}
-      size={STRIP_H}
-      peakHold={peakHold}
-      disabled={disabled}
-    />
-  );
-}
 
 /** One channel of the Volume card: fader, its value, and the amp gain with
  * the sensitivity it implies. The fader commits on release, not per tick —

@@ -1,19 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Alert, Button, Card, Chip, Modal, Spinner } from "@heroui/react";
 import { Check, Link, Network, Server, X } from "lucide-react";
-import {
-  commands,
-  type AmpAssignment,
-  type AmpLinkCheckKind,
-  type AmpLinkValidation,
-  type DiscoveredDevice,
-  type Project,
-} from "../lib/bindings";
-import { AMP_LINK_STATUS_META, ampLinkStatus, linkedDeviceFor } from "../lib/ampLinkStatus";
-import { useIsCompact, useIsTight } from "../lib/breakpoints";
+import { commands, type AmpAssignment, type AmpLinkCheckKind, type AmpLinkValidation, type DiscoveredDevice, type Project } from "../../lib/bindings";
+import { AMP_LINK_STATUS_META, ampLinkStatus, linkedDeviceFor } from "../../lib/ampLinkStatus";
+import { useIsCompact, useIsTight } from "../../lib/breakpoints";
 import { useDetectedModels } from "./AmpLivePicker";
-import { ScanStatus } from "./ScanStatus";
-import { useScanTimeout } from "../hooks/useScanTimeout";
+import { ScanStatus } from "../ScanStatus";
+import { useScanTimeout } from "../../hooks/useScanTimeout";
 
 interface AmpLinkModalProps {
   project: Project;

@@ -1,6 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-
-import type { ResponsePoint } from "../lib/filterResponse";
+import type { ResponsePoint } from "../../lib/filterResponse";
 
 /** The one plot surface of the EQ and FIR editors: plain SVG drawn at the
  * container's real pixel size (a `ResizeObserver`, no `viewBox` scaling), so

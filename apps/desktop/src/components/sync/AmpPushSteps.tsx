@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties 
 import { Alert, Spinner } from "@heroui/react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Minus, X } from "lucide-react";
-import { commands, type AmpEditLock, type AmpPushPlan, type PushStage } from "../lib/bindings";
+import { commands, type AmpEditLock, type AmpPushPlan, type PushStage } from "../../lib/bindings";
 
 /** Payload of the Rust `amp_push:progress` event (`AmpPushProgress` in
  * `commands/amp_push.rs`). Declared here rather than imported because specta

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { Button, Alert, Spinner, Tabs, Tooltip } from "@heroui/react";
 import { Eye, GitCompare, Plug, Unplug, Lock, Radio, WifiOff } from "lucide-react";
 import { AmplifierIcon, CabinetIcon, CrosspointMatrixIcon, GangedFadersIcon, MemorySlotsIcon, RackPanelIcon } from "../HardwareIcons";
-import { FingerprintInspector, type FingerprintTarget } from "../FingerprintInspector";
-import { FingerprintMismatchModal } from "../FingerprintMismatchModal";
-import { LinkingTab } from "../LinkingTab";
+import { FingerprintInspector, type FingerprintTarget } from "../sync/FingerprintInspector";
+import { FingerprintMismatchModal } from "../sync/FingerprintMismatchModal";
+import { LinkingTab } from "./LinkingTab";
 import { RotaryLockToggle } from "../RotaryLockToggle";
 import { StandbyToggle } from "../StandbyToggle";
 import { useLiveBridge } from "../../hooks/useLiveBridge";
@@ -12,8 +12,8 @@ import { commands, type AmpAssignment, type AmpCapability_Serialize as AmpCapabi
 import { linkConfigureActions, NO_LINKS } from "../../lib/channelLinks";
 import { createProjectConfigureActions, lockConfigureActions, type ConfigureActions } from "../../lib/configureActions";
 import { buildLiveAssignmentViewModel, createLiveConfigureActions } from "../../lib/liveConfigureAdapter";
-import { OverviewTab } from "../OverviewTab";
-import { SpeakersTab } from "../SpeakersTab";
+import { OverviewTab } from "./OverviewTab";
+import { SpeakersTab } from "../speakers/SpeakersTab";
 import { useSpeakerLibrary, useSpeakerStates } from "../../lib/speakers";
 import { usePreference } from "../../lib/preferences";
 import { ampGainReading } from "../../lib/ampGain";
