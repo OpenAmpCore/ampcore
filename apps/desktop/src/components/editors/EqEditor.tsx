@@ -12,9 +12,9 @@ import type { AmpAssignment, AmpCapability_Serialize as AmpCapability, ChannelEq
 import type { ConfigureActions } from "../../lib/configureActions";
 import { ACTION_UNAVAILABLE, type ActionResult } from "../../lib/actionResult";
 import { outputLetter } from "../../lib/channelTelemetry";
-import { GRAPH_MAX_DB, GRAPH_MIN_DB, StageHandles } from "./EqStageHandles";
+import { StageHandles } from "./EqStageHandles";
 import { type BandPatch, type CrossoverPatch, StageEditor, StageTile } from "./EqStageStrip";
-import { CURVE_EASE, CURVE_POINTS, type FilterCaps, GRAPH_DB, GRAPH_HZ, type PreviewPatch, type StageWrite, type WriteStatus, applyPreview, clampToRange, indexEqFilterCapabilities, roundFreq, roundGain, roundQ, sameStage, stageColor, stageInfo, stageKey, stageName, stagesOf, writeConfirmed } from "./eqStages";
+import { CURVE_EASE, CURVE_POINTS, type FilterCaps, GRAPH_DB, GRAPH_HZ, GRAPH_MAX_DB, GRAPH_MIN_DB, type PreviewPatch, type StageWrite, type WriteStatus, applyPreview, clampToRange, indexEqFilterCapabilities, roundFreq, roundGain, roundQ, sameStage, stageColor, stageInfo, stageKey, stageName, stagesOf, writeConfirmed } from "./eqStages";
 
 /** `AmpChannel.inputEq`/`outputEq` are typed optional in TS (specta marks
  * any `#[serde(default = ...)]` field optional) even though the backend's

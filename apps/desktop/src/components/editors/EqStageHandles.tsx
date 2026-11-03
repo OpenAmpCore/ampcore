@@ -3,11 +3,7 @@ import { pathD, toPlotPoints, type PlotScale } from "./FrequencyPlot";
 import { responseCurve } from "../../lib/eqResponse";
 import type { EqStageRef, ResponsePoint } from "../../lib/filterResponse";
 import type { ChannelEq, EqFilterType } from "../../lib/bindings";
-import { CURVE_EASE, CURVE_POINTS, type FilterCaps, GRAPH_DB, GRAPH_HZ, GRAPH_MAX_HZ, GRAPH_MIN_HZ, type PreviewPatch, type WriteStatus, applyPreview, clampToRange, sameStage, stageColor, stageInfo, stageKey, stagesOf } from "./eqStages";
-
-export const GRAPH_MIN_DB = -24;
-
-export const GRAPH_MAX_DB = 24;
+import { CURVE_EASE, CURVE_POINTS, type FilterCaps, GRAPH_DB, GRAPH_HZ, GRAPH_MAX_DB, GRAPH_MAX_HZ, GRAPH_MIN_DB, GRAPH_MIN_HZ, type PreviewPatch, type WriteStatus, applyPreview, clampToRange, sameStage, stageColor, stageInfo, stageKey, stagesOf } from "./eqStages";
 
 const LOG_HZ_SPAN = Math.log10(GRAPH_MAX_HZ) - Math.log10(GRAPH_MIN_HZ);
 

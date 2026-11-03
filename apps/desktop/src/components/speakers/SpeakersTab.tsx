@@ -14,10 +14,9 @@ import { MUTED, SpeakerBench, buildCabinets, outputRows, type Cabinet, type Outp
 import { bridgeConfirm, confirmFit } from "./speakerApply";
 import { DetailsModal, type DetailsTarget } from "./DetailsModal";
 import { ImportModal } from "./ImportModal";
-import { LibraryTable } from "./LibraryTable";
+import { DRAG_TYPE, LibraryTable } from "./LibraryTable";
 import { LoadModal } from "./LoadModal";
 
-export const DRAG_TYPE = "application/x-ampcore-speaker-id";
 
 /** `projectSpeakerId` links the output to a project speaker (`SpeakerItem`). */
 export type Assignment = { row: OutputRow; wayIndex: number; projectSpeakerId?: string };

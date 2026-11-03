@@ -1,6 +1,5 @@
 import type { EqStageRef } from "../../lib/filterResponse";
 import type { AmpCapability_Serialize as AmpCapability, ChannelEq, EqFilterType, ParamRange } from "../../lib/bindings";
-import { GRAPH_MAX_DB, GRAPH_MIN_DB } from "./EqStageHandles";
 
 /** What one filter type exposes: gain and/or Q, and a Q range narrower than
  * `paramRanges.eqBandQ` where the type has one (shelves — see
@@ -23,6 +22,10 @@ export function indexEqFilterCapabilities(
   }
   return map;
 }
+
+export const GRAPH_MIN_DB = -24;
+
+export const GRAPH_MAX_DB = 24;
 
 export const GRAPH_MIN_HZ = 20;
 

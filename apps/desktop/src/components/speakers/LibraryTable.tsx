@@ -7,7 +7,9 @@ import { Hint } from "../Hint";
 import { SimpleSelect } from "../SimpleSelect";
 import { MUTED, RowMenu } from "./SpeakerBench";
 import { FIELD_INPUT } from "../fieldClasses";
-import { DRAG_TYPE } from "./SpeakersTab";
+
+/** The drag payload of a library row dropped onto an output (`SpeakersTab`). */
+export const DRAG_TYPE = "application/x-ampcore-speaker-id";
 
 /** grip, note, Brand, Model, Family, Application, Ways, menu. Way labels are
  * left to the drag card and the Load dialog: the table sits in half the tab. */
