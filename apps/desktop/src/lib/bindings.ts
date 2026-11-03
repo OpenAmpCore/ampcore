@@ -237,16 +237,14 @@ export const commands = {
 	speakersCreate: (details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_create", { details })),
 	speakersDuplicate: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_duplicate", { id })),
 	/**
-	 *  Replaces one way's processing with values edited by hand. Outputs set up
-	 *  from the entry then read "library updated", same as `speakers_update_from_output`.
+	 *  Stores the library editor's edit of an entry in one go; see
+	 *  `SpeakerLibraryEntry::save_edit` for `origins` and when the revision
+	 *  moves. Outputs in every project set up from the entry follow their way
+	 *  (`remap_way_refs`); those on a removed way lose the speaker.
 	 */
-	speakersSetWayProcessing: (id: string, wayIndex: number, processing: SpeakerProcessing) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_processing", { id, wayIndex, processing })),
-	/**  Appends a way: a copy of way `copy_from`, or neutral values. */
-	speakersAddWay: (id: string, copyFrom: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_add_way", { id, copyFrom })),
-	/**  Removes the entry's last way; see `SpeakerLibraryEntry::remove_last_way`. */
-	speakersRemoveLastWay: (id: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_remove_last_way", { id })),
-	/**  A way's nominal impedance, for the preset editor's watt figures only. */
-	speakersSetWayNominalOhms: (id: string, wayIndex: number, ohms: number | null) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_set_way_nominal_ohms", { id, wayIndex, ohms })),
+	speakersSave: (id: string, entry: SpeakerLibraryEntry, origins: (number | null)[]) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_save", { id, entry, origins })),
+	/**  A fresh output's values, for a way the editor adds from scratch. */
+	speakersNeutralProcessing: () => __TAURI_INVOKE<SpeakerProcessing>("speakers_neutral_processing"),
 	/**  Outputs set up from the entry keep their values and read as detached. */
 	speakersDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speakers_delete", { id })),
 	/**
@@ -268,6 +266,11 @@ export const commands = {
 	 *  catalog entry's topology and the (free-text) firmware version string.
 	 */
 	ampCapabilityResolve: (ampModelId: string, firmwareVersion: string | null) => typedError<AmpCapability_Serialize, AppError>(__TAURI_INVOKE("amp_capability_resolve", { ampModelId, firmwareVersion })),
+	/**
+	 *  What any CVR amp on this firmware offers, with no model behind it — the
+	 *  Speaker Library's reference, since a speaker belongs to no amp.
+	 */
+	ampCapabilityForFirmware: (firmwareVersion: string | null) => __TAURI_INVOKE<AmpCapability_Serialize>("amp_capability_for_firmware", { firmwareVersion }),
 	/**
 	 *  Magnitude response of one EQ chain for the EQ graph — the whole chain, and
 	 *  one stage isolated when `stage` is given. Pure math over the passed-in
@@ -2271,16 +2274,13 @@ export type SpeakerProcessing = {
 	limiter: Limiter,
 	delayOutMs: number | null,
 	phaseInverted: boolean,
-	outputTrimDb?: number | null,
-	noiseGateEnabled?: boolean | null,
-	noiseGateThresholdDbu?: number | null,
-	powerMode?: PowerMode | null,
-	firBypassed?: boolean | null,
-	/**
-	 *  The FIR filter itself. An imported blob always carries one (a unit
-	 *  impulse is the preset saying "no FIR").
-	 */
-	fir?: ChannelFir | null,
+	outputTrimDb: number | null,
+	noiseGateEnabled: boolean,
+	noiseGateThresholdDbu: number | null,
+	powerMode: PowerMode,
+	firBypassed: boolean,
+	/**  The FIR filter itself; a unit impulse is "no FIR". */
+	fir: ChannelFir,
 };
 
 /**  Which library way an output was set up from, and which revision of it. */
@@ -2308,7 +2308,7 @@ export type SpeakerStatus =
 { kind: "edited"; fields: string[] } | 
 /**
  *  The library way changed after the output was set up. `fields` is what
- *  re-applying would change (empty when only the revision moved).
+ *  re-applying would change; a revision that changes nothing here is `Match`.
  */
 { kind: "libraryUpdated"; fields: string[] } | 
 /**  The entry or way is gone from this machine's library. */

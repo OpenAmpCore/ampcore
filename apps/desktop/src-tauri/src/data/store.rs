@@ -13,7 +13,7 @@ use ampcore_core::data::common::now_millis;
 use ampcore_core::data::capability::cvr::builtin_topology;
 use ampcore_core::data::device_link::DeviceModelLink;
 use ampcore_core::data::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
-use ampcore_core::data::speaker::{SpeakerLibraryEntry, CURRENT_SPEAKER_LIBRARY_VERSION};
+use ampcore_core::data::speaker::{SpeakerLibraryEntry, SpeakerProcessing, CURRENT_SPEAKER_LIBRARY_VERSION};
 
 /// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
 /// here are infrequent and user-paced (not a polling loop), so a single
@@ -322,10 +322,23 @@ fn newer_speaker_library(version: u64) -> String {
 /// A newer list is refused rather than loaded lossily. A change that renames,
 /// removes or reinterprets a field bumps `CURRENT_SPEAKER_LIBRARY_VERSION` and
 /// rewrites `speakers` here, oldest step first. Format 1 changed only the
-/// wrapper, so there are no steps yet.
-pub fn migrate_speakers(version: u64, speakers: Value) -> Result<Value, String> {
+/// wrapper.
+pub fn migrate_speakers(version: u64, mut speakers: Value) -> Result<Value, String> {
     if version > u64::from(CURRENT_SPEAKER_LIBRARY_VERSION) {
         return Err(newer_speaker_library(version));
+    }
+    if version < 2 {
+        // 2: a way carries every field of the output. One that left a field
+        // out (`null`, "the amp keeps its own") gets a fresh output's value.
+        let neutral = serde_json::to_value(SpeakerProcessing::neutral()).map_err(|e| e.to_string())?;
+        let ways = speakers.as_array_mut().into_iter().flatten().filter_map(|e| e.get_mut("ways")?.as_array_mut());
+        for processing in ways.flatten().filter_map(|w| w.get_mut("processing")?.as_object_mut()) {
+            for (key, value) in neutral.as_object().into_iter().flatten() {
+                if processing.get(key).is_none_or(Value::is_null) {
+                    processing.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
     Ok(speakers)
 }
@@ -573,6 +586,26 @@ mod tests {
         save_speakers(&dir, &loaded).unwrap();
         assert_eq!(fs::read_to_string(dir.join("speakers.json.v0")).unwrap(), "first backup", "never overwritten");
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// A format-1 way that left fields out (`null`, or missing) loads with a
+    /// fresh output's values there and keeps the ones it had.
+    #[test]
+    fn a_partial_way_from_format_1_is_filled_in() {
+        let mut entry = serde_json::to_value(library_entry("a")).unwrap();
+        let mut processing = serde_json::to_value(SpeakerProcessing::neutral()).unwrap();
+        processing["delayOutMs"] = 3.0.into();
+        processing["outputTrimDb"] = Value::Null;
+        processing["powerMode"] = Value::Null;
+        processing.as_object_mut().unwrap().remove("fir");
+        entry["ways"] = serde_json::json!([{ "label": "Full", "processing": processing }]);
+
+        let migrated = migrate_speakers(1, Value::Array(vec![entry])).unwrap();
+        let loaded: Vec<SpeakerLibraryEntry> = serde_json::from_value(migrated).unwrap();
+        let (way, neutral) = (&loaded[0].ways[0].processing, SpeakerProcessing::neutral());
+        assert_eq!(way.delay_out_ms, 3.0);
+        assert_eq!((way.output_trim_db, way.power_mode), (neutral.output_trim_db, neutral.power_mode));
+        assert_eq!(way.fir, neutral.fir);
     }
 
     /// A newer library is neither loaded lossily nor replaced by a save.

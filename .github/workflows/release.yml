@@ -58,6 +58,7 @@ jobs:
     outputs:
       tag: ${{ steps.v.outputs.tag }}
       mobile_version: ${{ steps.v.outputs.mobile_version }}
+      notes: ${{ steps.v.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,10 +74,24 @@ jobs:
           MOBILE=$(echo "$V" | awk '$1=="ampcore-mobile"{print $2}')
           TABLE=$(echo "$V" | awk 'BEGIN{print "| crate / app | version |\n|---|---|"} {print "| "$1" | "$2" |"}')
           TAG="v$DESKTOP-${SHA::7}"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --draft --target "$SHA" --title "AmpCore $TAG" --notes "$TABLE"
+          # Hand-written notes: the CHANGELOG.md section for this desktop
+          # version, if there is one. No section = no notes.
+          NOTES=$(awk -v v="$DESKTOP" '
+            /^## \[/ { if (on) exit; on = index($0, "## [" v "]") == 1; next }
+            on' CHANGELOG.md)
+          BODY=$(printf '%s\n\n<details><summary>Versions</summary>\n\n%s\n\n</details>\n' "$NOTES" "$TABLE")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$BODY"
+          else
+            gh release create "$TAG" --draft --target "$SHA" --title "AmpCore $TAG" --notes "$BODY"
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "mobile_version=$MOBILE" >> "$GITHUB_OUTPUT"
+          # latest.json gets every released section (from the first versioned
+          # heading on): the update dialog shows those between the installed
+          # version and this one, not just this one.
+          HISTORY=$(awk '/^## \[[0-9]/ { on = 1 } on' CHANGELOG.md)
+          { echo "notes<<NOTES_EOF"; echo "$HISTORY"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
 
   desktop:
     needs: version
@@ -130,6 +145,9 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ needs.version.outputs.tag }}
+          # Goes into latest.json's "notes": the update dialog shows the
+          # versions it holds between the installed one and this one.
+          releaseBody: ${{ needs.version.outputs.notes }}
           releaseDraft: true
           uploadUpdaterSignatures: false
           releaseAssetNamePattern: 'AmpCore-[version]-Desktop-${{ matrix.os_name }}[ext]'
