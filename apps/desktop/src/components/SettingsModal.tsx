@@ -356,7 +356,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
               </SettingsSection>
 
               <SettingsSection title="Updates">
-                <SettingRow label="Check for updates on startup">
+                <SettingRow label="Show update dialog at startup">
                   <Switch
                     isSelected={autoUpdateChecks}
                     onChange={(isSelected) => setPreference("autoUpdateChecks", isSelected)}

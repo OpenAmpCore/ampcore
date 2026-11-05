@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Button, Dropdown, Popover } from "@heroui/react";
-import { Bug, Copy, Minus, Palette, Square, X } from "lucide-react";
+import { Button, Dropdown, Popover, Spinner } from "@heroui/react";
+import { ArrowDownToLine, Bug, Check, Copy, Minus, Palette, Square, X } from "lucide-react";
 import { useIsTight } from "../lib/breakpoints";
 import { AppearanceControls } from "./AppearanceControls";
 import { BugReportModal } from "./BugReportModal";
@@ -19,6 +19,51 @@ interface TitleBarProps {
    * View tabs when a project is open, saving the vertical space a
    * separate tab-bar row would otherwise cost. */
   centerContent?: ReactNode;
+  /** An update found at startup: shown as a button whether or not its dialog
+   * was dismissed or is turned off. */
+  update?: { version: string; installing: boolean; onInstall: () => void };
+}
+
+/** Once to arm (checkmark), again within this to install and restart. */
+const UPDATE_ARM_MS = 5000;
+
+/** The title bar's update button: green, since an update is good news and
+ * the accent is the user's. The first press only arms it, so a stray click
+ * never restarts the app. */
+function UpdateButton({ version, installing, onInstall }: NonNullable<TitleBarProps["update"]>) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const text = installing
+    ? "Installing update…"
+    : armed
+      ? "Click again to install — AmpCore restarts"
+      : `Update to ${version} available`;
+  return (
+    <Hint text={text}>
+      <Button
+        isIconOnly
+        variant="ghost"
+        size="sm"
+        aria-label={text}
+        isDisabled={installing}
+        onPress={() => {
+          clearTimeout(timer.current);
+          if (armed) return onInstall();
+          setArmed(true);
+          timer.current = setTimeout(() => setArmed(false), UPDATE_ARM_MS);
+        }}
+      >
+        {installing ? (
+          <Spinner size="sm" />
+        ) : armed ? (
+          <Check size={16} color="var(--amp-color-green-6)" />
+        ) : (
+          <ArrowDownToLine size={16} color="var(--amp-color-green-6)" />
+        )}
+      </Button>
+    </Hint>
+  );
 }
 
 export function TitleBar({
@@ -28,6 +73,7 @@ export function TitleBar({
   onBackToStart,
   onOpenSettings,
   centerContent,
+  update,
 }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
   const [bugReportOpen, setBugReportOpen] = useState(false);
@@ -101,6 +147,7 @@ export function TitleBar({
         {/* Appearance sits left of the window buttons: it's app chrome, not an
             OS control, and keeping it out of that group avoids a mis-click on
             Close. The same controls also live in Settings → Appearance. */}
+        {update && <UpdateButton {...update} />}
         <Hint text="Report a bug">
           <Button isIconOnly variant="ghost" size="sm" aria-label="Report a bug" onPress={() => setBugReportOpen(true)}>
             <Bug size={16} />

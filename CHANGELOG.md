@@ -5,6 +5,7 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 ## [Unreleased]
 
 ### Added
+- A green arrow next to the bug button shows when an update is available, even after its dialog was dismissed or turned off. Click it once (it turns into a checkmark), then again within 5 seconds to install and restart.
 - Opening a project whose amps changed while it was closed (a preset recall, other software) no longer takes over their values silently. A window lists those amps, as in ArmoníaPlus: Send the project to each (speakers that read Edited are re-applied from the library), Read it, or Compare.
 - The output volume popover has a dotted orange border, because output volume is never part of a speaker preset.
 
