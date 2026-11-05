@@ -40,6 +40,8 @@ const DEFAULTS = {
   /** Channel action links per amp (`channelLinks.ts`), by MAC, or by assignment
    * id for a project amp with no device behind it. */
   channelLinks: {} as Record<string, LinkConfig>,
+  /** Every amp's output volumes move together (`withVolumeTogether`). */
+  outputVolumesTogether: true,
 };
 
 type Preferences = typeof DEFAULTS;

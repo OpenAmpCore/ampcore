@@ -2,7 +2,20 @@
 
 Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. The release workflow copies the section matching the desktop version into the GitHub release and the in-app update dialog; a version without a section ships without notes. Mobile- or core-only items go under the same version, prefixed "Mobile:".
 
-## [Unreleased]
+## [0.3.13] - 2026-11-05
+
+### Added
+- Update button next to the bug button whenever an update is available, even after its dialog was dismissed or turned off: click once, then again within 5 seconds to install and restart.
+- Opening a project whose amps changed while it was closed (a preset recall, other software) no longer takes their values in silently. A window lists those amps to Send (Edited speakers are re-applied), Read or Compare.
+- The output volume popover is marked as not part of a speaker preset.
+- Headroom meters on the Workspace, as in ArmoníaPlus: each live amp output and each speaker (its worst way) shows how far it is from its limiters in 6 dB steps, yellow and red while limiting.
+- Mobile: each output's strip shows its headroom, or the gain reduction while limiting, instead of the raw limiter reading.
+- Speaker Library: a button next to Import opens the library folder in the file manager.
+
+### Changed
+- Output volumes move together on every amp by default, like the amp's encoder: one fader while they're equal, written to the amp in one go. The Overview's Together switch turns this off app-wide; then a notice says to balance outputs with Trim.
+- Differing output volumes in Together mode ask whether to set all to the lowest or to edit outputs singly.
+- Speaker Library: the import button is now "Import preset files" (AmpCore preset files and the old app's preset files, as before).
 
 ## [0.3.12] - 2026-11-03
 

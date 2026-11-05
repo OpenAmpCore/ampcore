@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, toast } from "@heroui/react";
-import { ChevronRight, FileUp, Plus } from "lucide-react";
+import { ChevronRight, FileUp, FolderOpen, Plus } from "lucide-react";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project, type SpeakerLibraryEntry } from "../../lib/bindings";
 import { useIsCompact } from "../../lib/breakpoints";
 import { speakerName, useSpeakerLibrary } from "../../lib/speakers";
@@ -125,6 +125,11 @@ export function SpeakerLibraryView({
   useEffect(() => {
     if (!selected && shown.length > 0) setSelectedId(shown[0].id);
   }, [selected, shown]);
+
+  async function openFolder() {
+    const r = await commands.speakersOpenFolder();
+    if (r.status === "error") toast.danger("Folder not opened", { description: r.error.message });
+  }
 
   async function duplicate(entry: SpeakerLibraryEntry) {
     const r = await commands.speakersDuplicate(entry.id);
@@ -282,9 +287,14 @@ export function SpeakerLibraryView({
       >
         <div className="flex items-center gap-2">
           <h2 className="min-w-0 flex-1 truncate text-base font-semibold">Speaker Library</h2>
-          <Hint text="Import the old app's speaker preset files">
-            <Button size="sm" variant="ghost" isIconOnly aria-label="Import speakers" onPress={() => setImportOpen(true)}>
+          <Hint text="Import preset files">
+            <Button size="sm" variant="ghost" isIconOnly aria-label="Import preset files" onPress={() => setImportOpen(true)}>
               <FileUp size={14} />
+            </Button>
+          </Hint>
+          <Hint text="Open the library folder">
+            <Button size="sm" variant="ghost" isIconOnly aria-label="Open the library folder" onPress={() => void openFolder()}>
+              <FolderOpen size={14} />
             </Button>
           </Hint>
           <Button size="sm" variant="primary" onPress={() => setCreateOpen(true)}>

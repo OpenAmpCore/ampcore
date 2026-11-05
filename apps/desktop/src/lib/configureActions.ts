@@ -97,6 +97,10 @@ export interface ConfigureActions {
   /** FC=8 amp gain. Live-only: a Project has no gain to store, so Project
    * mode leaves this undefined and the Overview's Gain field stays a readout. */
   setChannelAmpGain?(channelIndex: number, gainDb: number): Promise<ActionResult>;
+  /** Several outputs' volumes as one write — live amps only, where one
+   * command per output let polls land between them. A project write is a
+   * local save, so project actions leave it out. */
+  setOutputVolumes?(volumes: { channelIndex: number; volumeDb: number }[]): Promise<ActionResult>;
   setDeviceName?(name: string | null): Promise<ActionResult>;
 
   /** Copy/paste of an EQ chain or a limiter stage — the logic lives in core

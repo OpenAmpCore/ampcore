@@ -3,6 +3,7 @@ import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./configure/AmpConfigureView";
 import { OperatorView } from "./OperatorView";
+import { AmpDesyncModal } from "./sync/AmpDesyncModal";
 import { SpeakerLibraryView } from "./speakerLibrary/SpeakerLibraryView";
 import { WorkspaceView } from "./workspace/WorkspaceView";
 import { useAmpEditLock } from "../hooks/useAmpEditLock";
@@ -27,7 +28,24 @@ interface ProjectWorkspaceProps {
 
 const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 
-export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
+/** Opens a project with no live session left from before
+ * (`projects_end_live_sessions`): an amp that changed while the project was
+ * closed is then a difference to Read or Send (`AmpDesyncModal`), never
+ * adopted by `useLinkedSync` as the project's own values. */
+export function ProjectWorkspace(props: ProjectWorkspaceProps) {
+  const id = props.project.id;
+  const [readyFor, setReadyFor] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void commands.projectsEndLiveSessions(id).then(() => !cancelled && setReadyFor(id));
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+  return readyFor === id ? <OpenProjectWorkspace key={id} {...props} /> : null;
+}
+
+function OpenProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
   /** Configure-tab per open amp. Held here because `AmpConfigureView` is
@@ -130,6 +148,13 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
 
   return (
     <div className="flex h-full flex-col">
+      <AmpDesyncModal
+        project={project}
+        locks={projectLocks}
+        nameOf={(a) => linkedDeviceFor(a, devices)?.name ?? a.deviceName ?? "Amp"}
+        onProjectUpdate={onProjectUpdate}
+        onCompare={openDevice}
+      />
 
       <div className="flex min-h-0 flex-1">
         {/* Vertical device rail — Armonia-style, persists across Workspace/Operator View */}

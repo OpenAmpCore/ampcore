@@ -84,6 +84,25 @@ pub fn speakers_export(state: State<ProjectDataState>) -> Result<String, AppErro
     export_library(&inner.speakers).map_err(AppError::from)
 }
 
+/// Opens the folder holding `speakers.json` in the system file manager.
+#[tauri::command]
+#[specta::specta]
+pub fn speakers_open_folder(state: State<ProjectDataState>) -> Result<(), AppError> {
+    let dir = state.lock()?.data_dir.clone();
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| AppError::from(format!("Could not open {}: {e}", dir.display())))?;
+    Ok(())
+}
+
 /// Parses the old app's speaker preset files (JSON) and this app's exported
 /// libraries — one result per speaker, so a library file gives several. A
 /// library speaker keeps its id, so projects that reference it find it; one

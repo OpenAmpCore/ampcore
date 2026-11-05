@@ -227,6 +227,9 @@ export function createLiveConfigureActions(deviceId: string, mac: string): Confi
     async setChannelPowerMode(channelIndex, mode) {
       return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
+    async setOutputVolumes(volumes) {
+      return reportWrite("Set output volume", commands.liveControlSetOutputVolumes(deviceId, volumes));
+    },
     async setChannelAmpGain(channelIndex, gainDb) {
       return reportWrite("Set amp gain", commands.liveControlSetChannelAmpGain(deviceId, channelIndex, gainDb));
     },

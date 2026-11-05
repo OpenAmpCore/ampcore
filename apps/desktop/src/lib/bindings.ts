@@ -227,6 +227,8 @@ export const commands = {
 	 *  caller to save where the user picks.
 	 */
 	speakersExport: () => typedError<string, AppError>(__TAURI_INVOKE("speakers_export")),
+	/**  Opens the folder holding `speakers.json` in the system file manager. */
+	speakersOpenFolder: () => typedError<null, AppError>(__TAURI_INVOKE("speakers_open_folder")),
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
 	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
@@ -544,6 +546,14 @@ export const commands = {
 	 *  failure on any field surfaces instead of being masked by the others.
 	 */
 	liveControlSetChannelOutput: (deviceId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_output", { deviceId, channelIndex, trimDb, volumeDb, delayOutMs })),
+	/**
+	 *  Several outputs' volumes in one write: every value is checked before
+	 *  anything is sent, then all packets go out under one poll hold. Output
+	 *  volumes move together by default, and one command per output left a
+	 *  gap after each in which a poll went out — delaying the next write and
+	 *  landing an FC=27 with some outputs moved and some not.
+	 */
+	liveControlSetOutputVolumes: (deviceId: string, volumes: OutputVolume[]) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_output_volumes", { deviceId, volumes })),
 	liveControlSetChannelDelayIn: (deviceId: string, channelIndex: number, delayInMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_delay_in", { deviceId, channelIndex, delayInMs })),
 	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
 	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
@@ -696,6 +706,15 @@ export const commands = {
 	 *  for what is and isn't copied.
 	 */
 	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
+	/**
+	 *  Ends every live session of the project's amps, for opening it: a session
+	 *  left from before (the project was closed, the amp stayed online) would
+	 *  make `useLinkedSync` adopt whatever the amp got meanwhile — a preset
+	 *  recall, other software — as the project's totals. An amp that still
+	 *  matches starts following again on its first lock read; one that changed
+	 *  stays Mismatch, for the user's Read or Send (`AmpDesyncModal`).
+	 */
+	projectsEndLiveSessions: (projectId: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_end_live_sessions", { projectId })),
 	/**
 	 *  Read-only: what a push would write, stage by stage. Lets the modal render
 	 *  the step list (and the adopted-fields note) before the user commits to it.
@@ -2013,6 +2032,12 @@ export type OutputFit = {
 	rows: FitRow[],
 };
 
+/**  One output's volume in a `live_control_set_output_volumes` batch. */
+export type OutputVolume = {
+	channelIndex: number,
+	volumeDb: number | null,
+};
+
 /**  An inclusive min/max bound for a numeric parameter. */
 export type ParamRange = {
 	min: number | null,
@@ -2368,6 +2393,13 @@ export type Telemetry = {
 	 *  `None` under the same conditions as `output_level_db`.
 	 */
 	ratedRmsVoltage: number | null,
+	/**
+	 *  ArmoníaPlus-style headroom per output (`dsp::output_headroom_db`): dB
+	 *  to the nearest limiter / rated voltage, negative while limiting, `None`
+	 *  with no signal. Filled by `driver.rs`, which knows the live limiter
+	 *  settings; all `None` from the wire adapters.
+	 */
+	outputHeadroomDb: (number | null)[],
 	/**
 	 *  Raw per-output state bytes, straight off the wire — kept alongside the
 	 *  decoded `output_channel_states` for wire debugging and because the

@@ -530,7 +530,10 @@ pub struct Project {
 ///
 /// 5: `ProjectSpeaker.parallel` — absent in older files, which backfills to 1
 /// (a single cabinet).
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 5;
+///
+/// 6: briefly carried `Project.groups` (speaker groups, since removed). Kept
+/// so files saved then still open; their `groups` key is ignored.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 6;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {

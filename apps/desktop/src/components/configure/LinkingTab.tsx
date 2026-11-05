@@ -122,6 +122,8 @@ function ScopeModal({
 export function LinkingTab({ linkKey, channelCount }: { linkKey: string; channelCount: number }) {
   const all = usePreference("channelLinks");
   const config: LinkConfig = all[linkKey] ?? NO_LINKS;
+  // Volume links only apply while the app-wide Together switch is off.
+  const volumeTogether = usePreference("outputVolumesTogether");
   const [open, setOpen] = useState<{ scope: LinkScope; title: string; labelOf: (c: number) => string } | null>(null);
   const { confirm, dialog } = useConfirm();
 
@@ -158,16 +160,22 @@ export function LinkingTab({ linkKey, channelCount }: { linkKey: string; channel
       </div>
       {scopes.map(({ scope, label }) => {
         const groups = groupsOf(scope);
+        const forced = scope === "volumeOut" && volumeTogether;
         return (
           <button
             key={scope}
             type="button"
-            className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-[var(--amp-color-default-border)] bg-transparent px-3 py-2 text-left"
+            disabled={forced}
+            className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-[var(--amp-color-default-border)] bg-transparent px-3 py-2 text-left disabled:cursor-default disabled:border-dashed"
             onClick={() => setOpen({ scope, title: `${title} ${label}`, labelOf })}
           >
             <span className="min-w-0 text-[length:var(--amp-font-size-sm)] font-medium">{label}</span>
             <span className="shrink-0 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">
-              {groups.length === 0 ? "Off" : groups.map((g) => g.map(labelOf).join(" + ")).join(" | ")}
+              {forced
+                ? "All outputs (Overview: Together)"
+                : groups.length === 0
+                  ? "Off"
+                  : groups.map((g) => g.map(labelOf).join(" + ")).join(" | ")}
             </span>
           </button>
         );

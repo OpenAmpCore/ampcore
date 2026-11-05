@@ -22,7 +22,10 @@ function App() {
   const [mode, setMode] = useState<AppMode>("modeSelect");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The update found at startup. It stays for the title bar's button after
+   * the dialog is dismissed; the startup setting only decides the dialog. */
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   /** Owned here (not inside ProjectWorkspace) so the tab selector can live in
    * the title bar instead of its own row — saves vertical space. */
@@ -40,7 +43,7 @@ function App() {
       void commands.webServerSet(true, getPreference("webServerPort"));
     }
 
-    if (import.meta.env.DEV || !getPreference("autoUpdateChecks")) {
+    if (import.meta.env.DEV) {
       return;
     }
 
@@ -48,6 +51,7 @@ function App() {
       .then((update) => {
         if (update) {
           setPendingUpdate(update);
+          setUpdateDialogOpen(getPreference("autoUpdateChecks"));
         }
       })
       .catch((e) => console.error("Update check failed", e));
@@ -67,7 +71,7 @@ function App() {
 
   function handleDisableUpdateChecks() {
     setPreference("autoUpdateChecks", false);
-    setPendingUpdate(null);
+    setUpdateDialogOpen(false);
   }
 
   function handleBackToStart() {
@@ -90,6 +94,11 @@ function App() {
     <div className="flex h-screen min-w-0 flex-col overflow-hidden">
       <TitleBar
         title={windowTitle}
+        update={
+          pendingUpdate
+            ? { version: pendingUpdate.version, installing: installingUpdate, onInstall: () => void handleInstallUpdate() }
+            : undefined
+        }
         projectName={selectedProject?.name}
         onCloseProject={handleBackToStart}
         onBackToStart={!selectedProject && mode !== "modeSelect" ? handleBackToStart : undefined}
@@ -141,10 +150,10 @@ function App() {
       </div>
       <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <UpdateAvailableModal
-        update={pendingUpdate}
+        update={updateDialogOpen ? pendingUpdate : null}
         installing={installingUpdate}
         onInstall={handleInstallUpdate}
-        onAbort={() => setPendingUpdate(null)}
+        onAbort={() => setUpdateDialogOpen(false)}
         onDisable={handleDisableUpdateChecks}
       />
     </div>
