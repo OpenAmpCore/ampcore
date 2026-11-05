@@ -44,6 +44,7 @@ export function TilePopover({
   trigger,
   placement = "bottom",
   width = 220,
+  dotted,
   children,
 }: {
   opened: boolean;
@@ -51,6 +52,9 @@ export function TilePopover({
   trigger: ReactNode;
   placement?: "bottom" | "top" | "right" | "left";
   width?: number;
+  /** A dotted border in this colour: the value lives outside what the row's
+   * context owns (output volume, which no speaker preset holds). */
+  dotted?: string;
   children: ReactNode;
 }) {
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -72,6 +76,7 @@ export function TilePopover({
         isOpen={opened}
         onOpenChange={onOpenChange}
         placement={placement}
+        style={dotted ? { border: `1px dotted ${dotted}` } : undefined}
       >
         <Popover.Dialog className={POPOVER_SLOTS.dialog()} style={{ width }}>
           {children}

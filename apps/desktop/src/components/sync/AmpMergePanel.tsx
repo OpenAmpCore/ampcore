@@ -9,6 +9,7 @@ import {
   type Project,
 } from "../../lib/bindings";
 import { useHoldToConfirm } from "../../hooks/useHoldToConfirm";
+import { useConfirm } from "../ConfirmDialog";
 
 function ThemeIcon({ color, size, className, children }: { color: string; size: number; className?: string; children: ReactNode }) {
   return (
@@ -337,6 +338,32 @@ export function AmpMergePanel({
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const { confirm, dialog } = useConfirm();
+
+  /** After a pull: the amp holds totals (own value plus groups), and the pull
+   * read them as this project's totals. When something that knows nothing
+   * of these groups wrote the amp (another project, other software), they
+   * were own values instead — only the user knows which, so ask, and put the
+   * groups back on top when they were. */
+  async function askAboutGroups(project: Project) {
+    const amp = project.ampAssignments.find((a) => a.id === assignmentId);
+    const grouped = (project.groups ?? []).filter(
+      (g) =>
+        (g.gainDb || g.delayMs || g.muted || g.polarityInverted) &&
+        amp?.channels.some((c) => c.speaker?.projectSpeakerId && g.speakerIds.includes(c.speaker.projectSpeakerId)),
+    );
+    if (grouped.length === 0) return;
+    const ok = await confirm({
+      title: "Put this project's groups back on top?",
+      description: `Speaker groups (${grouped.map((g) => g.name).join(", ")}) change outputs of this amp. If this project last wrote the amp, or its front panel was used, its values already include them: keep them as read. If another project or other software wrote it, they don't: put the groups back on top, which writes them to the amp.`,
+      confirmLabel: "Put groups back on top",
+      cancelLabel: "Keep as read",
+    });
+    if (!ok) return;
+    const r = await commands.projectsReapplyGroups(projectId, assignmentId);
+    if (r.status === "ok") onProjectUpdate(r.data);
+    else setOutcome({ kind: "error", message: `Groups not put back: ${r.error.message}` });
+  }
 
   // A new online reading, another amp, or a change of direction makes an old
   // outcome stale. A successful pull changes only the offline hash, so it
@@ -370,6 +397,7 @@ export function AmpMergePanel({
       if (result.merged && result.project) {
         onProjectUpdate(result.project);
         setOutcome({ kind: "merged", ampHash: result.ampHash });
+        await askAboutGroups(result.project);
       } else {
         setOutcome({ kind: "diverged", count: result.remaining.filter((row) => row.differs).length });
       }
@@ -443,6 +471,7 @@ export function AmpMergePanel({
 
   return (
     <div className="flex min-w-0 flex-col items-center gap-2 py-1">
+      {dialog}
       {/* Switching direction mid-write would leave the step list describing a
           run that is no longer the one in flight.
           Deliberately *not* "Offline ← Online" / "Online ← Offline": two

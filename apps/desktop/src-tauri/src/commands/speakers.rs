@@ -15,7 +15,9 @@ use tauri::{AppHandle, State};
 
 use ampcore_core::live::state::LiveDeviceState;
 
-use ampcore_core::data::project::{CanvasPosition, Project, ProjectSpeaker, SpeakerRef, MAX_PARALLEL};
+use ampcore_core::data::project::{
+    shift_output, CanvasPosition, GroupOffset, Project, ProjectSpeaker, SpeakerGroup, SpeakerRef, MAX_PARALLEL,
+};
 use ampcore_core::data::capability;
 use ampcore_core::data::speaker::{
     speaker_states, ChannelSpeakerState, SpeakerLibraryEntry, SpeakerProcessing, SpeakerWay,
@@ -23,8 +25,8 @@ use ampcore_core::data::speaker::{
 use ampcore_core::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use ampcore_core::error::AppError;
 
-use super::amp_write::save_or_push;
-use super::speaker_library::{edit_with_library, find_entry};
+use super::amp_write::{assignment_limits, save_or_push};
+use super::speaker_library::find_entry;
 use crate::data::store;
 use crate::data::store::ProjectDataState;
 
@@ -40,6 +42,10 @@ struct FittedWay {
     /// The output's Load when linked to a project speaker: the way's nominal
     /// impedance over its parallel count. Display only, never written.
     load: Option<f64>,
+    /// The output's group offset right after the way's values went on (its
+    /// delay and polarity are the preset's, so only gain and mute are left)
+    /// and once linked as `reference` says.
+    group_shift: (GroupOffset, GroupOffset),
     issues: Vec<String>,
     rows: Vec<FitRow>,
 }
@@ -137,7 +143,12 @@ fn fit_ways(
                 .and_then(|id| project.speakers.iter().find(|s| s.id == id))
                 .map(|s| s.parallel.max(1));
             let load = nominal_ohms.zip(parallel).map(|(ohms, n)| ohms / n as f64);
-            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, load, issues, rows })
+            let offset = |speaker: Option<&str>| speaker.map(|id| project.speaker_offset(id)).unwrap_or_default();
+            let group_shift = (
+                offset(channel.speaker.as_ref().and_then(|s| s.project_speaker_id.as_deref())).without_preset_fields(),
+                offset(reference.project_speaker_id.as_deref()),
+            );
+            Ok(FittedWay { channel_index, processing: fitted, reference, output_name, load, group_shift, issues, rows })
         })
         .collect()
 }
@@ -190,10 +201,13 @@ pub async fn speakers_apply(
         return Err(AppError::from("The speaker doesn't fit this amp as is"));
     }
 
-    save_or_push(&app, &state, &live, project_id, assignment_id, "the speaker", |candidate, _| {
+    save_or_push(&app, &state, &live, project_id, assignment_id, "the speaker", |candidate, limits| {
         for f in fitted {
             let channel = store::channel_mut(candidate, f.channel_index)?;
             f.processing.apply_to(channel);
+            let (volume, delay) = (limits.ranges.output_volume_db, limits.ranges.delay_out_ms);
+            shift_output(channel, f.group_shift.0, f.group_shift.1, volume, delay)
+                .map_err(|e| AppError::from(format!("The speaker's groups don't fit: {e}")))?;
             channel.speaker = Some(f.reference);
             if f.output_name.is_some() {
                 channel.output_name = f.output_name;
@@ -207,21 +221,30 @@ pub async fn speakers_apply(
     .await
 }
 
-/// Removes an output's speaker reference. Its values are left alone —
+/// Unlinks an output: removes its speaker reference and takes its groups'
+/// offset off (`regroup`). Its other values are left alone —
 /// `speakers_apply` is what sets a speaker up.
 #[tauri::command]
 #[specta::specta]
-pub fn projects_set_channel_speaker(
+pub async fn projects_set_channel_speaker(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     assignment_id: String,
     channel_index: u32,
 ) -> Result<Project, AppError> {
-    edit_with_library(&app, &state, &project_id, &assignment_id, |_, assignment| {
-        store::channel_mut(assignment, channel_index)?.speaker = None;
-        Ok(false)
+    regroup(&app, &state, &live, &project_id, None, |project| {
+        if let Some(channel) = project
+            .amp_assignments
+            .iter_mut()
+            .find(|a| a.id == assignment_id)
+            .and_then(|a| a.channels.iter_mut().find(|c| c.channel_index == channel_index))
+        {
+            channel.speaker = None;
+        }
     })
+    .await
 }
 
 /// The project-level counterpart of `edit_with_library`, for project speakers.
@@ -307,17 +330,130 @@ pub fn projects_set_speaker_position(
 }
 
 /// Removes a project speaker; see `Project::remove_speaker` for what its
-/// outputs keep.
+/// outputs keep. Its groups' offset comes off them (`regroup`).
 #[tauri::command]
 #[specta::specta]
-pub fn projects_remove_speaker(
+pub async fn projects_remove_speaker(
     app: AppHandle,
-    state: State<ProjectDataState>,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
     project_id: String,
     speaker_id: String,
 ) -> Result<Project, AppError> {
-    edit_project(&app, &state, &project_id, |_, project| {
-        project.remove_speaker(&speaker_id);
+    regroup(&app, &state, &live, &project_id, None, |project| project.remove_speaker(&speaker_id)).await
+}
+
+/// Replaces the project's speaker groups (members, values, tile positions),
+/// writing what changes on the amps (`regroup`).
+#[tauri::command]
+#[specta::specta]
+pub async fn projects_set_groups(
+    app: AppHandle,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
+    project_id: String,
+    groups: Vec<SpeakerGroup>,
+) -> Result<Project, AppError> {
+    regroup(&app, &state, &live, &project_id, None, |project| project.groups = groups.clone()).await
+}
+
+/// Puts the groups back on top of one amp's outputs, for a pull whose values
+/// were the outputs' own (another project, or software that knows nothing of
+/// these groups, wrote the amp): every grouped output gets its whole offset
+/// added, through `regroup`'s checks and rollback.
+#[tauri::command]
+#[specta::specta]
+pub async fn projects_reapply_groups(
+    app: AppHandle,
+    state: State<'_, ProjectDataState>,
+    live: State<'_, LiveDeviceState>,
+    project_id: String,
+    assignment_id: String,
+) -> Result<Project, AppError> {
+    regroup(&app, &state, &live, &project_id, Some(&assignment_id), |_| {}).await
+}
+
+/// One amp's outputs whose group offset changes: (channel, from, to).
+type Shifts = Vec<(u32, GroupOffset, GroupOffset)>;
+
+/// The one way an output's group offset changes: `change` (groups, links or
+/// project speakers) is made on a copy first, every output whose offset moves
+/// gets the difference (`shift_output`), written per amp through
+/// `save_or_push`, and only once every amp took it is `change` stored. The
+/// whole change is refused before anything is written when an output would
+/// pass its range; when an amp fails, the amps already written are moved
+/// back, so the outputs never hold an offset the project doesn't have.
+/// `change` runs twice (copy, then store), so it must be idempotent.
+/// `bare` names an amp whose outputs are taken to hold no group offset now
+/// (`projects_reapply_groups`).
+async fn regroup(
+    app: &AppHandle,
+    state: &State<'_, ProjectDataState>,
+    live: &State<'_, LiveDeviceState>,
+    project_id: &str,
+    bare: Option<&str>,
+    change: impl Fn(&mut Project),
+) -> Result<Project, AppError> {
+    let plan: Vec<(String, String, Shifts)> = {
+        let inner = state.lock()?;
+        let mut project = store::project(&inner.projects, project_id)?.clone();
+        let mut before = project.group_offsets();
+        if let Some(bare) = bare {
+            before.retain(|(amp, _), _| amp != bare);
+        }
+        change(&mut project);
+        let after = project.group_offsets();
+        let mut plan = Vec::new();
+        for amp in &project.amp_assignments {
+            let limits = assignment_limits(&inner.amp_models, amp);
+            let (volume, delay) = (limits.ranges.output_volume_db, limits.ranges.delay_out_ms);
+            let name = amp.device_name.clone().unwrap_or_else(|| "An amp".into());
+            let mut shifts = Shifts::new();
+            for channel in &amp.channels {
+                let key = (amp.id.clone(), channel.channel_index);
+                let from = before.get(&key).copied().unwrap_or_default();
+                let to = after.get(&key).copied().unwrap_or_default();
+                if from == to {
+                    continue;
+                }
+                shift_output(&mut channel.clone(), from, to, volume, delay).map_err(|e| {
+                    let label = channel
+                        .output_name
+                        .clone()
+                        .unwrap_or_else(|| format!("Out {}", (b'A' + channel.channel_index as u8) as char));
+                    AppError::from(format!("{name}, {label}: {e}"))
+                })?;
+                shifts.push((channel.channel_index, from, to));
+            }
+            if !shifts.is_empty() {
+                plan.push((amp.id.clone(), name, shifts));
+            }
+        }
+        plan
+    };
+
+    let write = |assignment_id: String, shifts: Shifts| {
+        save_or_push(app, state, live, project_id.to_string(), assignment_id, "the group", move |candidate, limits| {
+            let (volume, delay) = (limits.ranges.output_volume_db, limits.ranges.delay_out_ms);
+            for (ch, from, to) in shifts {
+                shift_output(store::channel_mut(candidate, ch)?, from, to, volume, delay).map_err(AppError::from)?;
+            }
+            Ok(())
+        })
+    };
+    let mut done: Vec<(String, Shifts)> = Vec::new();
+    for (assignment_id, name, shifts) in plan {
+        if let Err(e) = write(assignment_id.clone(), shifts.clone()).await {
+            for (id, back) in done {
+                let _ = write(id, back.into_iter().map(|(ch, from, to)| (ch, to, from)).collect()).await;
+            }
+            return Err(AppError::from(format!("Nothing was changed: {name} didn't take it. {}", e.message)));
+        }
+        done.push((assignment_id, shifts));
+    }
+
+    edit_project(app, state, project_id, |_, project| {
+        change(project);
         Ok(())
     })
 }
@@ -341,5 +477,6 @@ pub fn speakers_channel_states(
         .as_deref()
         .and_then(|id| inner.amp_models.iter().find(|m| m.id == id))
         .map(|model| capability::resolve(model, assignment.firmware_version.as_deref()));
-    Ok(speaker_states(assignment, &inner.speakers, cap.as_ref()))
+    let project = inner.projects.iter().find(|p| p.id == project_id);
+    Ok(speaker_states(assignment, project, &inner.speakers, cap.as_ref()))
 }

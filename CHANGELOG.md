@@ -4,6 +4,13 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 
 ## [Unreleased]
 
+### Added
+- Speaker groups on the Workspace, as tiles beside the speakers. A group's gain, mute, delay and polarity sit on top of every output its speakers are linked to, across amps. A speaker can be in several groups: gains and delays add up, any mute mutes, and two polarity flips cancel. A speaker's preset still reads Match. Add a group from the speaker pane's bar, and choose its speakers with Design's new Group tool. Selecting a speaker outlines its groups, and selecting a group outlines its speakers.
+- Tune mode: the Mute, Gain, Delay and Polarity tools act on the selected speakers and groups, in absolute or relative steps. A speaker's tile shows its own gain and, in brackets, the gain with its groups. A red dot means it is muted; the tooltip says by what.
+- Unlinking or removing a speaker now takes its groups' values off its outputs. A group change that would push an output past its range is refused as a whole, and the refusal names the output.
+- After reading settings from an amp whose speakers are in groups, the app asks whether those values already included the groups. If another project or other software wrote the amp, the values didn't include them, and "Put groups back on top" writes the groups to the amp again.
+- The output volume popover has a dotted orange border, because output volume is never part of a speaker preset.
+
 ## [0.3.12] - 2026-11-03
 
 ### Changed

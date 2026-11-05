@@ -51,7 +51,7 @@ use commands::amp_settings::{
 };
 use commands::speakers::{
     projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_channel_speaker,
-    projects_set_speaker_position, speakers_apply, speakers_channel_states, speakers_fit,
+    projects_reapply_groups, projects_set_groups, projects_set_speaker_position, speakers_apply, speakers_channel_states, speakers_fit,
 };
 use commands::speaker_library::{
     speakers_create, speakers_delete, speakers_duplicate, speakers_export, speakers_import_profiles, speakers_list,
@@ -105,6 +105,8 @@ pub fn run() {
             projects_rename_speaker,
             projects_remove_speaker,
             projects_set_speaker_position,
+            projects_set_groups,
+            projects_reapply_groups,
             speakers_apply,
             speakers_list,
             speakers_import_profiles,

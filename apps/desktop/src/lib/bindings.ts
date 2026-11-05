@@ -14,6 +14,7 @@ export const commands = {
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
 	speakers?: ProjectSpeaker[],
+	groups?: SpeakerGroup[],
 } | null, AppError>(__TAURI_INVOKE("projects_get", { id })),
 	projectsCreate: (name: string, description: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_create", { name, description })),
 	/**
@@ -184,7 +185,8 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
-	 *  Removes an output's speaker reference. Its values are left alone —
+	 *  Unlinks an output: removes its speaker reference and takes its groups'
+	 *  offset off (`regroup`). Its other values are left alone —
 	 *  `speakers_apply` is what sets a speaker up.
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
@@ -197,11 +199,23 @@ export const commands = {
 	projectsRenameSpeaker: (projectId: string, speakerId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_rename_speaker", { projectId, speakerId, name })),
 	/**
 	 *  Removes a project speaker; see `Project::remove_speaker` for what its
-	 *  outputs keep.
+	 *  outputs keep. Its groups' offset comes off them (`regroup`).
 	 */
 	projectsRemoveSpeaker: (projectId: string, speakerId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_speaker", { projectId, speakerId })),
 	/**  Where the speaker sits on the Workspace canvas. */
 	projectsSetSpeakerPosition: (projectId: string, speakerId: string, x: number | null, y: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_speaker_position", { projectId, speakerId, x, y })),
+	/**
+	 *  Replaces the project's speaker groups (members, values, tile positions),
+	 *  writing what changes on the amps (`regroup`).
+	 */
+	projectsSetGroups: (projectId: string, groups: SpeakerGroup[]) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_groups", { projectId, groups })),
+	/**
+	 *  Puts the groups back on top of one amp's outputs, for a pull whose values
+	 *  were the outputs' own (another project, or software that knows nothing of
+	 *  these groups, wrote the amp): every grouped output gets its whole offset
+	 *  added, through `regroup`'s checks and rollback.
+	 */
+	projectsReapplyGroups: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_reapply_groups", { projectId, assignmentId })),
 	/**
 	 *  Sets outputs up from the library: each item's output gets its way's values
 	 *  (fitted to the amp), reference and label as its name. A way that doesn't
@@ -2069,6 +2083,7 @@ export type Project = {
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
 	speakers?: ProjectSpeaker[],
+	groups?: SpeakerGroup[],
 };
 
 export type ProjectImport = {
@@ -2241,6 +2256,30 @@ export type SpeakerDetails = {
 	application: string,
 	notes: string,
 	wayLabels: string[],
+};
+
+/**
+ *  Project speakers moved together, as ArmoníaPlus's (advanced) groups: the
+ *  group's gain, mute, delay and polarity sit on top of each linked output.
+ *  A speaker can be in several groups; gains and delays add up, any mute
+ *  mutes, and two polarity flips cancel.
+ * 
+ *  The amp holds the sum: an output's own values are never stored, they are
+ *  its values minus its `GroupOffset`. Every change of groups or members is
+ *  written as the difference of offsets before and after (`shift_output`),
+ *  and Match compares the preset with the output minus its groups
+ *  (`GroupOffset::strip`), so a group never makes a speaker read Edited.
+ */
+export type SpeakerGroup = {
+	id: string,
+	name: string,
+	speakerIds: string[],
+	gainDb: number | null,
+	muted: boolean,
+	delayMs?: number | null,
+	polarityInverted?: boolean,
+	/**  Its tile on the speaker canvas; `None` until first placed. */
+	position?: CanvasPosition | null,
 };
 
 /**

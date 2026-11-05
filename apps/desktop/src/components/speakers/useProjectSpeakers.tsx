@@ -254,7 +254,7 @@ export function useProjectSpeakers({
   async function remove(speaker: ProjectSpeaker) {
     const ok = await confirm({
       title: `Remove ${speaker.name} from this project?`,
-      description: "Outputs linked to it keep their values and stay set up as speakers on their amps.",
+      description: "Outputs linked to it keep their values and stay set up as speakers on their amps; what its groups added comes off them.",
       confirmLabel: "Remove",
       tone: "danger",
     });

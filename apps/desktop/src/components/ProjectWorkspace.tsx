@@ -4,7 +4,7 @@ import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./configure/AmpConfigureView";
 import { OperatorView } from "./OperatorView";
 import { SpeakerLibraryView } from "./speakerLibrary/SpeakerLibraryView";
-import { WorkspaceView } from "./workspace/WorkspaceView";
+import { WorkspaceView, type WorkspaceMode } from "./workspace/WorkspaceView";
 import { useAmpEditLock } from "../hooks/useAmpEditLock";
 import { useLinkedSync } from "../hooks/useLinkedSync";
 import { useLiveBridge } from "../hooks/useLiveBridge";
@@ -30,6 +30,8 @@ const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
+  // Here, not in the view: it unmounts on a tab change.
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("design");
   /** Configure-tab per open amp. Held here because `AmpConfigureView` is
    * unmounted whenever you switch to another amp or back to the Workspace —
    * keeping the tab in the editor itself would lose it every time. */
@@ -196,6 +198,8 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
               ampModels={ampModels}
               onOpenDevice={openDevice}
               locks={locks}
+              mode={workspaceMode}
+              onModeChange={setWorkspaceMode}
             />
           )}
           {activeTab === "operator" && <OperatorView />}

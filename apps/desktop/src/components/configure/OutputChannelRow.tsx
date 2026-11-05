@@ -242,6 +242,7 @@ export function OutputChannelRow({
             opened={openPopover === "volume"}
             onOpenChange={(o) => setOpenPopover(o ? "volume" : null)}
             width={200}
+            dotted="var(--amp-color-orange-6)"
             trigger={
               <StatEditorTile
                 value={volumeDb.toFixed(1)}
@@ -265,6 +266,9 @@ export function OutputChannelRow({
                 }}
               >
                 Output Volume
+              </span>
+              <span className="text-center text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-orange-6)]">
+                Not part of a speaker preset
               </span>
               <CommitNumberInput
                 value={volumeDb}

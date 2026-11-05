@@ -659,9 +659,12 @@ pub fn speaker_status(
     }
 }
 
-/// One state per output that has a speaker.
+/// One state per output that has a speaker, compared with the output minus
+/// its project's groups (`GroupOffset::strip`), which are no part of the
+/// speaker. `project` is `None` for an amp outside a project.
 pub fn speaker_states(
     assignment: &AmpAssignment,
+    project: Option<&Project>,
     library: &[SpeakerLibraryEntry],
     cap: Option<&AmpCapability>,
 ) -> Vec<ChannelSpeakerState> {
@@ -670,10 +673,14 @@ pub fn speaker_states(
         .iter()
         .filter_map(|channel| {
             let speaker = channel.speaker.as_ref()?;
+            let offset = project
+                .zip(speaker.project_speaker_id.as_deref())
+                .map(|(p, id)| p.speaker_offset(id))
+                .unwrap_or_default();
             Some(ChannelSpeakerState {
                 channel_index: channel.channel_index,
                 speaker: speaker.clone(),
-                status: speaker_status(channel, speaker, library, cap),
+                status: speaker_status(&offset.strip(channel), speaker, library, cap),
             })
         })
         .collect()
