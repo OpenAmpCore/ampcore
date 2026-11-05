@@ -144,6 +144,7 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
     // Filled in by `driver.rs` once it can look up a real rated voltage from
     // the device's firmware string — this adapter only sees raw bytes.
     let output_level_db = vec![None; fields.output_voltages.len()];
+    let output_headroom_db = output_level_db.clone();
     // Same split of responsibility as `output_level_db`: decoding an output
     // state byte needs the device's firmware family, which only `driver.rs`
     // knows, so the raw array is carried through here and the decoded one is
@@ -170,6 +171,7 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         output_current_below_range,
         output_level_db,
         rated_rms_voltage: None,
+        output_headroom_db,
         output_states: fields.output_states,
         input_voltages: fields.input_voltages,
         input_dbfs,

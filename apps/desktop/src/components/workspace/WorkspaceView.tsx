@@ -19,6 +19,8 @@ import { useIsCompact } from "../../lib/breakpoints";
 import { arrange, freeSpot, type Arrangement, type Rect } from "../../lib/arrange";
 import { NO_GUIDES, snapToGuides, type Guides } from "../../lib/helperLines";
 import { useLiveDevices } from "../../hooks/useLiveDevices";
+import { useLiveTelemetry } from "../../hooks/useLiveMap";
+import { linkedDeviceFor } from "../../lib/ampLinkStatus";
 
 const PANE_HEADING = { fontWeight: 500, fontSize: "var(--amp-font-size-sm)", color: "var(--amp-color-dimmed)" } as const;
 const SPEAKER_GAP = 16;
@@ -63,8 +65,8 @@ interface WorkspaceViewProps {
  * Design's Select tool acts on the selected tile, its Link tool shows outputs
  * and ways and joins them. There are no cables.
  *
- * Memoised: its parent re-renders at meter rate for the amp editor's sake,
- * and nothing here shows a meter. */
+ * Memoised: its parent re-renders at meter rate for the amp editor's sake;
+ * the headroom meters here take their own heartbeat (every ~2 s per amp). */
 export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice, locks }: WorkspaceViewProps) {
   const compact = useIsCompact();
   const [catalogueOpen, setCatalogueOpen] = useState(false);
@@ -74,6 +76,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   const [linkTargetId, setLinkTargetId] = useState<string | null>(null);
 
   const { devices, ready: devicesReady } = useLiveDevices();
+  const telemetryById = useLiveTelemetry();
 
   const modelsById = useMemo(() => {
     const map = new Map<string, AmpModelCatalogEntry>();
@@ -234,6 +237,13 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
 
   const outputsOf = (assignment: AmpAssignment) => speakers.outputs.filter((o) => o.amp.id === assignment.id);
 
+  /** An output's live headroom: `undefined` without a heartbeat from its amp. */
+  function headroomOf(o: ProjectOutput): number | null | undefined {
+    const device = linkedDeviceFor(o.amp, devices);
+    const telemetry = device?.online ? telemetryById[device.id] : undefined;
+    return telemetry ? (telemetry.outputHeadroomDb[o.row.leader] ?? null) : undefined;
+  }
+
   function boxesFor(assignment: AmpAssignment): OutputBox[] {
     return outputsOf(assignment).map((o) => ({
       key: o.key,
@@ -245,6 +255,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       linked: !!o.speaker?.projectSpeakerId,
       picked: picked.includes(o.key),
       pending: speakers.pending.outputs.includes(o.key),
+      headroomDb: headroomOf(o),
     }));
   }
 
@@ -415,6 +426,10 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     armed,
     renaming,
     highlighted: armed ? null : hoveredBoxSpeaker,
+    headroomOf: (key) => {
+      const o = speakers.outputs.find((out) => out.key === key);
+      return o && headroomOf(o);
+    },
     // Arming what is already armed disarms it.
     arm: (next) => {
       setPicked([]);

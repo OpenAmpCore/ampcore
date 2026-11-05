@@ -57,7 +57,7 @@ use commands::speakers::{
 };
 use commands::speaker_library::{
     speakers_create, speakers_delete, speakers_duplicate, speakers_export, speakers_import_profiles, speakers_list,
-    speakers_neutral_processing, speakers_save, speakers_save_from_outputs, speakers_update_details,
+    speakers_neutral_processing, speakers_open_folder, speakers_save, speakers_save_from_outputs, speakers_update_details,
     speakers_update_from_output,
 };
 use ampcore_core::live::state::LiveDeviceState;
@@ -111,6 +111,7 @@ pub fn run() {
             speakers_list,
             speakers_import_profiles,
             speakers_export,
+            speakers_open_folder,
             speakers_fit,
             speakers_update_details,
             speakers_create,

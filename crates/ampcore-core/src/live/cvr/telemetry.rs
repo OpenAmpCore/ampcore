@@ -39,6 +39,11 @@ pub struct Telemetry {
     /// the *real* rated voltage instead of an approximate/generic constant.
     /// `None` under the same conditions as `output_level_db`.
     pub rated_rms_voltage: Option<f64>,
+    /// ArmoníaPlus-style headroom per output (`dsp::output_headroom_db`): dB
+    /// to the nearest limiter / rated voltage, negative while limiting, `None`
+    /// with no signal. Filled by `driver.rs`, which knows the live limiter
+    /// settings; all `None` from the wire adapters.
+    pub output_headroom_db: Vec<Option<f32>>,
     /// Raw per-output state bytes, straight off the wire — kept alongside the
     /// decoded `output_channel_states` for wire debugging and because the
     /// decode needs a firmware family this adapter never sees.

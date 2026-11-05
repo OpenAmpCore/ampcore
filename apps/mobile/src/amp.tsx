@@ -157,6 +157,12 @@ export function Banners({ ctx }: { ctx: AmpCtx }) {
 
 /** The amp's home: every output, then every input, each with its meter and
  * the controls used live. Everything else is one tap into the detail. */
+/** Core's `outputHeadroomDb` as text; nothing at silence or without a reading. */
+function headroomText(db: number | null | undefined): string | undefined {
+  if (db == null) return undefined;
+  return db < 0 ? `Limiting ${(-db).toFixed(1)} dB` : `${db.toFixed(1)} dB headroom`;
+}
+
 function Channels({ ctx }: { ctx: AmpCtx }) {
   const outs = channelCount("out", ctx.config, ctx.device);
   const ins = channelCount("in", ctx.config, ctx.device);
@@ -389,9 +395,8 @@ function DeviceTab({ ctx }: { ctx: AmpCtx }) {
                       .join(" · ") || "—"}
                   </span>
                 }
-                // Limiter gain reduction; 0 means it isn't pulling anything back.
-                // At 0 V the firmware's reading means nothing, as on desktop.
-                subtitle={t.limiters[i] && t.outputVoltages[i] > 0 ? `Limiting ${t.limiters[i].toFixed(1)} dB` : undefined}
+                // Headroom to the limiters, or gain reduction while limiting.
+                subtitle={headroomText(t.outputHeadroomDb[i])}
                 onClick={() => openDetail(device.id, "out", i)}
               />
             ))}

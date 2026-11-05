@@ -227,6 +227,8 @@ export const commands = {
 	 *  caller to save where the user picks.
 	 */
 	speakersExport: () => typedError<string, AppError>(__TAURI_INVOKE("speakers_export")),
+	/**  Opens the folder holding `speakers.json` in the system file manager. */
+	speakersOpenFolder: () => typedError<null, AppError>(__TAURI_INVOKE("speakers_open_folder")),
 	/**  What `speakers_apply` would have to adjust, so the user can decide first. */
 	speakersFit: (projectId: string, assignmentId: string, items: SpeakerItem[]) => typedError<OutputFit[], AppError>(__TAURI_INVOKE("speakers_fit", { projectId, assignmentId, items })),
 	speakersUpdateDetails: (id: string, details: SpeakerDetails) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speakers_update_details", { id, details })),
@@ -2391,6 +2393,13 @@ export type Telemetry = {
 	 *  `None` under the same conditions as `output_level_db`.
 	 */
 	ratedRmsVoltage: number | null,
+	/**
+	 *  ArmoníaPlus-style headroom per output (`dsp::output_headroom_db`): dB
+	 *  to the nearest limiter / rated voltage, negative while limiting, `None`
+	 *  with no signal. Filled by `driver.rs`, which knows the live limiter
+	 *  settings; all `None` from the wire adapters.
+	 */
+	outputHeadroomDb: (number | null)[],
 	/**
 	 *  Raw per-output state bytes, straight off the wire — kept alongside the
 	 *  decoded `output_channel_states` for wire debugging and because the

@@ -53,6 +53,40 @@ const TILE =
 const NAME = "line-clamp-2 w-full text-center text-xs font-medium break-words";
 const frame = (lit: boolean) => (lit ? "border-accent bg-accent-soft" : "border-[var(--amp-color-default-border)]");
 
+const LED_RED = "var(--amp-color-red-filled)";
+const LED_YELLOW = "var(--amp-color-yellow-5)";
+const LED_BLUE = "var(--amp-color-blue-5)";
+
+/** ArmoníaPlus's headroom meter, top to bottom: red = over 12 dB of gain
+ * reduction, two yellow = 12–6 and 6–0 dB of it, `blue` blue steps of 6 dB
+ * below the limiters, and a last blue for signal present. `db` is core's
+ * `outputHeadroomDb` (negative while limiting); `null` = no signal, all dark;
+ * `undefined` = no reading, no meter. Status colours, never the accent. */
+function HeadroomLeds({ db, blue, horizontal }: { db: number | null | undefined; blue: number; horizontal?: boolean }) {
+  if (db === undefined) return null;
+  const leds: Array<[string, number]> = [
+    [LED_RED, -12],
+    [LED_YELLOW, -6],
+    [LED_YELLOW, 0],
+    ...Array.from({ length: blue }, (_, i): [string, number] => [LED_BLUE, 6 * (i + 1)]),
+    [LED_BLUE, Infinity],
+  ];
+  return (
+    <div
+      aria-label={db === null ? "No signal" : db < 0 ? `Limiting ${(-db).toFixed(1)} dB` : `${db.toFixed(1)} dB headroom`}
+      className={`pointer-events-none flex gap-px ${horizontal ? "flex-row-reverse" : "flex-col"}`}
+    >
+      {leds.map(([color, below], i) => (
+        <span
+          key={i}
+          className={`rounded-xs ${horizontal ? "h-1 flex-1" : "h-1 w-1.5"}`}
+          style={{ background: color, opacity: db !== null && db < below ? 1 : 0.18 }}
+        />
+      ))}
+    </div>
+  );
+}
+
 /** The corner dot: a filled colour, or hollow for "nothing to say"; `blink`
  * for a state that wants attention (an amp out of step with the project). */
 function Dot({ color, blink = false }: { color: string | null; blink?: boolean }) {
@@ -96,6 +130,8 @@ export interface SpeakerCanvas {
   renaming: string | null;
   /** The speaker whose output square is under the pointer in the amp list. */
   highlighted: string | null;
+  /** An output's live headroom (`HeadroomLeds`' `db`), by output key. */
+  headroomOf: (outputKey: string) => number | null | undefined;
   arm: (armed: Armed) => void;
   /** Ends renaming; an empty or unchanged name is left alone. */
   rename: (speaker: ProjectSpeaker, name: string) => void;
@@ -142,6 +178,10 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
   const dot = kinds.includes("edited") ? "var(--amp-color-orange-6)" : kinds.includes("libraryUpdated") ? "var(--accent)" : null;
   // Link state is the Link tool's subject, shown as on the amp card: green = linked.
   const allLinked = linking && ways.length > 0 && ways.every((w) => w.output);
+  // The worst way speaks for the speaker; no live way, no meter.
+  const readings = ways.flatMap((w) => (w.output ? [canvas.headroomOf(w.output.key)] : [])).filter((d) => d !== undefined);
+  const levels = readings.filter((d): d is number => d !== null);
+  const headroom = readings.length === 0 ? undefined : levels.length ? Math.min(...levels) : null;
 
   const field = (label: string, value: string): Array<[string, ReactNode]> => (value ? [[label, value]] : []);
   const tooltip = (
@@ -175,6 +215,9 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
         onClick={() => canArm && canvas.arm({ speakerId: speaker.id, ways: ways.map((w) => w.wayIndex) })}
       >
         {dot && <Dot color={dot} />}
+        <div className="absolute top-2 left-2">
+          <HeadroomLeds db={headroom} blue={4} />
+        </div>
         {/* Always mounted, so it fades in and out instead of popping. */}
         <div
           aria-hidden={!data.pending}
@@ -252,6 +295,8 @@ export interface OutputBox {
   pending: boolean;
   /** Selected for Bridge / Unbridge. */
   picked: boolean;
+  /** Live headroom, see `HeadroomLeds`. */
+  headroomDb: number | null | undefined;
 }
 
 // The end sections take the card's corners, so an inset ring follows its radius instead of being clipped.
@@ -306,6 +351,15 @@ export function AmpTile({
       >
         {/* The front panel as the card's background. */}
         {isCvr && <img src="/cvr_dsp_amp.png" alt="" className="pointer-events-none absolute inset-0 size-full object-cover opacity-35" />}
+        {boxes.some((b) => b.headroomDb !== undefined) && (
+          <div className="pointer-events-none absolute inset-x-1 bottom-0.5 z-10 flex gap-2">
+            {boxes.map((box) => (
+              <div key={box.key} className="min-w-0" style={{ flex: box.bridged ? 2 : 1 }}>
+                <HeadroomLeds db={box.headroomDb} blue={4} horizontal />
+              </div>
+            ))}
+          </div>
+        )}
         {linking ? (
           // The outputs take the name's place, one section each across the whole card.
           <div className="relative flex min-w-0 flex-1">

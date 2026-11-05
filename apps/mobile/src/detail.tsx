@@ -338,8 +338,9 @@ function LimiterStage({ ctx, ch, channel: c, disabled }: StageProps) {
   const { ranges, write, telemetry } = ctx;
   const patch = (p: Record<string, unknown>) => write("set_limiter", { channelIndex: ch, patch: p });
   const { rms, peak } = c.limiter;
-  // At 0 V the firmware's reading means nothing, as on desktop.
-  const reduction = telemetry?.outputVoltages[ch] ? telemetry.limiters[ch] : 0;
+  // Core's headroom: negative = gain reduction, null at silence (where the firmware's reading means nothing).
+  const headroom = telemetry?.outputHeadroomDb[ch] ?? null;
+  const reduction = headroom !== null && headroom < 0 ? -headroom : 0;
   return (
     <div className="flex flex-col gap-6 tablet:grid tablet:grid-cols-2 tablet:items-start">
       {/* 0 means the limiter is not pulling anything back. */}

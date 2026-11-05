@@ -314,6 +314,23 @@ pub(super) fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protoc
                         parsed.output_voltages.iter().map(|&v| voltage_to_db(v, 1.0, rated_v_f32)).collect();
                     parsed.rated_rms_voltage = Some(rated_v);
                 }
+                // Headroom needs the live limiter settings, which the driver
+                // holds; before the first channel config read, only the rated
+                // voltage counts.
+                {
+                    let inner = sink.state.lock().unwrap();
+                    let channels = inner.channel_config.get(&device.id).map(|c| &c.channels);
+                    parsed.output_headroom_db = parsed
+                        .output_voltages
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &v)| {
+                            let limiter = channels.and_then(|c| c.get(i)).map(|c| &c.limiter);
+                            let gr = parsed.limiters.get(i).copied().unwrap_or(0.0);
+                            crate::live::dsp::output_headroom_db(v, gr, limiter, parsed.rated_rms_voltage)
+                        })
+                        .collect();
+                }
                 // Same kind of enrichment for the output state bytes: the
                 // numbering is firmware-specific, and the family is only known
                 // here. (The input bytes are a different, fixed two-value flag

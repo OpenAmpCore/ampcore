@@ -135,6 +135,8 @@ export interface Telemetry {
   outputCurrents: number[];
   outputCurrentBelowRange: boolean[];
   outputLevelDb: (number | null)[];
+  /** dB to the nearest limiter (core `output_headroom_db`); negative while limiting, null = no signal. */
+  outputHeadroomDb: (number | null)[];
   outputChannelStates: (string | null)[];
   inputDbfs: (number | null)[];
   inputClipping: (boolean | null)[];
