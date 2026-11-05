@@ -52,9 +52,9 @@ export function TilePopover({
   trigger: ReactNode;
   placement?: "bottom" | "top" | "right" | "left";
   width?: number;
-  /** A dotted border in this colour: the value lives outside what the row's
-   * context owns (output volume, which no speaker preset holds). */
-  dotted?: string;
+  /** A dotted orange border: the value lives outside what the row's context
+   * owns (output volume, which no speaker preset holds). */
+  dotted?: boolean;
   children: ReactNode;
 }) {
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -76,7 +76,7 @@ export function TilePopover({
         isOpen={opened}
         onOpenChange={onOpenChange}
         placement={placement}
-        style={dotted ? { border: `1px dotted ${dotted}` } : undefined}
+        style={dotted ? { border: "1px dotted var(--amp-color-orange-6)" } : undefined}
       >
         <Popover.Dialog className={POPOVER_SLOTS.dialog()} style={{ width }}>
           {children}
@@ -184,6 +184,10 @@ export interface ConfigurableTabProps {
    * Direct Edit); shown as a chip on each output row. */
   speakerStates?: Map<number, ChannelSpeakerState>;
   onOpenSpeakers?: () => void;
+  /** Output volumes move together (the Overview's switch, the `volumeOut`
+   * link); turning it on goes through `useVolumeMismatch`'s question. */
+  volumeTogether?: boolean;
+  onVolumeTogetherChange?: (on: boolean) => void;
   /** The view is locked; for what a tab renders outside its panel's own
    * disabled fieldset (a dialog). */
   locked?: boolean;

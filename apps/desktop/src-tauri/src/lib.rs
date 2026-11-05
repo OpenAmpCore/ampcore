@@ -7,7 +7,8 @@ use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
 use commands::amp_links::{
-    projects_add_live_amp, projects_amp_edit_lock, projects_edit_amp, projects_link_amp, projects_merge_amp_from_live,
+    projects_add_live_amp, projects_amp_edit_lock, projects_edit_amp, projects_end_live_sessions, projects_link_amp,
+    projects_merge_amp_from_live,
     projects_set_amp_live_disengaged, projects_unlink_amp, projects_validate_amp_link,
 };
 use commands::amp_push::{projects_plan_amp_push, projects_push_amp_to_live};
@@ -28,6 +29,7 @@ use commands::live_control::{
     live_control_set_channel_name, live_control_set_channel_source,
     live_control_set_output_bridge,
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
+    live_control_set_output_volumes,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_channel_amp_gain,
     live_control_set_crossover_slot,
     live_control_set_eq_band, live_control_set_fir_bypass, live_control_set_channel_fir_data, live_control_clear_channel_fir_data,
@@ -51,7 +53,7 @@ use commands::amp_settings::{
 };
 use commands::speakers::{
     projects_add_speaker, projects_remove_speaker, projects_rename_speaker, projects_set_channel_speaker,
-    projects_reapply_groups, projects_set_groups, projects_set_speaker_position, speakers_apply, speakers_channel_states, speakers_fit,
+    projects_set_speaker_position, speakers_apply, speakers_channel_states, speakers_fit,
 };
 use commands::speaker_library::{
     speakers_create, speakers_delete, speakers_duplicate, speakers_export, speakers_import_profiles, speakers_list,
@@ -105,8 +107,6 @@ pub fn run() {
             projects_rename_speaker,
             projects_remove_speaker,
             projects_set_speaker_position,
-            projects_set_groups,
-            projects_reapply_groups,
             speakers_apply,
             speakers_list,
             speakers_import_profiles,
@@ -161,6 +161,7 @@ pub fn run() {
             live_control_clear_channel_fir_data,
             save_text_file,
             live_control_set_channel_output,
+            live_control_set_output_volumes,
             live_control_set_channel_delay_in,
             live_control_set_channel_input_mute,
             live_control_set_channel_phase_invert,
@@ -183,6 +184,7 @@ pub fn run() {
             projects_set_amp_live_disengaged,
             projects_amp_edit_lock,
             projects_merge_amp_from_live,
+            projects_end_live_sessions,
             projects_plan_amp_push,
             projects_push_amp_to_live,
             live_control_set_rotary_lock,

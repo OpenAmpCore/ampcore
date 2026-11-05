@@ -5,11 +5,13 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 ## [Unreleased]
 
 ### Added
-- Speaker groups on the Workspace, as tiles beside the speakers. A group's gain, mute, delay and polarity sit on top of every output its speakers are linked to, across amps. A speaker can be in several groups: gains and delays add up, any mute mutes, and two polarity flips cancel. A speaker's preset still reads Match. Add a group from the speaker pane's bar, and choose its speakers with Design's new Group tool. Selecting a speaker outlines its groups, and selecting a group outlines its speakers.
-- Tune mode: the Mute, Gain, Delay and Polarity tools act on the selected speakers and groups, in absolute or relative steps. A speaker's tile shows its own gain and, in brackets, the gain with its groups. A red dot means it is muted; the tooltip says by what.
-- Unlinking or removing a speaker now takes its groups' values off its outputs. A group change that would push an output past its range is refused as a whole, and the refusal names the output.
-- After reading settings from an amp whose speakers are in groups, the app asks whether those values already included the groups. If another project or other software wrote the amp, the values didn't include them, and "Put groups back on top" writes the groups to the amp again.
+- Opening a project whose amps changed while it was closed (a preset recall, other software) no longer takes over their values silently. A window lists those amps, as in ArmoníaPlus: Send the project to each (speakers that read Edited are re-applied from the library), Read it, or Compare.
 - The output volume popover has a dotted orange border, because output volume is never part of a speaker preset.
+
+### Changed
+- Output volumes move together on every amp by default, as with the encoder on the amp: the Overview's Together switch (one setting for the whole app) moves every output by the same step and shows one fader while they're equal; turned off, each output has its own fader, and the Linking tab's Volume links apply. Edited singly, a small notice says to balance outputs with Trim, since volume isn't saved in hardware or speaker presets.
+- Opening an amp whose outputs are at different volumes while they move together, or turning the switch on, asks whether to set them all to the lowest or to edit outputs singly.
+- A volume change on a live amp goes out as one write for all outputs: faster, one confirmation.
 
 ## [0.3.12] - 2026-11-03
 

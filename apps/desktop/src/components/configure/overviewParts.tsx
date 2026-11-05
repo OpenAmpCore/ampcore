@@ -20,17 +20,34 @@ export const HEADER_H = 36;
 
 const GAP = 8;
 
-export function Section({ title, children }: { title: string; children: ReactNode }) {
+/** `action` sits right of the title, in a title row of one fixed height for
+ * every section, so the cards still start level. `footer` sits inside the
+ * card under the columns, wrapping at the card's width (`w-0 min-w-full`)
+ * rather than widening it, in the space the stretched card leaves. */
+export function Section({
+  title,
+  action,
+  footer,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  footer?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="flex min-w-0 flex-col gap-1.5">
-      <h3 className={SECTION_TITLE}>{title}</h3>
+      <div className="flex h-6 items-center justify-between gap-3">
+        <h3 className={SECTION_TITLE}>{title}</h3>
+        {action}
+      </div>
       {/* `flex-1`: the card row stretches its sections, so every card ends on
        * the same bottom edge. */}
-      <div
-        className="flex min-w-0 flex-1 overflow-x-auto rounded-xl border border-[var(--amp-color-default-border)] p-3"
-        style={{ gap: GAP }}
-      >
-        {children}
+      <div className="flex min-w-0 flex-1 flex-col rounded-xl border border-[var(--amp-color-default-border)] p-3" style={{ gap: GAP }}>
+        <div className="flex min-w-0 overflow-x-auto" style={{ gap: GAP }}>
+          {children}
+        </div>
+        {footer && <div className="mt-auto w-0 min-w-full">{footer}</div>}
       </div>
     </section>
   );

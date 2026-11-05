@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::capability::{CrossoverFilterType, EqFilterType, ParamRange, PowerMode, SourceKind};
+use super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use super::common::{new_id, now_millis};
 use crate::live::cvr::fir::{taps_summary, trimmed_taps};
 
@@ -461,115 +459,6 @@ impl ProjectSpeaker {
     }
 }
 
-/// Project speakers moved together, as ArmoníaPlus's (advanced) groups: the
-/// group's gain, mute, delay and polarity sit on top of each linked output.
-/// A speaker can be in several groups; gains and delays add up, any mute
-/// mutes, and two polarity flips cancel.
-///
-/// The amp holds the sum: an output's own values are never stored, they are
-/// its values minus its `GroupOffset`. Every change of groups or members is
-/// written as the difference of offsets before and after (`shift_output`),
-/// and Match compares the preset with the output minus its groups
-/// (`GroupOffset::strip`), so a group never makes a speaker read Edited.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeakerGroup {
-    pub id: String,
-    pub name: String,
-    pub speaker_ids: Vec<String>,
-    pub gain_db: f64,
-    pub muted: bool,
-    #[serde(default)]
-    pub delay_ms: f64,
-    #[serde(default)]
-    pub polarity_inverted: bool,
-    /// Its tile on the speaker canvas; `None` until first placed.
-    #[serde(default)]
-    pub position: Option<CanvasPosition>,
-}
-
-impl SpeakerGroup {
-    pub fn new(name: String, speaker_ids: Vec<String>) -> Self {
-        Self {
-            id: new_id(),
-            name,
-            speaker_ids,
-            gain_db: 0.0,
-            muted: false,
-            delay_ms: 0.0,
-            polarity_inverted: false,
-            position: None,
-        }
-    }
-}
-
-/// What the groups add to one output.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct GroupOffset {
-    pub gain_db: f64,
-    pub muted: bool,
-    pub delay_ms: f64,
-    pub inverted: bool,
-}
-
-impl GroupOffset {
-    fn add(self, g: &SpeakerGroup) -> Self {
-        Self {
-            gain_db: self.gain_db + g.gain_db,
-            muted: self.muted || g.muted,
-            delay_ms: self.delay_ms + g.delay_ms,
-            inverted: self.inverted != g.polarity_inverted,
-        }
-    }
-
-    /// The offset with its preset-owned parts (delay, polarity) taken out:
-    /// what an output still holds of it right after a speaker's values were
-    /// applied over it.
-    pub fn without_preset_fields(self) -> Self {
-        Self { delay_ms: 0.0, inverted: false, ..self }
-    }
-
-    /// The channel as its speaker set it up: the groups' delay and polarity
-    /// taken off, for comparing with the preset.
-    pub fn strip(&self, channel: &AmpChannel) -> AmpChannel {
-        let mut own = channel.clone();
-        own.delay_out_ms -= self.delay_ms;
-        own.output_phase_inverted ^= self.inverted;
-        own
-    }
-}
-
-/// Moves an output from one group offset to another: volume and delay by the
-/// differences, polarity flipped when the groups' flip changed, mute only
-/// when the groups' mute changed, so the output's own mute survives a gain
-/// change. Refuses, leaving the channel alone, instead of clamping at a
-/// range's end — a clamp would silently change the output's own value.
-// ponytail: the amp has one mute bit, so unmuting the last group that mutes an output unmutes the output too; store its own mute if users trip on it.
-pub fn shift_output(
-    channel: &mut AmpChannel,
-    from: GroupOffset,
-    to: GroupOffset,
-    volume: ParamRange,
-    delay: ParamRange,
-) -> Result<(), String> {
-    const EPS: f64 = 1e-6;
-    let v = channel.output_volume_db + to.gain_db - from.gain_db;
-    if v < volume.min - EPS || v > volume.max + EPS {
-        return Err(format!("volume would be {v:.1} dB, the amp allows {:.0} to {:.0} dB", volume.min, volume.max));
-    }
-    let d = channel.delay_out_ms + to.delay_ms - from.delay_ms;
-    if d < delay.min - EPS || d > delay.max + EPS {
-        return Err(format!("delay would be {d:.2} ms, the amp allows {:.0} to {:.0} ms", delay.min, delay.max));
-    }
-    channel.output_volume_db = v.clamp(volume.min, volume.max);
-    channel.delay_out_ms = d.clamp(delay.min, delay.max);
-    channel.output_phase_inverted ^= from.inverted != to.inverted;
-    if from.muted != to.muted {
-        channel.output_muted = to.muted;
-    }
-    Ok(())
-}
-
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
 /// a slot's configuration survives a physical unit swap. `mac` starts unset
 /// at creation time — a slot is planned by model/name alone; linking it to
@@ -618,8 +507,6 @@ pub struct Project {
     pub amp_assignments: Vec<AmpAssignment>,
     #[serde(default)]
     pub speakers: Vec<ProjectSpeaker>,
-    #[serde(default)]
-    pub groups: Vec<SpeakerGroup>,
 }
 
 /// The project file format. Released builds have saved projects in users'
@@ -644,8 +531,8 @@ pub struct Project {
 /// 5: `ProjectSpeaker.parallel` — absent in older files, which backfills to 1
 /// (a single cabinet).
 ///
-/// 6: `Project.groups` — absent in older files, which backfills to no
-/// groups (a group's delay, polarity and position backfill to none).
+/// 6: briefly carried `Project.groups` (speaker groups, since removed). Kept
+/// so files saved then still open; their `groups` key is ignored.
 pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 6;
 
 impl Project {
@@ -660,30 +547,7 @@ impl Project {
             updated_at: now,
             amp_assignments: Vec::new(),
             speakers: Vec::new(),
-            groups: Vec::new(),
         }
-    }
-
-    /// What the groups add to the outputs of one project speaker.
-    pub fn speaker_offset(&self, speaker_id: &str) -> GroupOffset {
-        self.groups
-            .iter()
-            .filter(|g| g.speaker_ids.iter().any(|s| s == speaker_id))
-            .fold(GroupOffset::default(), GroupOffset::add)
-    }
-
-    /// The group offset of every output linked to a project speaker, by
-    /// assignment id and channel index. Outputs not listed have none.
-    pub fn group_offsets(&self) -> HashMap<(String, u32), GroupOffset> {
-        let mut offsets = HashMap::new();
-        for amp in &self.amp_assignments {
-            for channel in &amp.channels {
-                if let Some(id) = channel.speaker.as_ref().and_then(|s| s.project_speaker_id.as_deref()) {
-                    offsets.insert((amp.id.clone(), channel.channel_index), self.speaker_offset(id));
-                }
-            }
-        }
-        offsets
     }
 
     pub fn touch(&mut self) {
@@ -694,9 +558,6 @@ impl Project {
     /// values and their library reference, as speakers set up on the amp.
     pub fn remove_speaker(&mut self, speaker_id: &str) {
         self.speakers.retain(|s| s.id != speaker_id);
-        for group in &mut self.groups {
-            group.speaker_ids.retain(|s| s != speaker_id);
-        }
         for channel in self.amp_assignments.iter_mut().flat_map(|a| &mut a.channels) {
             if let Some(speaker) = &mut channel.speaker {
                 if speaker.project_speaker_id.as_deref() == Some(speaker_id) {
@@ -904,106 +765,6 @@ fn default_channel_eq() -> ChannelEq {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn groups_shift_outputs_by_offset_difference() {
-        let mut project = Project::new("p".into(), String::new());
-        let speaker = ProjectSpeaker::new("Sub".into(), "lib".into(), "Brand Model".into(), 1);
-        let mut amp = AmpAssignment::new(None, None, 1, None, None);
-        amp.channels[0].speaker = Some(SpeakerRef {
-            library_id: "lib".into(),
-            way_index: 0,
-            revision: 1,
-            label: "Brand Model".into(),
-            project_speaker_id: Some(speaker.id.clone()),
-        });
-        amp.channels[0].output_volume_db = -2.0;
-        amp.channels[0].delay_out_ms = 1.0;
-        let key = (amp.id.clone(), 0);
-        project.amp_assignments.push(amp);
-        project.speakers.push(speaker.clone());
-        let volume = ParamRange { min: -80.0, max: 18.0 };
-        let delay = ParamRange { min: 0.0, max: 100.0 };
-        let shift = |project: &mut Project, before: &HashMap<(String, u32), GroupOffset>| {
-            let after = project.group_offsets();
-            let channel = &mut project.amp_assignments[0].channels[0];
-            shift_output(channel, before.get(&key).copied().unwrap_or_default(), after[&key], volume, delay)
-        };
-        let ch = |project: &Project| project.amp_assignments[0].channels[0].clone();
-
-        let mut a = SpeakerGroup::new("All".into(), vec![speaker.id.clone()]);
-        a.gain_db = -3.0;
-        a.delay_ms = 2.0;
-        a.polarity_inverted = true;
-        let mut b = SpeakerGroup::new("Subs".into(), vec![speaker.id.clone()]);
-        b.gain_db = -1.0;
-        b.delay_ms = 0.5;
-        b.muted = true;
-        let before = project.group_offsets();
-        project.groups = vec![a, b];
-        shift(&mut project, &before).unwrap();
-        assert_eq!(ch(&project).output_volume_db, -6.0);
-        assert_eq!(ch(&project).delay_out_ms, 3.5);
-        assert!(ch(&project).output_muted);
-        assert!(ch(&project).output_phase_inverted);
-        // Match sees the output as its speaker set it up.
-        let own = project.speaker_offset(&speaker.id).strip(&ch(&project));
-        assert_eq!((own.delay_out_ms, own.output_phase_inverted), (1.0, false));
-
-        // A second flip cancels the first; unmuting one group leaves the other's mute.
-        let before = project.group_offsets();
-        project.groups[1].polarity_inverted = true;
-        project.groups[0].muted = true;
-        project.groups[1].muted = false;
-        shift(&mut project, &before).unwrap();
-        assert!(!ch(&project).output_phase_inverted);
-        assert!(ch(&project).output_muted);
-
-        // Deleting both returns the own values.
-        let before = project.group_offsets();
-        project.groups.clear();
-        shift(&mut project, &before).unwrap();
-        let own = ch(&project);
-        assert_eq!((own.output_volume_db, own.delay_out_ms), (-2.0, 1.0));
-        assert!(!own.output_muted && !own.output_phase_inverted);
-
-        // Past a range's end it refuses and leaves the output alone.
-        project.groups = vec![SpeakerGroup { gain_db: 21.0, ..SpeakerGroup::new("x".into(), vec![speaker.id]) }];
-        assert!(shift(&mut project, &HashMap::new()).is_err());
-        assert_eq!(ch(&project).output_volume_db, -2.0);
-    }
-
-    #[test]
-    fn reapplying_groups_over_own_values_written_elsewhere() {
-        // Project A holds a -6 dB group; project B (no groups) wrote 0 dB on
-        // the amp, and A pulled that. Read as own values, the groups go back
-        // on top: from no offset to A's.
-        let mut project = Project::new("A".into(), String::new());
-        let speaker = ProjectSpeaker::new("Top".into(), "lib".into(), "Brand Model".into(), 1);
-        let mut amp = AmpAssignment::new(None, None, 2, None, None);
-        amp.channels[0].speaker = Some(SpeakerRef {
-            library_id: "lib".into(),
-            way_index: 0,
-            revision: 1,
-            label: "Brand Model".into(),
-            project_speaker_id: Some(speaker.id.clone()),
-        });
-        amp.channels[0].output_volume_db = 0.0;
-        amp.channels[1].output_volume_db = 0.0;
-        let key = (amp.id.clone(), 0);
-        project.amp_assignments.push(amp);
-        project.groups = vec![SpeakerGroup { gain_db: -6.0, ..SpeakerGroup::new("All".into(), vec![speaker.id.clone()]) }];
-        project.speakers.push(speaker);
-
-        let after = project.group_offsets();
-        let (volume, delay) = (ParamRange { min: -80.0, max: 18.0 }, ParamRange { min: 0.0, max: 20.0 });
-        let channel = &mut project.amp_assignments[0].channels[0];
-        shift_output(channel, GroupOffset::default(), after[&key], volume, delay).unwrap();
-        assert_eq!(project.amp_assignments[0].channels[0].output_volume_db, -6.0);
-        // An output in no group isn't touched.
-        assert!(!after.contains_key(&(project.amp_assignments[0].id.clone(), 1)));
-        assert_eq!(project.amp_assignments[0].channels[1].output_volume_db, 0.0);
-    }
 
     #[test]
     fn removing_a_project_speaker_leaves_its_outputs_as_amp_level_speakers() {

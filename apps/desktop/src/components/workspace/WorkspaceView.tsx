@@ -4,7 +4,6 @@ import { Controls, ReactFlow, useNodesState, type ColorMode, type Node, type Nod
 import "@xyflow/react/dist/style.css";
 import { AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignHorizontalDistributeCenter, AlignHorizontalSpaceAround, AlignStartHorizontal, AlignStartVertical, AlignVerticalDistributeCenter, Columns3, Group, Rows3 } from "lucide-react";
 import { GitCompare, Link, Link2, Link2Off, MousePointer2, Pencil, Plus, RotateCcw, SlidersHorizontal, SplitSquareVertical, Trash2 } from "lucide-react";
-import { AudioLines, Boxes, FlipVertical2, Timer, Volume2, VolumeX } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { AmpLinkModal } from "./AmpLinkModal";
 import { FingerprintMismatchModal, STATE_BADGE } from "../sync/FingerprintMismatchModal";
@@ -13,10 +12,9 @@ import { HelperLines } from "./HelperLines";
 import { Hint } from "../Hint";
 import { useConfirm } from "../ConfirmDialog";
 import { EditAmpModal } from "./EditAmpModal";
-import { CommitNumberInput } from "../CommitNumberInput";
-import { AmpTile, NODE_TYPES, SpeakerCanvasContext, GROUP_TILE_W, TILE_W, type Armed, type GroupNodeData, type OutputBox, type SpeakerCanvas, type SpeakerNodeData, type Tool } from "./WorkspaceNodes";
+import { AmpTile, NODE_TYPES, SpeakerCanvasContext, GROUP_TILE_W, TILE_W, type Armed, type OutputBox, type SpeakerCanvas, type SpeakerNodeData, type Tool } from "./WorkspaceNodes";
 import { useProjectSpeakers, type ProjectOutput } from "../speakers/useProjectSpeakers";
-import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project, type ProjectSpeaker, type SpeakerGroup } from "../../lib/bindings";
+import { commands, type AmpAssignment, type AmpEditLock, type AmpModelCatalogEntry, type Project, type ProjectSpeaker } from "../../lib/bindings";
 import { useIsCompact } from "../../lib/breakpoints";
 import { arrange, freeSpot, type Arrangement, type Rect } from "../../lib/arrange";
 import { NO_GUIDES, snapToGuides, type Guides } from "../../lib/helperLines";
@@ -30,41 +28,16 @@ const PLACE_ROW_W = 600;
 const AMP_PANE_W = 380;
 
 /** The Workspace's third dimension, after amps and speakers: what is being
- * done to them, as ArmoníaPlus's workflow. A mode owns the tools in the
- * bottom bar; the first is picked on entering it. Kept by `ProjectWorkspace`,
- * since this view unmounts on a tab change. */
+ * done to them. A mode owns the function bar under the panes. Only Design
+ * exists so far, so the current mode is a constant, not state.
+ * ponytail: make it state in `ProjectWorkspace` (this view unmounts on a tab
+ * change) once a second mode is available. */
 const WORKSPACE_MODES = [
   { id: "design", label: "Design", available: true },
   { id: "config", label: "Config", available: false },
-  { id: "tune", label: "Tune", available: true },
+  { id: "tune", label: "Tune", available: false },
 ] as const;
-export type WorkspaceMode = (typeof WORKSPACE_MODES)[number]["id"];
-
-const MODE_TOOLS: Record<WorkspaceMode, Array<{ id: Tool; label: string; icon: ReactNode }>> = {
-  design: [
-    { id: "select", label: "Select", icon: <MousePointer2 size={14} /> },
-    { id: "link", label: "Link", icon: <Link2 size={14} /> },
-    { id: "group", label: "Group", icon: <Boxes size={14} /> },
-  ],
-  config: [],
-  tune: [
-    { id: "mute", label: "Mute", icon: <VolumeX size={14} /> },
-    { id: "gain", label: "Gain", icon: <AudioLines size={14} /> },
-    { id: "delay", label: "Delay", icon: <Timer size={14} /> },
-    { id: "polarity", label: "Polarity", icon: <FlipVertical2 size={14} /> },
-  ],
-};
-
-/** What a speaker's groups add to its outputs — core's `GroupOffset`. */
-function groupOffset(groups: SpeakerGroup[], speakerId: string) {
-  return groups
-    .filter((g) => g.speakerIds.includes(speakerId))
-    .reduce(
-      (o, g) => ({ gain: o.gain + (g.gainDb ?? 0), delay: o.delay + (g.delayMs ?? 0), muted: o.muted || g.muted, inverted: o.inverted !== !!g.polarityInverted }),
-      { gain: 0, delay: 0, muted: false, inverted: false },
-    );
-}
-const dB = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`;
+const MODE: (typeof WORKSPACE_MODES)[number]["id"] = "design";
 
 /** An amp's sync state as its tile's dot. Fixed status colours, not the accent. */
 const DOT_COLOR = {
@@ -81,8 +54,6 @@ interface WorkspaceViewProps {
   onOpenDevice: (assignment: AmpAssignment) => void;
   /** Every amp's edit lock (`ProjectWorkspace`, which also follows the amps with it). */
   locks: Map<string, AmpEditLock>;
-  mode: WorkspaceMode;
-  onModeChange: (mode: WorkspaceMode) => void;
 }
 
 /** The project's two halves as tiles, a picture and a name each: the amp list
@@ -94,7 +65,7 @@ interface WorkspaceViewProps {
  *
  * Memoised: its parent re-renders at meter rate for the amp editor's sake,
  * and nothing here shows a meter. */
-export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice, locks, mode, onModeChange }: WorkspaceViewProps) {
+export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice, locks }: WorkspaceViewProps) {
   const compact = useIsCompact();
   const [catalogueOpen, setCatalogueOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AmpAssignment | null>(null);
@@ -159,52 +130,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   }
   const entryOf = (libraryId: string | undefined) => speakers.library.find((e) => e.id === libraryId);
 
-  const [tool, setTool] = useState<Tool>(MODE_TOOLS[mode][0].id);
-  const tuning = mode === "tune";
-  const groups = project.groups ?? [];
-
-  /** Group tool: the group a click on a speaker adds it to or removes it from. */
-  const [armedGroup, setArmedGroup] = useState<string | null>(null);
-  const [groupBusy, setGroupBusy] = useState(false);
-  /** Every group edit sends the whole list; the backend writes what changes
-   * on the amps (`regroup`) and refuses all of it when one output can't take it. */
-  async function saveGroups(next: SpeakerGroup[], failure = "Groups not changed") {
-    setGroupBusy(true);
-    const r = await commands.projectsSetGroups(project.id, next);
-    setGroupBusy(false);
-    if (r.status === "ok") onProjectUpdate(r.data);
-    else toast.danger(failure, { description: r.error.message });
-    return r.status === "ok";
-  }
-  const editGroups = (ids: string[], patch: (g: SpeakerGroup) => Partial<SpeakerGroup>, failure?: string) =>
-    saveGroups(groups.map((g) => (ids.includes(g.id) ? { ...g, ...patch(g) } : g)), failure);
-  function toggleMember(speakerId: string) {
-    if (!armedGroup) return;
-    void editGroups([armedGroup], (g) => ({
-      speakerIds: g.speakerIds.includes(speakerId) ? g.speakerIds.filter((id) => id !== speakerId) : [...g.speakerIds, speakerId],
-    }), "Membership not changed");
-  }
-  function addGroup(speakerIds: string[]) {
-    // ArmoníaPlus names them in order; the user renames from the bar.
-    const taken = new Set(groups.map((g) => g.name));
-    let n = groups.length + 1;
-    while (taken.has(`Group ${n}`)) n++;
-    void saveGroups([...groups, { id: crypto.randomUUID(), name: `Group ${n}`, speakerIds, gainDb: 0, muted: false, delayMs: 0, polarityInverted: false, position: null }]);
-  }
-  async function removeGroup(group: SpeakerGroup) {
-    const ok = await confirm({
-      title: `Delete “${group.name}”?`,
-      description: "Its gain, mute, delay and polarity come off its speakers' outputs.",
-      confirmLabel: "Delete",
-      tone: "danger",
-    });
-    if (ok) await saveGroups(groups.filter((g) => g.id !== group.id), "Group not deleted");
-  }
-
-  function pickMode(next: WorkspaceMode) {
-    onModeChange(next);
-    pickTool(MODE_TOOLS[next][0].id);
-  }
+  const [tool, setTool] = useState<Tool>("select");
   /** Select tool: the amp the bar's actions apply to. Speakers are selected
    * by React Flow itself (Ctrl-click adds, Shift-drag boxes); the two exclude
    * each other, so there is one selection. */
@@ -223,22 +149,20 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
 
   function pickTool(next: Tool) {
     setTool(next);
-    if (next === "link" || next === "group") clearSpeakerSelection();
+    if (next === "link") clearSpeakerSelection();
     setArmed(null);
-    setArmedGroup(null);
     setPicked([]);
     setRenaming(null);
   }
 
-  // Esc backs out one step: what is armed or selected first, then the Link or Group tool itself.
+  // Esc backs out one step: what is armed or selected first, then the Link tool itself.
   useEffect(() => {
-    if (tool !== "link" && tool !== "group") return;
+    if (tool !== "link") return;
     const onKey = (e: KeyboardEvent) =>
-      e.key === "Escape" &&
-      (armed ? setArmed(null) : armedGroup ? setArmedGroup(null) : picked.length ? setPicked([]) : pickTool("select"));
+      e.key === "Escape" && (armed ? setArmed(null) : picked.length ? setPicked([]) : pickTool("select"));
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tool, armed, armedGroup, picked]);
+  }, [tool, armed, picked]);
 
   /** In outputs order, so the first is the pair's leader. */
   const pickedOutputs = speakers.outputs.filter((o) => picked.includes(o.key));
@@ -340,34 +264,10 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       const count = speaker.parallel ?? 1;
       return count > 1 ? { width: GROUP_TILE_W, height: TILE_W + 22 * Math.floor((count - 1) / 4) } : { width: TILE_W, height: TILE_W };
     };
-    const GROUP_SIZE = { width: TILE_W, height: TILE_W };
-    const taken: Rect[] = [
-      ...speakers.speakers.flatMap((s) => (s.position ? [{ id: s.id, x: s.position.x ?? 0, y: s.position.y ?? 0, ...sizeOf(s) }] : [])),
-      ...groups.flatMap((g) => (g.position ? [{ id: g.id, x: g.position.x ?? 0, y: g.position.y ?? 0, ...GROUP_SIZE }] : [])),
-    ];
-    // Groups first, so they take the top row: they sit over the speakers they hold.
-    const groupNodes = groups.map((group): Node => {
-      let position = group.position ? { x: group.position.x ?? 0, y: group.position.y ?? 0 } : null;
-      if (!position) {
-        position = freeSpot(GROUP_SIZE, taken, SPEAKER_GAP, PLACE_ROW_W);
-        taken.push({ id: group.id, ...position, ...GROUP_SIZE });
-      }
-      const gain = group.gainDb ?? 0;
-      const tune =
-        tool === "gain" ? dB(gain)
-        : tool === "delay" ? `${(group.delayMs ?? 0).toFixed(2)} ms`
-        : tool === "polarity" ? (group.polarityInverted ? "Inverted" : "Normal")
-        : tool === "mute" ? (group.muted ? "Muted" : "On")
-        : "";
-      const data: GroupNodeData = {
-        group,
-        members: speakers.speakers.filter((s) => group.speakerIds.includes(s.id)).map((s) => s.name),
-        tune,
-        busy: groupBusy,
-      };
-      return { id: group.id, type: "group", position, width: TILE_W, deletable: false, data };
-    });
-    return [...groupNodes, ...speakers.speakers.map((speaker): Node => {
+    const taken: Rect[] = speakers.speakers.flatMap((s) =>
+      s.position ? [{ id: s.id, x: s.position.x ?? 0, y: s.position.y ?? 0, ...sizeOf(s) }] : [],
+    );
+    return speakers.speakers.map((speaker): Node => {
       const entry = entryOf(speaker.libraryId);
       const links = speakers.outputs.filter((o) => o.speaker?.projectSpeakerId === speaker.id);
       const linkView = (o: ProjectOutput) => ({ output: { key: o.key, label: o.label }, state: speakers.states.get(o.key) });
@@ -383,25 +283,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
         position = freeSpot(sizeOf(speaker), taken, SPEAKER_GAP, PLACE_ROW_W);
         taken.push({ id: speaker.id, ...position, ...sizeOf(speaker) });
       }
-      // What its groups add, and its outputs' own values under them.
-      const offset = groupOffset(groups, speaker.id);
-      const channels = links.flatMap((o) => o.amp.channels.filter((c) => c.channelIndex === o.row.leader));
-      const volume = channels[0]?.outputVolumeDb ?? 0;
-      const mutedBy = [
-        ...(channels.some((c) => c.outputMuted) && !offset.muted ? ["its output"] : []),
-        ...groups.filter((g) => g.muted && g.speakerIds.includes(speaker.id)).map((g) => g.name),
-      ].join(", ");
-      // ArmoníaPlus's brackets: the speaker's own value, then with its groups.
-      const tune = !channels.length && tuning ? "Not linked"
-        : tool === "gain" ? `${dB(volume - offset.gain)}${offset.gain ? ` [${dB(volume)}]` : ""}`
-        : tool === "delay" ? (offset.delay ? `[+${offset.delay.toFixed(2)} ms]` : "Preset")
-        : tool === "polarity" ? (offset.inverted ? "[Inverted]" : "Preset")
-        : tool === "mute" ? (mutedBy ? "Muted" : "On")
-        : "";
       const data: SpeakerNodeData = {
         speaker,
-        tune,
-        muted: mutedBy,
         brand: entry?.brand ?? "",
         family: entry?.family ?? "",
         model: entry?.model ?? speaker.label,
@@ -409,13 +292,12 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
         linkable: !!entry,
         busy: speakers.busy,
         pending: speakers.pending.speakers.includes(speaker.id),
-        groups: groups.filter((g) => g.speakerIds.includes(speaker.id)).map((g) => g.name).join(", "),
         ways,
       };
       return { id: speaker.id, type: "speaker", position, width: sizeOf(speaker).width, deletable: false, data };
-    })];
-    // `speakers.outputs` and `groups` follow `project`; `nameFor` follows `modelsById`.
-  }, [project, modelsById, speakers.library, speakers.states, speakers.busy, speakers.pending, tool, tuning, groupBusy]);
+    });
+    // `speakers.outputs` follows `project`; `nameFor` follows `modelsById`.
+  }, [project, modelsById, speakers.library, speakers.states, speakers.busy, speakers.pending]);
 
   // React Flow keeps what it measured (and what is being dragged) on the node
   // objects, so a rebuild is merged into them, not swapped in.
@@ -430,7 +312,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
   }, [built, setNodes]);
   // Speakers just given a free spot keep it: it no longer depends on the others.
   useEffect(() => {
-    const unplaced = built.filter((n) => !(n.type === "group" ? groups : speakers.speakers).find((s) => s.id === n.id)?.position);
+    const unplaced = built.filter((n) => !speakers.speakers.find((s) => s.id === n.id)?.position);
     if (unplaced.length) savePositions(unplaced.map((n) => ({ id: n.id, position: n.position })));
   }, [built]);
 
@@ -462,21 +344,6 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
     return changes;
   }
   const selectedSpeaker = selectedNodes.length === 1 ? speakers.speakers.find((s) => s.id === selectedNodes[0].id) : undefined;
-  const selectedGroup = selectedNodes.length === 1 ? groups.find((g) => g.id === selectedNodes[0].id) : undefined;
-  const selectedSpeakerIds = selectedNodes.filter((n) => n.type === "speaker").map((n) => n.id);
-  const selectedGroupIds = selectedNodes.filter((n) => n.type === "group").map((n) => n.id);
-
-  /** Membership highlight, as ArmoníaPlus 2.8: a selected speaker outlines its
-   * groups, a selected group its speakers; in the Group tool, the armed
-   * group's speakers are lit instead. */
-  const members = new Set<string>(
-    tool === "group"
-      ? (groups.find((g) => g.id === armedGroup)?.speakerIds ?? [])
-      : [
-          ...groups.filter((g) => selectedSpeakerIds.some((id) => g.speakerIds.includes(id))).map((g) => g.id),
-          ...groups.filter((g) => selectedGroupIds.includes(g.id)).flatMap((g) => g.speakerIds),
-        ],
-  );
   function clearSpeakerSelection() {
     setNodes((prev) => (prev.some((n) => n.selected) ? prev.map((n) => (n.selected ? { ...n, selected: false } : n)) : prev));
   }
@@ -486,14 +353,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
    * ponytail: one save per speaker; a bulk command if arranging many gets slow. */
   function savePositions(moved: Array<{ id: string; position: { x: number; y: number } }>) {
     const at = new Map(moved.map((m) => [m.id, { x: m.position.x, y: m.position.y }]));
-    const place = <T extends { id: string }>(items: T[]) => items.map((s) => (at.has(s.id) ? { ...s, position: at.get(s.id)! } : s));
-    const movedGroups = groups.some((g) => at.has(g.id));
-    onProjectUpdate({ ...project, speakers: place(speakers.speakers), groups: place(groups) });
-    for (const [id, position] of at) {
-      if (!groups.some((g) => g.id === id)) void commands.projectsSetSpeakerPosition(project.id, id, position.x, position.y);
-    }
-    // Positions change no offset, so this writes nothing to an amp.
-    if (movedGroups) void commands.projectsSetGroups(project.id, place(groups));
+    onProjectUpdate({ ...project, speakers: speakers.speakers.map((s) => (at.has(s.id) ? { ...s, position: at.get(s.id)! } : s)) });
+    for (const [id, position] of at) void commands.projectsSetSpeakerPosition(project.id, id, position.x, position.y);
   }
 
   const openMenu = useContextMenu();
@@ -563,138 +424,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       setRenaming(null);
       void speakers.rename(speaker, name);
     },
-    members,
-    armedGroup,
-    armGroup: (id) => setArmedGroup((prev) => (prev === id ? null : id)),
-    toggleMember,
-    renameGroup: (group, name) => {
-      setRenaming(null);
-      const next = name.trim();
-      if (next && next !== group.name) void editGroups([group.id], () => ({ name: next }), "Group not renamed");
-    },
   };
-
-  /** Tune: the selected speakers' linked outputs, each with its groups' offset. */
-  const tuneOutputs = selectedSpeakerIds.flatMap((id) => {
-    const offset = groupOffset(groups, id);
-    return speakers.outputs
-      .filter((o) => o.speaker?.projectSpeakerId === id)
-      .flatMap((o) => o.amp.channels.filter((c) => c.channelIndex === o.row.leader).map((channel) => ({ o, channel, offset })));
-  });
-  const tuneGroups = groups.filter((g) => selectedGroupIds.includes(g.id));
-  const tuneCount = selectedSpeakerIds.length + tuneGroups.length;
-  const [relative, setRelative] = useState(false);
-  /** Remounts the number field after a relative step, so it reads 0 again. */
-  const [tuneKey, setTuneKey] = useState(0);
-  const [tuneBusy, setTuneBusy] = useState(false);
-
-  /** A speaker's gain is its outputs' own volume (volume minus its groups'
-   * gain); its delay and polarity are its preset's, so only groups take them. */
-  async function tuneValue(value: number) {
-    setTuneBusy(true);
-    const step = (current: number) => (relative ? current + value : value);
-    if (tool === "gain") {
-      for (const { o, channel, offset } of tuneOutputs) {
-        const own = (channel.outputVolumeDb ?? 0) - offset.gain;
-        const r = await commands.projectsSetChannelOutput(project.id, o.amp.id, channel.channelIndex, null, step(own) + offset.gain, null);
-        if (r.status === "ok") onProjectUpdate(r.data);
-        else toast.danger(`${o.label}: gain not set`, { description: r.error.message });
-      }
-    }
-    if (tuneGroups.length) {
-      const field = tool === "gain" ? "gainDb" : "delayMs";
-      await editGroups(selectedGroupIds, (g) => ({ [field]: step(g[field] ?? 0) }), `Group ${tool} not set`);
-    }
-    setTuneBusy(false);
-    if (relative) setTuneKey((k) => k + 1);
-  }
-
-  /** What the selection reads: all muted, all inverted. */
-  const allMuted = tuneCount > 0 && tuneGroups.every((g) => g.muted) && tuneOutputs.every(({ channel }) => channel.outputMuted);
-  const allInverted = tuneGroups.length > 0 && tuneGroups.every((g) => g.polarityInverted);
-  // The amp has one mute bit per output: unmuting a speaker its group mutes would unmute the group's hold too.
-  const heldByGroup = tuneOutputs.some(({ offset }) => offset.muted);
-  async function tuneToggle() {
-    setTuneBusy(true);
-    if (tool === "mute") {
-      const muted = !allMuted;
-      for (const { o, channel } of tuneOutputs.filter(({ channel }) => channel.outputMuted !== muted)) {
-        const r = await commands.projectsSetChannelOutputMute(project.id, o.amp.id, channel.channelIndex, muted);
-        if (r.status === "ok") onProjectUpdate(r.data);
-        else toast.danger(`${o.label}: not ${muted ? "muted" : "unmuted"}`, { description: r.error.message });
-      }
-      if (tuneGroups.length) await editGroups(selectedGroupIds, () => ({ muted }), `Group not ${muted ? "muted" : "unmuted"}`);
-    } else {
-      await editGroups(selectedGroupIds, () => ({ polarityInverted: !allInverted }), "Polarity not changed");
-    }
-    setTuneBusy(false);
-  }
-
-  /** Tune's pane bar: the selection and the current tool's control for it. */
-  function tuneBar(): ReactNode {
-    if (tuneCount === 0) {
-      return <span className="min-w-0 truncate text-sm" style={{ color: "var(--amp-color-dimmed)" }}>Select speakers or groups to tune them</span>;
-    }
-    const name = selectedSpeaker?.name ?? selectedGroup?.name ?? `${tuneCount} selected`;
-    const speakerOnly = (tool === "delay" || tool === "polarity") && selectedSpeakerIds.length > 0;
-    const busy = tuneBusy || groupBusy;
-    let control: ReactNode;
-    if (speakerOnly) {
-      control = (
-        <span className="min-w-0 truncate text-sm" style={{ color: "var(--amp-color-dimmed)" }}>
-          A speaker's {tool} is its preset's — tune it with a group
-        </span>
-      );
-    } else if (tool === "mute" || tool === "polarity") {
-      const on = tool === "mute" ? allMuted : allInverted;
-      const blocked = tool === "mute" && on && heldByGroup && selectedSpeakerIds.length > 0;
-      control = (
-        <Hint text={blocked ? "A group mutes these speakers: unmute the group." : undefined} className="flex">
-          {action(
-            tool === "mute" ? (on ? "Unmute" : "Mute") : on ? "Normal" : "Invert",
-            tool === "mute" ? (on ? <Volume2 size={14} /> : <VolumeX size={14} />) : <FlipVertical2 size={14} />,
-            () => void tuneToggle(),
-            tool === "mute" && !on ? "danger" : "secondary",
-            busy || blocked,
-          )}
-        </Hint>
-      );
-    } else {
-      const first = tuneGroups[0];
-      const current =
-        tool === "gain"
-          ? (tuneOutputs[0] ? (tuneOutputs[0].channel.outputVolumeDb ?? 0) - tuneOutputs[0].offset.gain : (first?.gainDb ?? 0))
-          : (first?.delayMs ?? 0);
-      // Wide on purpose: what an output can actually take is checked by the backend, which names it.
-      const [min, max] = tool === "gain" ? (relative ? [-40, 40] : [-80, 18]) : [-20, 20];
-      control = (
-        <>
-          <ButtonGroup size="sm">
-            <Button variant={relative ? "ghost" : "primary"} aria-pressed={!relative} onPress={() => setRelative(false)}>Absolute</Button>
-            <Button variant={relative ? "primary" : "ghost"} aria-pressed={relative} onPress={() => setRelative(true)}>Relative</Button>
-          </ButtonGroup>
-          <CommitNumberInput
-            key={`${tool}:${relative}:${tuneKey}:${selectedNodes.map((n) => n.id).join()}`}
-            className="w-[110px] shrink-0"
-            value={relative ? 0 : current}
-            min={min}
-            max={max}
-            step={tool === "gain" ? 0.5 : 0.01}
-            suffix={tool === "gain" ? " dB" : " ms"}
-            aria-label={tool === "gain" ? "Gain" : "Delay"}
-            disabled={busy}
-            onCommit={(v) => void tuneValue(v)}
-          />
-        </>
-      );
-    }
-    return (
-      <>
-        <span className="min-w-0 truncate text-sm font-semibold">{name}</span>
-        {control}
-      </>
-    );
-  }
 
   async function removeAmp(assignment: AmpAssignment) {
     const ok = await confirm({
@@ -774,7 +504,7 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
             </div>
           ) : selecting ? (
             <span className="min-w-0 flex-1 truncate text-right" style={PANE_HEADING}>{linked.length > 0 ? summary : ""}</span>
-          ) : tool !== "link" ? null : (
+          ) : (
             // Link: always both, disabled with a hint saying why when they can't act.
             <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
               <Hint
@@ -846,42 +576,13 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
       <div className={`flex min-w-0 flex-1 flex-col ${compact ? "" : "min-h-0"}`}>
         <div className={`flex h-12 shrink-0 items-center gap-2 border-b px-3 ${BAR_EDGE}`}>
           {selecting && action("Speaker", <Plus size={14} />, speakers.openAdd)}
-          {(selecting || tool === "group") && (
-            <Hint text={selectedSpeakerIds.length ? `A new group holding the ${selectedSpeakerIds.length} selected speaker${selectedSpeakerIds.length === 1 ? "" : "s"}` : "A new, empty group"} className="flex">
-              {action("Group", <Plus size={14} />, () => addGroup(selectedSpeakerIds), "secondary", groupBusy)}
-            </Hint>
-          )}
-          {!tuning && speakers.staleSpeakers.length > 0 &&
+          {speakers.staleSpeakers.length > 0 &&
             action("Re-apply all", <RotateCcw size={14} />, () => void speakers.reapply(speakers.staleSpeakers), "secondary", speakers.busy)}
-          {tuning && (
-            <>
-              {divider}
-              {tuneBar()}
-            </>
-          )}
-          {tool === "group" && (
-            <>
-              {divider}
-              <span className="min-w-0 truncate text-sm" style={{ color: "var(--amp-color-dimmed)" }}>
-                {armedGroup
-                  ? `${groups.find((g) => g.id === armedGroup)?.name}: click speakers to add or remove them`
-                  : "Click a group, then the speakers it holds"}
-              </span>
-            </>
-          )}
           {selecting && selectedNodes.length > 1 && (
             <>
               {divider}
-              <span className="min-w-0 truncate text-sm font-semibold">{selectedNodes.length} selected</span>
+              <span className="min-w-0 truncate text-sm font-semibold">{selectedNodes.length} speakers</span>
               <span className="min-w-0 truncate text-sm" style={{ color: "var(--amp-color-dimmed)" }}>Right-click to align or distribute</span>
-            </>
-          )}
-          {selecting && selectedGroup && (
-            <>
-              {divider}
-              <span className="min-w-0 truncate text-sm font-semibold">{selectedGroup.name}</span>
-              {action("Rename", <Pencil size={14} />, () => setRenaming(selectedGroup.id))}
-              {action("Delete", <Trash2 size={14} />, () => void removeGroup(selectedGroup), "danger", groupBusy)}
             </>
           )}
           {selecting && selectedSpeaker && (
@@ -905,10 +606,8 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
               if (changes.some((c) => c.type === "select" && c.selected)) setSelectedAmpId(null);
               onNodesChange(withHelperLines(changes));
             }}
-            // Select and Tune select; in the Link and Group tools a click arms.
-            elementsSelectable={selecting || tuning}
-            // Tune changes values, not the layout.
-            nodesDraggable={!tuning}
+            // Only the Select tool selects; in the Link tool a click arms.
+            elementsSelectable={selecting}
             onPaneContextMenu={(event) => openArrangeMenu(event)}
             onNodeContextMenu={(event, node) => openArrangeMenu(event, node)}
             onSelectionContextMenu={(event) => openArrangeMenu(event)}
@@ -921,7 +620,6 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
             onPaneClick={() => {
               setSelectedAmpId(null);
               setArmed(null);
-              setArmedGroup(null);
               setPicked([]);
             }}
             nodesConnectable={false}
@@ -949,26 +647,21 @@ export const WorkspaceView = memo(function WorkspaceView({ project, onProjectUpd
 
       {/* Bottom bar: the mode and its tool, nothing else. What a pane holds is acted on from that pane's own bar. */}
       <div className={`flex shrink-0 flex-wrap items-center gap-2 border-t px-3 py-2 ${BAR_EDGE}`}>
-        {WORKSPACE_MODES.map((m) => (
-          <Hint key={m.id} text={m.available ? undefined : "Not available yet"} className="flex">
-            <Button
-              size="sm"
-              variant={m.id === mode ? "primary" : "secondary"}
-              aria-pressed={m.id === mode}
-              isDisabled={!m.available}
-              onPress={() => m.id !== mode && pickMode(m.id)}
-            >
-              {m.label}
+        {WORKSPACE_MODES.map((mode) => (
+          <Hint key={mode.id} text={mode.available ? undefined : "Not available yet"} className="flex">
+            <Button size="sm" variant={mode.id === MODE ? "primary" : "secondary"} aria-pressed={mode.id === MODE} isDisabled={!mode.available}>
+              {mode.label}
             </Button>
           </Hint>
         ))}
         {divider}
         <ButtonGroup size="sm">
-          {MODE_TOOLS[mode].map((t) => (
-            <Button key={t.id} variant={tool === t.id ? "primary" : "ghost"} aria-pressed={tool === t.id} onPress={() => pickTool(t.id)}>
-              {t.icon} {t.label}
-            </Button>
-          ))}
+          <Button variant={selecting ? "primary" : "ghost"} aria-pressed={selecting} onPress={() => pickTool("select")}>
+            <MousePointer2 size={14} /> Select
+          </Button>
+          <Button variant={tool === "link" ? "primary" : "ghost"} aria-pressed={tool === "link"} onPress={() => pickTool("link")}>
+            <Link2 size={14} /> Link
+          </Button>
         </ButtonGroup>
         {tool === "link" && (
           <>

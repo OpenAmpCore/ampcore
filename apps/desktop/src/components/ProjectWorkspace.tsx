@@ -3,8 +3,9 @@ import { Button } from "@heroui/react";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./configure/AmpConfigureView";
 import { OperatorView } from "./OperatorView";
+import { AmpDesyncModal } from "./sync/AmpDesyncModal";
 import { SpeakerLibraryView } from "./speakerLibrary/SpeakerLibraryView";
-import { WorkspaceView, type WorkspaceMode } from "./workspace/WorkspaceView";
+import { WorkspaceView } from "./workspace/WorkspaceView";
 import { useAmpEditLock } from "../hooks/useAmpEditLock";
 import { useLinkedSync } from "../hooks/useLinkedSync";
 import { useLiveBridge } from "../hooks/useLiveBridge";
@@ -27,11 +28,26 @@ interface ProjectWorkspaceProps {
 
 const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 
-export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
+/** Opens a project with no live session left from before
+ * (`projects_end_live_sessions`): an amp that changed while the project was
+ * closed is then a difference to Read or Send (`AmpDesyncModal`), never
+ * adopted by `useLinkedSync` as the project's own values. */
+export function ProjectWorkspace(props: ProjectWorkspaceProps) {
+  const id = props.project.id;
+  const [readyFor, setReadyFor] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void commands.projectsEndLiveSessions(id).then(() => !cancelled && setReadyFor(id));
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+  return readyFor === id ? <OpenProjectWorkspace key={id} {...props} /> : null;
+}
+
+function OpenProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
-  // Here, not in the view: it unmounts on a tab change.
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("design");
   /** Configure-tab per open amp. Held here because `AmpConfigureView` is
    * unmounted whenever you switch to another amp or back to the Workspace —
    * keeping the tab in the editor itself would lose it every time. */
@@ -132,6 +148,13 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
 
   return (
     <div className="flex h-full flex-col">
+      <AmpDesyncModal
+        project={project}
+        locks={projectLocks}
+        nameOf={(a) => linkedDeviceFor(a, devices)?.name ?? a.deviceName ?? "Amp"}
+        onProjectUpdate={onProjectUpdate}
+        onCompare={openDevice}
+      />
 
       <div className="flex min-h-0 flex-1">
         {/* Vertical device rail — Armonia-style, persists across Workspace/Operator View */}
@@ -198,8 +221,6 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
               ampModels={ampModels}
               onOpenDevice={openDevice}
               locks={locks}
-              mode={workspaceMode}
-              onModeChange={setWorkspaceMode}
             />
           )}
           {activeTab === "operator" && <OperatorView />}

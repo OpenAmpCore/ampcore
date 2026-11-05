@@ -9,7 +9,9 @@ import { RotaryLockToggle } from "../RotaryLockToggle";
 import { StandbyToggle } from "../StandbyToggle";
 import { useLiveBridge } from "../../hooks/useLiveBridge";
 import { commands, type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type AmpEditLock, type AmpModelCatalogEntry, type ChannelConfigSnapshot, type DiscoveredDevice, type Project, type Telemetry } from "../../lib/bindings";
-import { linkConfigureActions, NO_LINKS } from "../../lib/channelLinks";
+import { linkConfigureActions, NO_LINKS, withVolumeTogether, writeAll } from "../../lib/channelLinks";
+import { setPreference } from "../../lib/preferences";
+import { useVolumeMismatch } from "./VolumeMismatchModal";
 import { createProjectConfigureActions, lockConfigureActions, type ConfigureActions } from "../../lib/configureActions";
 import { buildLiveAssignmentViewModel, createLiveConfigureActions } from "../../lib/liveConfigureAdapter";
 import { OverviewTab } from "./OverviewTab";
@@ -273,9 +275,41 @@ export function AmpConfigureView({
     (source?.kind === "project" ? (source.assignment.mac ?? source.assignment.id) : undefined)
   )?.toLowerCase();
   const channelLinks = usePreference("channelLinks");
-  const linkConfig = (linkKey && channelLinks[linkKey]) || NO_LINKS;
+  const channelCount = assignment?.channels.length ?? 0;
+  const together = usePreference("outputVolumesTogether") && channelCount > 1;
+  const linkConfig = withVolumeTogether((linkKey && channelLinks[linkKey]) || NO_LINKS, channelCount, together);
+  const setTogether = (on: boolean) => setPreference("outputVolumesTogether", on);
+  const volumeRange = {
+    min: capability?.paramRanges.outputVolumeDb.min ?? -80,
+    max: capability?.paramRanges.outputVolumeDb.max ?? 18,
+  };
   const actions =
-    baseActions && linkConfigureActions(baseActions, linkConfig, assignment?.channels.length ?? 0);
+    baseActions && linkConfigureActions(baseActions, linkConfig, assignment?.channels ?? [], volumeRange);
+
+  // Output volumes move together from one level: differing ones get one
+  // question (`useVolumeMismatch`), when the view loads an amp in Together
+  // and when the Overview's switch is turned on.
+  const volumeMismatch = useVolumeMismatch({
+    onTogether: setTogether,
+    channels: assignment?.channels ?? [],
+    // The unlinked actions, so the link's relative step doesn't keep the
+    // differences: one write on a live amp, one save per output otherwise
+    // (one at a time: every project write answers with the whole project).
+    write:
+      baseActions &&
+      ((volumes) =>
+        baseActions.setOutputVolumes?.(volumes) ??
+        writeAll(volumes.map((v) => v.channelIndex), (c) =>
+          baseActions.setChannelOutput(c, null, volumes.find((v) => v.channelIndex === c)!.volumeDb, null),
+        )),
+  });
+  const volumesLoaded = live ? !!live.channelConfig : !!assignment;
+  const volumeChecked = useRef<string | null>(null);
+  useEffect(() => {
+    if (!linkKey || !volumesLoaded || locked || channelCount === 0 || volumeChecked.current === linkKey) return;
+    volumeChecked.current = linkKey;
+    if (together) volumeMismatch.check();
+  });
 
   const [mismatchOpen, setMismatchOpen] = useState(false);
   // Opens the comparison straight onto the differing rows instead of its
@@ -514,6 +548,7 @@ export function AmpConfigureView({
           </Alert.Content>
         </Alert>
       )}
+      {volumeMismatch.dialog}
       <FingerprintMismatchModal
         opened={mismatchOpen}
         onClose={() => setMismatchOpen(false)}
@@ -630,6 +665,8 @@ export function AmpConfigureView({
               ampGains={ampGains}
               actions={actions}
               linkConfig={linkConfig}
+              volumeTogether={together}
+              onVolumeTogetherChange={(on) => (on ? volumeMismatch.check() : setTogether(false))}
               deviceId={liveAmpDeviceId}
               speakerStates={speakerStates}
               onOpenSpeakers={() => handleTabChange("speakers")}

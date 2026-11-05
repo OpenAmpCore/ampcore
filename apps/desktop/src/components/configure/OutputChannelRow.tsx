@@ -242,7 +242,7 @@ export function OutputChannelRow({
             opened={openPopover === "volume"}
             onOpenChange={(o) => setOpenPopover(o ? "volume" : null)}
             width={200}
-            dotted="var(--amp-color-orange-6)"
+            dotted
             trigger={
               <StatEditorTile
                 value={volumeDb.toFixed(1)}

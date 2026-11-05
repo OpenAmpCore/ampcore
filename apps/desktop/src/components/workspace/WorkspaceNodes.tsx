@@ -1,8 +1,8 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
 import { Spinner } from "@heroui/react";
-import { Boxes, Speaker } from "lucide-react";
-import type { ChannelSpeakerState, ProjectSpeaker, SpeakerGroup } from "../../lib/bindings";
+import { Speaker } from "lucide-react";
+import type { ChannelSpeakerState, ProjectSpeaker } from "../../lib/bindings";
 import { speakerFields } from "../../lib/speakers";
 import { Hint } from "../Hint";
 import { MUTED } from "../speakers/SpeakerBench";
@@ -38,11 +38,9 @@ function Cabinets({ count }: { count: number }) {
   );
 }
 
-/** A mode's tools. Design: Select moves and picks tiles, Link shows the
- * amps' outputs and the speakers' ways so they can be joined, Group arms a
- * group tile and adds or removes the speakers clicked. Tune: one tool per
- * value, acting on the selected speakers and groups. */
-export type Tool = "select" | "link" | "group" | "mute" | "gain" | "delay" | "polarity";
+/** Design's two tools: Select moves and picks tiles, Link shows the amps'
+ * outputs and the speakers' ways so they can be joined. */
+export type Tool = "select" | "link";
 
 /** Which ways of which speaker are waiting for an output to be picked. */
 export interface Armed {
@@ -98,17 +96,9 @@ export interface SpeakerCanvas {
   renaming: string | null;
   /** The speaker whose output square is under the pointer in the amp list. */
   highlighted: string | null;
-  /** Tiles outlined for group membership: the selected tile's groups or
-   * members, or the armed group's members. */
-  members: Set<string>;
-  /** Group tool: the group whose members a click on a speaker toggles. */
-  armedGroup: string | null;
   arm: (armed: Armed) => void;
-  armGroup: (groupId: string) => void;
-  toggleMember: (speakerId: string) => void;
   /** Ends renaming; an empty or unchanged name is left alone. */
   rename: (speaker: ProjectSpeaker, name: string) => void;
-  renameGroup: (group: SpeakerGroup, name: string) => void;
 }
 
 export const SpeakerCanvasContext = createContext<SpeakerCanvas | null>(null);
@@ -126,12 +116,6 @@ export type SpeakerNodeData = {
   busy: boolean;
   /** Being written to its amp right now: blurred under a spinner. */
   pending: boolean;
-  /** The groups it is in, by name, comma-separated. */
-  groups: string;
-  /** Tune: the current tool's value, as text; empty in Design. */
-  tune: string;
-  /** What mutes it (its outputs, its groups), as text; empty when nothing does. */
-  muted: string;
   ways: Array<{
     wayIndex: number;
     label: string;
@@ -150,17 +134,12 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
   const linking = canvas.tool === "link";
   const armed = canvas.armed?.speakerId === speaker.id ? canvas.armed.ways : [];
   const canArm = linking && data.linkable && !data.busy;
-  const grouping = canvas.tool === "group";
-  const lit = linking ? armed.length > 0 || canvas.highlighted === speaker.id : grouping ? canvas.members.has(speaker.id) : !!selected;
-  const member = !lit && canvas.members.has(speaker.id);
+  const lit = linking ? armed.length > 0 || canvas.highlighted === speaker.id : !!selected;
 
   // The dot is for what needs doing (Re-apply), in every tool. Being linked
   // is not a status: it says nothing about the amp, which may be offline.
   const kinds = ways.map((w) => w.state?.status.kind);
-  // In Tune, the dot is the mute: what an operator checks first.
-  const dot = data.tune
-    ? data.muted ? "var(--amp-color-red-filled)" : null
-    : kinds.includes("edited") ? "var(--amp-color-orange-6)" : kinds.includes("libraryUpdated") ? "var(--accent)" : null;
+  const dot = kinds.includes("edited") ? "var(--amp-color-orange-6)" : kinds.includes("libraryUpdated") ? "var(--accent)" : null;
   // Link state is the Link tool's subject, shown as on the amp card: green = linked.
   const allLinked = linking && ways.length > 0 && ways.every((w) => w.output);
 
@@ -174,8 +153,6 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
         ...field("Family", data.family),
         ...field("Model", data.model),
         ...field("Application", data.application),
-        ...field("Groups", data.groups),
-        ...field("Muted by", data.muted),
         ...field("Parallel", (speaker.parallel ?? 1) > 1 ? `${speaker.parallel} cabinets on the same outputs` : ""),
         ...ways.map((w): [string, ReactNode] => [
           ways.length > 1 ? `${w.label || `Way ${w.wayIndex + 1}`} output` : "Output",
@@ -189,17 +166,13 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
   return (
     <Hint text={tooltip} className="flex w-full">
       <div
-        className={`${TILE} ${frame(lit)} ${member ? MEMBER : ""}`}
+        className={`${TILE} ${frame(lit)}`}
         style={
           allLinked && !lit
             ? { borderColor: "var(--amp-color-green-filled)", background: "color-mix(in srgb, var(--amp-color-green-filled) 22%, transparent)" }
             : undefined
         }
-        onClick={() => {
-          if (grouping) {
-            if (canvas.armedGroup && !data.busy) canvas.toggleMember(speaker.id);
-          } else if (canArm) canvas.arm({ speakerId: speaker.id, ways: ways.map((w) => w.wayIndex) });
-        }}
+        onClick={() => canArm && canvas.arm({ speakerId: speaker.id, ways: ways.map((w) => w.wayIndex) })}
       >
         {dot && <Dot color={dot} />}
         {/* Always mounted, so it fades in and out instead of popping. */}
@@ -226,7 +199,6 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
         ) : (
           <span className={NAME}>{speaker.name}</span>
         )}
-        {data.tune && <span className={TUNE}>{data.tune}</span>}
         {linking && ways.length > 1 && (
           <div className="flex flex-wrap justify-center gap-px">
             {ways.map((way) => (
@@ -252,73 +224,8 @@ function SpeakerTile({ data, selected }: NodeProps<SpeakerNodeType>) {
   );
 }
 
-const TUNE = "w-full truncate text-center text-[11px] tabular-nums text-[var(--amp-color-dimmed)]";
-// Outlined, not filled: membership is a hint beside the selection, not a second one.
-const MEMBER = "ring-2 ring-accent ring-offset-1 ring-offset-background";
-
-export type GroupNodeData = {
-  group: SpeakerGroup;
-  /** Its members' names. */
-  members: string[];
-  /** Tune: the current tool's value, as text; empty in Design. */
-  tune: string;
-  busy: boolean;
-};
-export type GroupNodeType = Node<GroupNodeData, "group">;
-
-/** A speaker group, as ArmoníaPlus shows them on the speaker side: a tile of
- * its own. Its gain, mute, delay and polarity sit on top of every output its
- * members are linked to. In the Group tool a click arms it, and clicking
- * speakers then adds or removes them. */
-function GroupTile({ data, selected }: NodeProps<GroupNodeType>) {
-  const canvas = useContext(SpeakerCanvasContext)!;
-  const { group } = data;
-  const grouping = canvas.tool === "group";
-  const lit = grouping ? canvas.armedGroup === group.id : !!selected;
-  const member = !lit && canvas.members.has(group.id);
-  const gain = group.gainDb ?? 0;
-  const tooltip = (
-    <TileTooltip
-      rows={[
-        ["Group", group.name],
-        ["Speakers", data.members.length ? data.members.join(", ") : "None yet"],
-        ["Gain", `${gain > 0 ? "+" : ""}${gain.toFixed(1)} dB`],
-        ["Delay", `${(group.delayMs ?? 0).toFixed(2)} ms`],
-        ["Polarity", group.polarityInverted ? "Inverted" : "Normal"],
-        ["Mute", group.muted ? "Muted" : "Off"],
-      ]}
-    />
-  );
-  return (
-    <Hint text={tooltip} className="flex w-full">
-      <div
-        className={`${TILE} border-dashed ${frame(lit)} ${member ? MEMBER : ""}`}
-        onClick={() => grouping && !data.busy && canvas.armGroup(group.id)}
-      >
-        {group.muted && <Dot color="var(--amp-color-red-filled)" />}
-        <Boxes size={26} className="text-[var(--amp-color-dimmed)]" />
-        {canvas.renaming === group.id ? (
-          <input
-            autoFocus
-            aria-label="Group name"
-            className={`${FIELD_INPUT} nodrag w-full text-center text-xs`}
-            defaultValue={group.name}
-            maxLength={40}
-            onClick={(e) => e.stopPropagation()}
-            onBlur={(e) => canvas.renameGroup(group, e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-          />
-        ) : (
-          <span className={NAME}>{group.name}</span>
-        )}
-        <span className={TUNE}>{data.tune || `${data.members.length} speaker${data.members.length === 1 ? "" : "s"}`}</span>
-      </div>
-    </Hint>
-  );
-}
-
 // Module level: React Flow re-mounts every node when this changes identity.
-export const NODE_TYPES = { speaker: SpeakerTile, group: GroupTile };
+export const NODE_TYPES = { speaker: SpeakerTile };
 
 const SQUARE = "h-[18px] min-w-[18px] cursor-pointer rounded-sm border border-solid px-1 text-[10px] leading-none font-bold disabled:cursor-default";
 // A linked way: the same fixed green as a linked output on the amp card.

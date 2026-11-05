@@ -14,7 +14,6 @@ export const commands = {
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
 	speakers?: ProjectSpeaker[],
-	groups?: SpeakerGroup[],
 } | null, AppError>(__TAURI_INVOKE("projects_get", { id })),
 	projectsCreate: (name: string, description: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_create", { name, description })),
 	/**
@@ -185,8 +184,7 @@ export const commands = {
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
-	 *  Unlinks an output: removes its speaker reference and takes its groups'
-	 *  offset off (`regroup`). Its other values are left alone —
+	 *  Removes an output's speaker reference. Its values are left alone —
 	 *  `speakers_apply` is what sets a speaker up.
 	 */
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex })),
@@ -199,23 +197,11 @@ export const commands = {
 	projectsRenameSpeaker: (projectId: string, speakerId: string, name: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_rename_speaker", { projectId, speakerId, name })),
 	/**
 	 *  Removes a project speaker; see `Project::remove_speaker` for what its
-	 *  outputs keep. Its groups' offset comes off them (`regroup`).
+	 *  outputs keep.
 	 */
 	projectsRemoveSpeaker: (projectId: string, speakerId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_speaker", { projectId, speakerId })),
 	/**  Where the speaker sits on the Workspace canvas. */
 	projectsSetSpeakerPosition: (projectId: string, speakerId: string, x: number | null, y: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_speaker_position", { projectId, speakerId, x, y })),
-	/**
-	 *  Replaces the project's speaker groups (members, values, tile positions),
-	 *  writing what changes on the amps (`regroup`).
-	 */
-	projectsSetGroups: (projectId: string, groups: SpeakerGroup[]) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_groups", { projectId, groups })),
-	/**
-	 *  Puts the groups back on top of one amp's outputs, for a pull whose values
-	 *  were the outputs' own (another project, or software that knows nothing of
-	 *  these groups, wrote the amp): every grouped output gets its whole offset
-	 *  added, through `regroup`'s checks and rollback.
-	 */
-	projectsReapplyGroups: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_reapply_groups", { projectId, assignmentId })),
 	/**
 	 *  Sets outputs up from the library: each item's output gets its way's values
 	 *  (fitted to the amp), reference and label as its name. A way that doesn't
@@ -558,6 +544,14 @@ export const commands = {
 	 *  failure on any field surfaces instead of being masked by the others.
 	 */
 	liveControlSetChannelOutput: (deviceId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_output", { deviceId, channelIndex, trimDb, volumeDb, delayOutMs })),
+	/**
+	 *  Several outputs' volumes in one write: every value is checked before
+	 *  anything is sent, then all packets go out under one poll hold. Output
+	 *  volumes move together by default, and one command per output left a
+	 *  gap after each in which a poll went out — delaying the next write and
+	 *  landing an FC=27 with some outputs moved and some not.
+	 */
+	liveControlSetOutputVolumes: (deviceId: string, volumes: OutputVolume[]) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_output_volumes", { deviceId, volumes })),
 	liveControlSetChannelDelayIn: (deviceId: string, channelIndex: number, delayInMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_delay_in", { deviceId, channelIndex, delayInMs })),
 	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
 	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
@@ -710,6 +704,15 @@ export const commands = {
 	 *  for what is and isn't copied.
 	 */
 	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
+	/**
+	 *  Ends every live session of the project's amps, for opening it: a session
+	 *  left from before (the project was closed, the amp stayed online) would
+	 *  make `useLinkedSync` adopt whatever the amp got meanwhile — a preset
+	 *  recall, other software — as the project's totals. An amp that still
+	 *  matches starts following again on its first lock read; one that changed
+	 *  stays Mismatch, for the user's Read or Send (`AmpDesyncModal`).
+	 */
+	projectsEndLiveSessions: (projectId: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_end_live_sessions", { projectId })),
 	/**
 	 *  Read-only: what a push would write, stage by stage. Lets the modal render
 	 *  the step list (and the adopted-fields note) before the user commits to it.
@@ -2027,6 +2030,12 @@ export type OutputFit = {
 	rows: FitRow[],
 };
 
+/**  One output's volume in a `live_control_set_output_volumes` batch. */
+export type OutputVolume = {
+	channelIndex: number,
+	volumeDb: number | null,
+};
+
 /**  An inclusive min/max bound for a numeric parameter. */
 export type ParamRange = {
 	min: number | null,
@@ -2083,7 +2092,6 @@ export type Project = {
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
 	speakers?: ProjectSpeaker[],
-	groups?: SpeakerGroup[],
 };
 
 export type ProjectImport = {
@@ -2256,30 +2264,6 @@ export type SpeakerDetails = {
 	application: string,
 	notes: string,
 	wayLabels: string[],
-};
-
-/**
- *  Project speakers moved together, as ArmoníaPlus's (advanced) groups: the
- *  group's gain, mute, delay and polarity sit on top of each linked output.
- *  A speaker can be in several groups; gains and delays add up, any mute
- *  mutes, and two polarity flips cancel.
- * 
- *  The amp holds the sum: an output's own values are never stored, they are
- *  its values minus its `GroupOffset`. Every change of groups or members is
- *  written as the difference of offsets before and after (`shift_output`),
- *  and Match compares the preset with the output minus its groups
- *  (`GroupOffset::strip`), so a group never makes a speaker read Edited.
- */
-export type SpeakerGroup = {
-	id: string,
-	name: string,
-	speakerIds: string[],
-	gainDb: number | null,
-	muted: boolean,
-	delayMs?: number | null,
-	polarityInverted?: boolean,
-	/**  Its tile on the speaker canvas; `None` until first placed. */
-	position?: CanvasPosition | null,
 };
 
 /**

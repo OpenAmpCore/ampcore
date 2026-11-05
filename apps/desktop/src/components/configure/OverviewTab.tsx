@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Slider } from "@heroui/react";
-import { Volume2, VolumeX } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Slider, Switch } from "@heroui/react";
+import { TriangleAlert, Volume2, VolumeX } from "lucide-react";
+import { Hint } from "../Hint";
 import type { ConfigurableTabProps } from "./parts";
 import { ChannelStateBadge } from "../ChannelStateBadge";
 import { CommitNumberInput } from "../CommitNumberInput";
@@ -8,6 +9,7 @@ import { SECTION_TITLE } from "../fieldClasses";
 import { StatToggle } from "../StatTiles";
 import type { VuMeterMark } from "../VuMeter";
 import { NO_AMP_GAIN, type AmpGainReading } from "../../lib/ampGain";
+import { VOLUME_EQUAL_DB, writeAll } from "../../lib/channelLinks";
 import type { ActionResult } from "../../lib/actionResult";
 import type { AmpChannel, AmpChannelState, DiscoveredDevice } from "../../lib/bindings";
 import { channelTelemetry, FALLBACK_LIMITER, outputLetter, OUTPUT_METER_FLOOR_DB, OUTPUT_METER_MARKS, outputMeterScale, rmsCeilingVolts, type ChannelTelemetry, type OutputMeterScale, INPUT_METER_FLOOR_DB, INPUT_METER_MARKS } from "../../lib/channelTelemetry";
@@ -34,6 +36,17 @@ import { Cell, ChannelHeader, Column, HEADER_H, Led, LevelMeter, ROW_H, STRIP_H,
  * `border-y-[0.75rem]`); re-check after a HeroUI upgrade, or measure the
  * thumb's travel at runtime if it ever drifts. */
 const FADER_THUMB_INSET = 20;
+
+/** A held volume write is released after this, and its result flashed for
+ * this long (`EqEditor`'s timings). */
+const VOLUME_HOLD_MS = 3000;
+const VOLUME_FLASH_MS = 700;
+
+const FILL_BY_STATUS = {
+  pending: "var(--amp-color-dimmed)",
+  ok: "var(--amp-color-green-6)",
+  fail: "var(--amp-color-red-6)",
+} as const;
 
 /** `StatToggle`'s fixed height — the Mute row. */
 const TOGGLE_H = 52;
@@ -135,49 +148,46 @@ const outputName = (channel: AmpChannel) =>
 
 /** One channel of the Volume card: fader, its value, and the amp gain with
  * the sensitivity it implies. The fader commits on release, not per tick —
- * the same reason as `LimiterEditor`'s threshold sliders — and its drag
- * value drives the field below it, so the number follows the thumb. */
+ * the same reason as `LimiterEditor`'s threshold sliders. Output volume is
+ * linked across every output by default (the Together switch), so the drag is the tab's,
+ * not the strip's: every fader shows its own value plus the step being
+ * dragged (`shown`), and moves with the thumb. */
 function VolumeStrip({
   channel,
+  header,
   min,
   max,
+  shown,
+  status,
   gain,
   locked,
+  onDrag,
   onVolume,
   onGain,
 }: {
   channel: AmpChannel;
+  /** Replaces the channel's own letter and name: the one master strip. */
+  header?: { label: string; name: string };
   min: number;
   max: number;
+  /** This fader's value: its own, or with the step being dragged. */
+  shown: number;
+  /** The volume write's state: see `OverviewTab`'s held writes. */
+  status?: "pending" | "ok" | "fail";
   gain: AmpGainReading;
   /** The slider drags through pointer handlers on a `div`, which the tab's
    * disabled fieldset doesn't reach — so it is disabled explicitly. */
   locked: boolean;
-  onVolume: (volumeDb: number) => Promise<ActionResult>;
+  onDrag: (volumeDb: number) => void;
+  onVolume: (volumeDb: number) => void;
   /** Absent without a live write path — Gain is then a readout. */
   onGain?: (gainDb: number) => Promise<ActionResult>;
 }) {
-  const volumeDb = channel.outputVolumeDb ?? 0;
-  const [drag, setDrag] = useState(volumeDb);
-  useEffect(() => {
-    setDrag(volumeDb);
-  }, [volumeDb]);
   const [gainDraft, setGainDraft] = useState(gain.gainDb);
   useEffect(() => {
     setGainDraft(gain.gainDb);
   }, [gain.gainDb]);
   const letter = outputLetter(channel.channelIndex);
-
-  // A refused write leaves the amp's value where it was, so the effects above
-  // never fire; without the reset the fader and fields would keep showing a
-  // value the amp never took. Setting the draft first is what makes the reset
-  // a change the fields see, and moves the fader to a typed value at once.
-  function commit(value: number) {
-    setDrag(value);
-    void onVolume(value).then((result) => {
-      if (!result.ok) setDrag(volumeDb);
-    });
-  }
 
   function commitGain(value: number) {
     if (!onGain) return;
@@ -189,19 +199,28 @@ function VolumeStrip({
 
   return (
     <Column>
-      <ChannelHeader label={letter} name={outputName(channel)} />
+      <ChannelHeader label={header?.label ?? letter} name={header?.name ?? outputName(channel)} />
       <Cell height={STRIP_H}>
         <Slider
           orientation="vertical"
-          aria-label={`Output ${letter} volume`}
-          style={{ height: STRIP_H }}
+          aria-label={header ? "Output volume, all outputs" : `Output ${letter} volume`}
           minValue={min}
           maxValue={max}
           step={0.5}
-          value={drag}
+          value={shown}
           isDisabled={locked}
-          onChange={(value) => setDrag(value as number)}
-          onChangeEnd={(value) => commit(value as number)}
+          // The fill, the thumb and the track's end cap all paint the accent,
+          // so the status recolours the slider's accent, not one part of it —
+          // and with colour transitions off in every part (only the thumb's
+          // transform still animates), since HeroUI fades each at its own
+          // speed, which lit the ends and the middle at different moments.
+          className={`[&_*]:[transition-property:transform] ${status === "pending" ? "eq-write-pending" : ""}`}
+          style={{
+            height: STRIP_H,
+            ...(status && ({ "--accent": FILL_BY_STATUS[status], "--color-accent": FILL_BY_STATUS[status] } as CSSProperties)),
+          }}
+          onChange={(value) => onDrag(value as number)}
+          onChangeEnd={(value) => onVolume(value as number)}
         >
           <Slider.Track>
             <Slider.Fill />
@@ -210,12 +229,12 @@ function VolumeStrip({
         </Slider>
       </Cell>
       <CommitNumberInput
-        aria-label={`Output ${letter} volume`}
-        value={drag}
+        aria-label={header ? "Output volume, all outputs" : `Output ${letter} volume`}
+        value={shown}
         min={min}
         max={max}
         step={0.1}
-        onCommit={commit}
+        onCommit={onVolume}
       />
       {/* Editable only with a write path, a reading to start from, and a
        * known range — the backend refuses anything outside it. */}
@@ -378,6 +397,8 @@ export function OverviewTab({
   device,
   modelLabel,
   presetName,
+  volumeTogether = true,
+  onVolumeTogetherChange,
 }: ConfigurableTabProps) {
   const channels = assignment.channels;
   const volumeMin = capability.paramRanges.outputVolumeDb.min ?? -80;
@@ -403,6 +424,104 @@ export function OverviewTab({
 
   const { setChannelAmpGain } = actions;
 
+  // Faders follow `EqEditor`'s writes: the step being dragged is preview only;
+  // a committed volume is held per output — pending (greyed, breathing) until
+  // acknowledged, then until that output's reading shows it (or 3 s), with a
+  // green flash — or dropped at once on failure, with a red one. The linked
+  // write reaches the outputs one after another, so releasing on the first
+  // reading is what made the last faders snap back for a moment.
+  const [drag, setDrag] = useState<{ channel: number; step: number } | null>(null);
+  const [writes, setWrites] = useState<Record<number, { target: number; acked: boolean; token: number }>>({});
+  const [flash, setFlash] = useState<Record<number, "ok" | "fail">>({});
+  const writeToken = useRef(0);
+  const volumeOf = (c: AmpChannel) => c.outputVolumeDb ?? 0;
+  const clampVolume = (v: number) => Math.min(volumeMax, Math.max(volumeMin, v));
+  const shownVolume = (c: AmpChannel) =>
+    writes[c.channelIndex]?.target ??
+    (drag && (volumeTogether || drag.channel === c.channelIndex) ? clampVolume(volumeOf(c) + drag.step) : volumeOf(c));
+  const volumesKey = channels.map(volumeOf).join();
+  useEffect(() => {
+    setWrites((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const c of channels) {
+        const w = next[c.channelIndex];
+        if (w?.acked && Math.abs(volumeOf(c) - w.target) < VOLUME_EQUAL_DB) {
+          delete next[c.channelIndex];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    // `volumesKey` stands for `channels`' volumes, which is all this reads.
+  }, [volumesKey, writes]);
+  /** One output's write state: only outputs a write touched show one. */
+  const statusOf = (c: AmpChannel) =>
+    writes[c.channelIndex] && !writes[c.channelIndex].acked ? ("pending" as const) : flash[c.channelIndex];
+  // Every output at one volume and one amp gain: the card shows the single
+  // master it is (the volume link moves all outputs anyway), not four faders
+  // that look as if each could go its own way. Differing outputs (edited
+  // singly) get a strip each, so the gaps stay visible.
+  const gainOf = (c: AmpChannel) => ampGains?.[c.channelIndex] ?? NO_AMP_GAIN;
+  const single =
+    volumeTogether &&
+    channels.length > 1 &&
+    // Shown values, not readings: mid-write some outputs have moved and some
+    // not, and the card mustn't split into strips for that moment.
+    channels.every(
+      (c) =>
+        Math.abs(shownVolume(c) - shownVolume(channels[0])) < VOLUME_EQUAL_DB &&
+        gainOf(c).gainDb === gainOf(channels[0]).gainDb &&
+        gainOf(c).sensitivityV === gainOf(channels[0]).sensitivityV,
+    );
+  // Every output's amp gain, for the master strip.
+  const setAllGains = (gainDb: number) => writeAll(channels.map((c) => c.channelIndex), (c) => setChannelAmpGain!(c, gainDb));
+
+  /** Together, one write for every output: the volume link fans it out, by
+   * the same clamped step this computes for the held values. */
+  function commitVolume(channel: AmpChannel, value: number) {
+    const step = value - volumeOf(channel);
+    const token = ++writeToken.current;
+    // Singly, only this output moves; other outputs' writes carry on.
+    const moved = (volumeTogether ? channels : [channel]).map((c) => c.channelIndex);
+    setWrites((current) => ({
+      ...current,
+      ...Object.fromEntries(
+        (volumeTogether ? channels : [channel]).map((c) => [
+          c.channelIndex,
+          { target: clampVolume(volumeOf(c) + step), acked: false, token },
+        ]),
+      ),
+    }));
+    setDrag(null);
+    // Each output's entry belongs to the newest write that touched it.
+    const settle = (keep: boolean) =>
+      setWrites((current) => {
+        const next = { ...current };
+        for (const i of moved) {
+          if (next[i]?.token !== token) continue;
+          if (keep) next[i] = { ...next[i], acked: true };
+          else delete next[i];
+        }
+        return next;
+      });
+    const setFlashFor = (kind: "ok" | "fail" | null) =>
+      setFlash((current) => {
+        const next = { ...current };
+        for (const i of moved) {
+          if (kind) next[i] = kind;
+          else delete next[i];
+        }
+        return next;
+      });
+    void actions.setChannelOutput(channel.channelIndex, null, value, null).then((result) => {
+      settle(result.ok);
+      if (result.ok) window.setTimeout(() => settle(false), VOLUME_HOLD_MS);
+      setFlashFor(result.ok ? "ok" : "fail");
+      window.setTimeout(() => setFlashFor(null), VOLUME_FLASH_MS);
+    });
+  }
+
   return (
     <div className="h-full min-h-0 overflow-auto">
       {/* `safe` centring: a card wider than a narrow pane starts at the left
@@ -418,7 +537,31 @@ export function OverviewTab({
           />
         )}
         <div className="flex flex-wrap items-stretch gap-4" style={{ justifyContent: "safe center" }}>
-          <Section title="Volume">
+          <Section
+            title="Volume"
+            action={
+              onVolumeTogetherChange && (
+                <Switch size="sm" isSelected={volumeTogether} isDisabled={locked} onChange={onVolumeTogetherChange}>
+                  <Switch.Content>
+                    <Switch.Control>
+                      <Switch.Thumb />
+                    </Switch.Control>
+                    <span className="text-[length:var(--amp-font-size-xs)]">Together</span>
+                  </Switch.Content>
+                </Switch>
+              )
+            }
+            footer={
+              !volumeTogether && (
+                <Hint text="To balance outputs, use Trim: output volume isn't saved in hardware or speaker presets." className="min-w-0">
+                  <span className="flex min-w-0 items-center gap-1 text-[10px] text-[var(--amp-color-orange-6)] opacity-75">
+                    <TriangleAlert size={11} className="shrink-0" />
+                    <span className="truncate">Balance outputs with Trim: volume isn't in hardware or speaker presets.</span>
+                  </span>
+                </Hint>
+              )
+            }
+          >
             <Column width={SIDE_W}>
               <Cell height={HEADER_H} />
               <Scale
@@ -437,15 +580,35 @@ export function OverviewTab({
                 <SideText>SEN</SideText>
               </Cell>
             </Column>
-            {channels.map((channel) => (
+            {single ? (
+              <VolumeStrip
+                channel={channels[0]}
+                header={{
+                  label: "All",
+                  name: `Outputs ${outputLetter(0)}–${outputLetter(channels.length - 1)}`,
+                }}
+                min={volumeMin}
+                max={volumeMax}
+                shown={shownVolume(channels[0])}
+                gain={gainOf(channels[0])}
+                locked={locked ?? false}
+                status={statusOf(channels[0])}
+                onDrag={(value) => setDrag({ channel: channels[0].channelIndex, step: value - volumeOf(channels[0]) })}
+                onVolume={(value) => commitVolume(channels[0], value)}
+                onGain={setChannelAmpGain ? setAllGains : undefined}
+              />
+            ) : channels.map((channel) => (
               <VolumeStrip
                 key={channel.channelIndex}
                 channel={channel}
                 min={volumeMin}
                 max={volumeMax}
+                shown={shownVolume(channel)}
                 gain={ampGains?.[channel.channelIndex] ?? NO_AMP_GAIN}
                 locked={locked ?? false}
-                onVolume={(volumeDb) => actions.setChannelOutput(channel.channelIndex, null, volumeDb, null)}
+                status={statusOf(channel)}
+                onDrag={(value) => setDrag({ channel: channel.channelIndex, step: value - volumeOf(channel) })}
+                onVolume={(value) => commitVolume(channel, value)}
                 onGain={
                   setChannelAmpGain ? (gainDb) => setChannelAmpGain(channel.channelIndex, gainDb) : undefined
                 }

@@ -810,6 +810,39 @@ pub async fn live_control_set_channel_amp_gain(
     send_writes(&state, &device_id, |firmware| Some(vec![write::build_set_amp_gain(firmware, channel_index, gain_db as f32)?])).await
 }
 
+/// One output's volume in a `live_control_set_output_volumes` batch.
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputVolume {
+    pub channel_index: u8,
+    pub volume_db: f64,
+}
+
+/// Several outputs' volumes in one write: every value is checked before
+/// anything is sent, then all packets go out under one poll hold. Output
+/// volumes move together by default, and one command per output left a
+/// gap after each in which a poll went out — delaying the next write and
+/// landing an FC=27 with some outputs moved and some not.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_output_volumes(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    volumes: Vec<OutputVolume>,
+) -> Result<LiveWriteAck, AppError> {
+    for v in &volumes {
+        let limits = live_limits(&state, &device_id, v.channel_index)?;
+        validation::check_range("Output volume", " dB", v.volume_db, limits.ranges.output_volume_db)?;
+    }
+    send_writes(&state, &device_id, |firmware| {
+        volumes
+            .iter()
+            .map(|v| write::build_set_output_volume(firmware, v.channel_index, v.volume_db as f32))
+            .collect()
+    })
+    .await
+}
+
 /// Partial update of a channel's output trim/volume/delay — mirrors
 /// `projects_set_channel_output`'s per-field-optional convention, but unlike
 /// that single-struct-mutation command, each populated field here is its own

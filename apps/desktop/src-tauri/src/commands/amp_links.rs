@@ -89,6 +89,22 @@ pub fn projects_amp_edit_lock(
     amp_lock(&project_data, &live, &project_id, &assignment_id)
 }
 
+/// Ends every live session of the project's amps, for opening it: a session
+/// left from before (the project was closed, the amp stayed online) would
+/// make `useLinkedSync` adopt whatever the amp got meanwhile — a preset
+/// recall, other software — as the project's totals. An amp that still
+/// matches starts following again on its first lock read; one that changed
+/// stays Mismatch, for the user's Read or Send (`AmpDesyncModal`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_end_live_sessions(project_data: State<ProjectDataState>, project_id: String) -> Result<(), AppError> {
+    let mut guard = project_data.lock()?;
+    let inner = &mut *guard;
+    let project = store::project(&inner.projects, &project_id)?;
+    inner.following.retain(|id| !project.amp_assignments.iter().any(|a| &a.id == id));
+    Ok(())
+}
+
 /// The edit lock, and the live session it implies: a session starts when the
 /// two fingerprints match and ends when the amp goes away or is disengaged —
 /// a passing difference keeps it (see `AmpEditLock.following`). Resolved on
