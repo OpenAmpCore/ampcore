@@ -7,6 +7,7 @@ Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.
 ### Changed
 - EQ: Reset all is now Bypass all.
 - EQ graph eases changes instead of jumping.
+- Library brands are abbreviated (Plansound → PS); hover for the full name.
 
 ### Fixed
 - Long speaker names in the library no longer get cut off.

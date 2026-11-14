@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Button, Chip } from "@heroui/react";
 import { GripVertical, Info, ListFilter } from "lucide-react";
 import type { SpeakerLibraryEntry } from "../../lib/bindings";
-import { speakerName } from "../../lib/speakers";
+import { brandShort, speakerName } from "../../lib/speakers";
 import { Hint } from "../Hint";
 import { SimpleSelect } from "../SimpleSelect";
 import { MUTED, RowMenu } from "./SpeakerBench";
@@ -14,7 +14,7 @@ export const DRAG_TYPE = "application/x-ampcore-speaker-id";
 /** grip, note, Brand, Model, Family, Application, Ways, menu. Way labels are
  * left to the drag card and the Load dialog: the table sits in half the tab. */
 const LIBRARY_COLS =
-  "grid min-w-[480px] grid-cols-[20px_24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px] items-center gap-2 px-2";
+  "grid min-w-[480px] grid-cols-[20px_24px_minmax(0,0.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px] items-center gap-2 px-2";
 
 const WAY_OPTIONS = [
   { value: "1", label: "1" },
@@ -144,7 +144,9 @@ export function LibraryTable({
             <Hint text={entry.notes} className="flex">
               <Info size={14} className={entry.notes ? "" : "opacity-25"} />
             </Hint>
-            <span className="font-medium [overflow-wrap:anywhere]">{entry.brand}</span>
+            <Hint text={entry.brand} className="min-w-0">
+              <span className="block truncate font-medium">{brandShort(entry.brand)}</span>
+            </Hint>
             <span className="[overflow-wrap:anywhere]">{entry.model}</span>
             <span className="[overflow-wrap:anywhere]">{entry.family || "–"}</span>
             <span className="[overflow-wrap:anywhere]">{entry.application || "–"}</span>
