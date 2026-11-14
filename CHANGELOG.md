@@ -2,14 +2,14 @@
 
 Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. The release workflow copies the section matching the desktop version into the GitHub release and the in-app update dialog; a version without a section ships without notes. Mobile- or core-only items go under the same version, prefixed "Mobile:".
 
-## [Unreleased]
+## [0.3.14] - 2026-11-14
 
 ### Changed
-- EQ editor: Reset all is now Bypass all — one click switches every band, HP and LP off; their values stay for when they're switched back on.
-- EQ graph: changes that don't come from dragging (Bypass all, Bypass/Enable, typed values, paste, a preset recall) ease into place instead of jumping.
+- EQ: Reset all is now Bypass all.
+- EQ graph eases changes instead of jumping.
 
 ### Fixed
-- Speakers tab: long brand, model, family and application names in the library wrap instead of being cut off.
+- Long speaker names in the library no longer get cut off.
 
 ## [0.3.13] - 2026-11-05
 
