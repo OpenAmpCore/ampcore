@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "ampcore-desktop"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "ampcore-core",
  "axum",

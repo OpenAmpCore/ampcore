@@ -29,6 +29,8 @@ const DEFAULTS = {
   limiterThresholdSurfaces: ["output", "limiter"] as string[],
   /** Output meters read the amp's volts directly instead of dB re rated. */
   outputMeterVolts: false,
+  /** The amp Speakers tab's library shows brands abbreviated (`brandShort`). */
+  abbreviateBrands: true,
   /** The built-in web server (`web_server.rs`): off until asked for. */
   webServerEnabled: false,
   webServerPort: 8642,

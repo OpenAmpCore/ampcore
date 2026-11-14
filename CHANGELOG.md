@@ -2,6 +2,17 @@
 
 Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. The release workflow copies the section matching the desktop version into the GitHub release and the in-app update dialog; a version without a section ships without notes. Mobile- or core-only items go under the same version, prefixed "Mobile:".
 
+## [0.3.14] - 2026-11-14
+
+### Changed
+- EQ: Reset all is now Bypass all.
+- EQ graph eases changes instead of jumping.
+- Library brands are abbreviated (Plansound → PS); hover for the full name. Settings can turn it off.
+- App Settings: roomier, shorter labels, Debug collapsed at the bottom.
+
+### Fixed
+- Long speaker names in the library no longer get cut off.
+
 ## [0.3.13] - 2026-11-05
 
 ### Added

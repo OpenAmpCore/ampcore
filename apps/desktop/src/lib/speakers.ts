@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import Hypher from "hypher";
+import german from "hyphenation.de";
 import {
   commands,
   type ChannelSpeakerState,
@@ -61,6 +63,28 @@ export const EMPTY_SPEAKER_DETAILS: SpeakerDetails = { brand: "", family: "", mo
 
 export function speakerName(entry: SpeakerLibraryEntry): string {
   return `${entry.brand} ${entry.model}`;
+}
+
+const hypher = new Hypher(german);
+const BRAND_SHORT = new Map<string, string>();
+
+/** A brand abbreviated. One word: its syllables' initials ("Plansound" →
+ * Plan|sound → "PS"), a one-syllable word as it is ("TOP"). Several words
+ * (spaces or hyphens): one initial each, short ones kept ("TW AUDiO" → "TWA",
+ * "Jobst-Audio" → "JA"). */
+export function brandShort(brand: string): string {
+  let short = BRAND_SHORT.get(brand);
+  if (short === undefined) {
+    const words = brand.split(/[\s-]+/).filter(Boolean);
+    if (words.length === 1) {
+      const syllables = hypher.hyphenate(words[0]);
+      short = syllables.length > 1 ? syllables.map((s) => s[0].toUpperCase()).join("") : words[0];
+    } else {
+      short = words.map((w) => (w.length <= 3 ? w : w[0].toUpperCase())).join("") || "–";
+    }
+    BRAND_SHORT.set(brand, short);
+  }
+  return short;
 }
 
 

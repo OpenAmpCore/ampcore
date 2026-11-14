@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import { Button, Chip } from "@heroui/react";
 import { GripVertical, Info, ListFilter } from "lucide-react";
 import type { SpeakerLibraryEntry } from "../../lib/bindings";
-import { speakerName } from "../../lib/speakers";
+import { brandShort, speakerName } from "../../lib/speakers";
+import { usePreference } from "../../lib/preferences";
 import { Hint } from "../Hint";
 import { SimpleSelect } from "../SimpleSelect";
 import { MUTED, RowMenu } from "./SpeakerBench";
@@ -12,9 +13,14 @@ import { FIELD_INPUT } from "../fieldClasses";
 export const DRAG_TYPE = "application/x-ampcore-speaker-id";
 
 /** grip, note, Brand, Model, Family, Application, Ways, menu. Way labels are
- * left to the drag card and the Load dialog: the table sits in half the tab. */
-const LIBRARY_COLS =
-  "grid min-w-[480px] grid-cols-[20px_24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px] items-center gap-2 px-2";
+ * left to the drag card and the Load dialog: the table sits in half the tab.
+ * An abbreviated brand (Settings, `abbreviateBrands`) needs half the width. */
+const libraryCols = (shortBrand: boolean) =>
+  `grid min-w-[480px] ${
+    shortBrand
+      ? "grid-cols-[20px_24px_minmax(0,0.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px]"
+      : "grid-cols-[20px_24px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)_72px_36px]"
+  } items-center gap-2 px-2`;
 
 const WAY_OPTIONS = [
   { value: "1", label: "1" },
@@ -50,6 +56,8 @@ export function LibraryTable({
    * in the DOM before `dragstart` can hand it to `setDragImage`. */
   const [armed, setArmed] = useState<SpeakerLibraryEntry | null>(null);
   const card = useRef<HTMLDivElement>(null);
+  const shortBrand = usePreference("abbreviateBrands");
+  const LIBRARY_COLS = libraryCols(shortBrand);
 
   const has = (value: string, needle: string) => value.toLowerCase().includes(needle.trim().toLowerCase());
   const shown = library
@@ -144,10 +152,16 @@ export function LibraryTable({
             <Hint text={entry.notes} className="flex">
               <Info size={14} className={entry.notes ? "" : "opacity-25"} />
             </Hint>
-            <span className="truncate font-medium">{entry.brand}</span>
-            <span className="truncate">{entry.model}</span>
-            <span className="truncate">{entry.family || "–"}</span>
-            <span className="truncate">{entry.application || "–"}</span>
+            {shortBrand ? (
+              <Hint text={entry.brand} className="min-w-0">
+                <span className="block truncate font-medium">{brandShort(entry.brand)}</span>
+              </Hint>
+            ) : (
+              <span className="font-medium [overflow-wrap:anywhere]">{entry.brand}</span>
+            )}
+            <span className="[overflow-wrap:anywhere]">{entry.model}</span>
+            <span className="[overflow-wrap:anywhere]">{entry.family || "–"}</span>
+            <span className="[overflow-wrap:anywhere]">{entry.application || "–"}</span>
             <span className="tabular-nums">{entry.ways.length}</span>
             <RowMenu
               label={`Actions for ${speakerName(entry)}`}
