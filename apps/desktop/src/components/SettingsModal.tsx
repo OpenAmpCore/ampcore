@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Button, Chip, Modal, Spinner, Switch, toast } from "@heroui/react";
-import { Copy } from "lucide-react";
+import { ChevronRight, Copy } from "lucide-react";
 import { commands, type NetworkAdapter } from "../lib/bindings";
 import { startLiveDriver } from "../hooks/useLiveDriver";
 import { setPreference, usePreference } from "../lib/preferences";
@@ -29,45 +29,78 @@ interface SettingsModalProps {
 
 /** A settings chapter: an uppercase dimmed heading over its rows, matching
  * the section-header treatment used throughout the amp editor. */
-function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <span
-          style={{
-            fontSize: "var(--amp-font-size-xs)",
-            fontWeight: 700,
-            color: "var(--amp-color-dimmed)",
-            textTransform: "uppercase",
-          }}
-        >
-          {title}
-        </span>
-        <hr className="m-0 flex-1 border-t border-[var(--amp-color-default-border)]" />
+function SettingsSection({ title, collapsed, children }: { title: string; collapsed?: boolean; children: ReactNode }) {
+  const heading = (
+    <>
+      <span
+        style={{
+          fontSize: "var(--amp-font-size-xs)",
+          fontWeight: 700,
+          color: "var(--amp-color-dimmed)",
+          textTransform: "uppercase",
+        }}
+      >
+        {title}
+      </span>
+      <hr className="m-0 flex-1 border-t border-[var(--amp-color-default-border)]" />
+    </>
+  );
+  if (collapsed === undefined) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">{heading}</div>
+        {children}
       </div>
-      {children}
-    </div>
+    );
+  }
+  // Starts closed when `collapsed`; the browser keeps it open or shut from there.
+  return (
+    <details open={!collapsed} className="group">
+      {/* A collapsible heading is muted further: it is the way in, not a chapter. */}
+      <summary className="flex cursor-pointer list-none items-center gap-2 opacity-60 hover:opacity-100 [&::-webkit-details-marker]:hidden">
+        {heading}
+        <ChevronRight size={14} className="text-[var(--amp-color-dimmed)] transition-transform group-open:rotate-90" />
+      </summary>
+      <div className="mt-3 flex flex-col gap-3">{children}</div>
+    </details>
   );
 }
 
 /** One label + control row. Every setting in this modal is this shape, so
  * the wrapping/spacing is decided once here rather than per row.
  *
- * Never wraps onto two rows — `flex-nowrap` plus the modal's own width (see
- * `Modal.Container`'s `size="lg"`) keep every label/control pair on one
- * line. If the label text itself is too long for its shrunk share of the
- * row, it wraps internally (`min-w-0`) rather than pushing the control onto
- * its own line below. */
-function SettingRow({ label, children }: { label: string; children: ReactNode }) {
+ * The label is a short name in sentence case ("Peak hold"); anything that
+ * explains it goes in `description`, a dimmed line under it. The control
+ * never wraps below: a long description wraps inside its column (`min-w-0`). */
+function SettingRow({ label, description, children }: { label: string; description?: string; children: ReactNode }) {
   return (
-    <div className="flex flex-nowrap items-center justify-between gap-2">
-      <span className="min-w-0" style={{ fontSize: "var(--amp-font-size-sm)" }}>
-        {label}
-      </span>
+    <div className="flex min-h-10 flex-nowrap items-center justify-between gap-4">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-sm">{label}</span>
+        {description && <span className="text-xs text-[var(--amp-color-dimmed)]">{description}</span>}
+      </div>
       {children}
     </div>
   );
 }
+
+/** A setting that is a switch bound to one boolean preference. */
+function SwitchRow({ label, description, pref }: { label: string; description?: string; pref: BooleanPreference }) {
+  const value = usePreference(pref);
+  return (
+    <SettingRow label={label} description={description}>
+      <Switch aria-label={label} isSelected={value} onChange={(isSelected) => setPreference(pref, isSelected)}>
+        <Switch.Content>
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+        </Switch.Content>
+      </Switch>
+    </SettingRow>
+  );
+}
+
+type BooleanPreference = "outputMeterVolts" | "abbreviateBrands" | "showFingerprintMenu" | "showRawTelemetry" | "showSpeakerComparator" | "autoUpdateChecks";
 
 const ALL_ADAPTERS = "all";
 
@@ -94,7 +127,8 @@ function NetworkAdapterSetting({ opened }: { opened: boolean }) {
   }
 
   return (
-    <SettingRow label="Network adapter for amps">
+    <SettingRow label="Network adapter" description="Where AmpCore looks for amps.">
+
       <div className="w-64 min-w-0 shrink">
         <SimpleSelect
           data={[{ value: ALL_ADAPTERS, label: "All adapters" }, ...options]}
@@ -145,7 +179,7 @@ function WebServerSettings({ opened }: { opened: boolean }) {
   return (
     <SettingsSection title="Network">
       <NetworkAdapterSetting opened={opened} />
-      <SettingRow label="Web server — open AmpCore's page from other devices on this network">
+      <SettingRow label="Web server" description="Open AmpCore's page from other devices on this network.">
         <Switch
           isSelected={enabled}
           onChange={(isSelected) => {
@@ -211,14 +245,8 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const [status, setStatus] = useState<VersionStatus>("checking");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [installing, setInstalling] = useState(false);
-  const autoUpdateChecks = usePreference("autoUpdateChecks");
-  const showFingerprintMenu = usePreference("showFingerprintMenu");
-  const showRawTelemetry = usePreference("showRawTelemetry");
-  const showSpeakerComparator = usePreference("showSpeakerComparator");
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
-  const outputMeterVolts = usePreference("outputMeterVolts");
-  const abbreviateBrands = usePreference("abbreviateBrands");
 
   useEffect(() => {
     if (!opened) return;
@@ -279,109 +307,37 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
             <Modal.CloseTrigger />
           </Modal.Header>
           <Modal.Body>
-            <div className="flex flex-col gap-4">
-              <SettingsSection title="General">
-                <SettingRow label="Enable peak hold in meters">
+            <div className="flex flex-col gap-7">
+              <SettingsSection title="Speakers">
+                <SwitchRow
+                  label="Short brand names"
+                  description="In the Speakers tab library, e.g. Plansound → PS."
+                  pref="abbreviateBrands"
+                />
+              </SettingsSection>
+
+              <WebServerSettings opened={opened} />
+
+              <SettingsSection title="Meters">
+                <SettingRow label="Peak hold" description="Meters that hold their highest reading.">
                   <MultiSelect
                     data={PEAK_HOLD_OPTIONS}
                     values={peakHoldSurfaces}
                     onChange={(values) => setPreference("peakHoldSurfaces", values)}
                   />
                 </SettingRow>
-
-                <SettingRow label="Enable limiter threshold lines in meters">
+                <SettingRow label="Limiter threshold lines" description="Meters that mark where the limiters start.">
                   <MultiSelect
                     data={LIMITER_THRESHOLD_OPTIONS}
                     values={limiterThresholdSurfaces}
                     onChange={(values) => setPreference("limiterThresholdSurfaces", values)}
                   />
                 </SettingRow>
-
-                <SettingRow label="Show output meters in volts">
-                  <Switch
-                    isSelected={outputMeterVolts}
-                    onChange={(isSelected) => setPreference("outputMeterVolts", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
-
-                <SettingRow label="Abbreviate brand names in the amp Speakers tab library">
-                  <Switch
-                    isSelected={abbreviateBrands}
-                    onChange={(isSelected) => setPreference("abbreviateBrands", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
-              </SettingsSection>
-
-              <WebServerSettings opened={opened} />
-
-              {/* Developer-facing surfaces, off by default so an ordinary operator
-               * never meets them. All read live: toggling one updates an editor
-               * that is already open. */}
-              <SettingsSection title="Debug">
-                <SettingRow label="Show Fingerprint Menu">
-                  <Switch
-                    isSelected={showFingerprintMenu}
-                    onChange={(isSelected) => setPreference("showFingerprintMenu", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
-
-                <SettingRow label="Show Raw Telemetry">
-                  <Switch
-                    isSelected={showRawTelemetry}
-                    onChange={(isSelected) => setPreference("showRawTelemetry", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
-                <SettingRow label="Show Speaker preset Comparator">
-                  <Switch
-                    isSelected={showSpeakerComparator}
-                    onChange={(isSelected) => setPreference("showSpeakerComparator", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
+                <SwitchRow label="Output meters in volts" description="Instead of dB." pref="outputMeterVolts" />
               </SettingsSection>
 
               <SettingsSection title="Updates">
-                <SettingRow label="Show update dialog at startup">
-                  <Switch
-                    isSelected={autoUpdateChecks}
-                    onChange={(isSelected) => setPreference("autoUpdateChecks", isSelected)}
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                    </Switch.Content>
-                  </Switch>
-                </SettingRow>
+                <SwitchRow label="Update dialog at startup" pref="autoUpdateChecks" />
 
                 <SettingRow label="Version">
                   <div className="flex flex-wrap items-center gap-2">
@@ -395,6 +351,15 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                     )}
                   </div>
                 </SettingRow>
+              </SettingsSection>
+
+              {/* Developer-facing surfaces, off by default so an ordinary operator
+               * never meets them: last, collapsed and muted. All read live:
+               * toggling one updates an editor that is already open. */}
+              <SettingsSection title="Debug" collapsed>
+                <SwitchRow label="Fingerprint menu" pref="showFingerprintMenu" />
+                <SwitchRow label="Raw telemetry" pref="showRawTelemetry" />
+                <SwitchRow label="Speaker preset comparator" description="Apply shows every value: now, preset, written." pref="showSpeakerComparator" />
               </SettingsSection>
             </div>
           </Modal.Body>
