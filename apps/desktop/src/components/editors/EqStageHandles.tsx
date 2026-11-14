@@ -72,6 +72,7 @@ export function StageHandles({
   selectedRef,
   writeStatus,
   stageCurve,
+  fade,
   interactive,
   onSelectStage,
   onCommit,
@@ -84,6 +85,8 @@ export function StageHandles({
   writeStatus: Record<string, WriteStatus>;
   /** The selected stage's own curve — where its Q handles sit. */
   stageCurve: ResponsePoint[] | null;
+  /** Each stage's presence while the chain eases (`useEqTween`); no drag starts meanwhile. */
+  fade?: Record<string, number> | null;
   interactive: boolean;
   onSelectStage: (ref: EqStageRef | null) => void;
   onCommit: (ref: EqStageRef, patch: PreviewPatch) => void;
@@ -165,7 +168,7 @@ export function StageHandles({
   }
 
   function beginDrag(event: React.PointerEvent<SVGElement>, ref: EqStageRef, mode: DragMode) {
-    if (!interactive) return;
+    if (!interactive || fade) return;
     const info = stageInfo(eq, ref, capsByType);
     if (!info.active) return;
     if (mode === "y" && !info.supportsGain) return;
@@ -275,7 +278,12 @@ export function StageHandles({
         const ring = status === "ok" ? "var(--amp-color-green-6)" : status === "fail" ? "var(--amp-color-red-6)" : selected ? color : null;
 
         return (
-          <g key={stageKey(ref)} data-eq-handle className={status === "pending" ? "eq-write-pending" : undefined}>
+          <g
+            key={stageKey(ref)}
+            data-eq-handle
+            opacity={fade?.[stageKey(ref)]}
+            className={status === "pending" ? "eq-write-pending" : undefined}
+          >
             <g data-body>
             {ring && (
               <circle

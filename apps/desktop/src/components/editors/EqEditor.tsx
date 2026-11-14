@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@heroui/react";
 import { Power, RotateCcw } from "lucide-react";
 import { ClipboardButtons } from "../ClipboardButtons";
-import { useConfirm } from "../ConfirmDialog";
 import { STEP_COMMIT_DELAY_MS, stepSizeOf, stepped } from "../CommitNumberInput";
 import { useContextMenu } from "../ContextMenu";
 import { formatDb, FrequencyPlot, toPlotPoints, type PlotAxis, type PlotCurve } from "./FrequencyPlot";
@@ -14,6 +13,7 @@ import { ACTION_UNAVAILABLE, type ActionResult } from "../../lib/actionResult";
 import { outputLetter } from "../../lib/channelTelemetry";
 import { StageHandles } from "./EqStageHandles";
 import { type BandPatch, type CrossoverPatch, StageEditor, StageTile } from "./EqStageStrip";
+import { totalCurve, useEqTween } from "./eqTween";
 import { CURVE_EASE, CURVE_POINTS, type FilterCaps, GRAPH_DB, GRAPH_HZ, GRAPH_MAX_DB, GRAPH_MIN_DB, type PreviewPatch, type StageWrite, type WriteStatus, applyPreview, clampToRange, indexEqFilterCapabilities, roundFreq, roundGain, roundQ, sameStage, stageColor, stageInfo, stageKey, stageName, stagesOf, writeConfirmed } from "./eqStages";
 
 /** `AmpChannel.inputEq`/`outputEq` are typed optional in TS (specta marks
@@ -33,9 +33,6 @@ const FALLBACK_CHANNEL_EQ: ChannelEq = {
   })),
   lp: { filterType: "butterworth12", freqHz: 20000, active: false },
 };
-
-/** A band's default frequency: `DEFAULT_BAND_FREQS_HZ` in core's `project.rs`. */
-const DEFAULT_BAND_FREQS_HZ = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
 
 /** ±24 dB, labelled every 6, a dashed line every 2. */
 const EQ_DB_AXIS: PlotAxis = {
@@ -92,7 +89,10 @@ const ResponseGraph = memo(function ResponseGraph({
   // the strip and editor row hear about it every `PARENT_PREVIEW_MS`.
   const [live, setLive] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
   const lastSent = useRef(0);
+  // A change the pointer or keys made lands at once; anything else eases in.
+  const instant = useRef(false);
   const previewLive = (ref: EqStageRef, patch: PreviewPatch) => {
+    instant.current = true;
     setLive({ ref, patch });
     const now = performance.now();
     if (now - lastSent.current >= PARENT_PREVIEW_MS) {
@@ -103,11 +103,14 @@ const ResponseGraph = memo(function ResponseGraph({
   // The final position goes to the editor before the write, so nothing
   // shows the last throttled one in between.
   const commitLive = (ref: EqStageRef, patch: PreviewPatch) => {
+    instant.current = true;
     onPreview(ref, patch);
     setLive(null);
     onCommit(ref, patch);
   };
-  const graphEq = useMemo(() => applyPreview(eq, live), [eq, live]);
+  const tween = useEqTween(eq, live !== null || instant.current);
+  instant.current = false;
+  const graphEq = useMemo(() => applyPreview(tween.eq, live), [tween.eq, live]);
   // Arrow-key nudges preview at once and are written once the keys go quiet,
   // as a drag is written once on release.
   const keyNudge = useRef<{ ref: EqStageRef; patch: PreviewPatch; timer: ReturnType<typeof setTimeout> } | null>(null);
@@ -151,7 +154,7 @@ const ResponseGraph = memo(function ResponseGraph({
   }
 
   const selectedActive = selectedRef !== null && stageInfo(graphEq, selectedRef, capsByType).active;
-  const total = useMemo(() => responseCurve(graphEq, null, CURVE_POINTS), [graphEq]);
+  const total = useMemo(() => totalCurve(graphEq, tween.weights), [graphEq, tween.weights]);
   const isolated = useMemo(
     () => (selectedActive && selectedRef ? responseCurve(graphEq, selectedRef, CURVE_POINTS) : null),
     [graphEq, selectedActive, selectedRef],
@@ -219,6 +222,7 @@ const ResponseGraph = memo(function ResponseGraph({
             selectedRef={selectedRef}
             writeStatus={writeStatus}
             stageCurve={isolated}
+            fade={tween.weights}
             interactive={interactive}
             onSelectStage={onSelectStage}
             onCommit={commitLive}
@@ -267,8 +271,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   const [preview, setPreview] = useState<{ ref: EqStageRef; patch: PreviewPatch } | null>(null);
   const [writes, setWrites] = useState<Record<string, StageWrite>>({});
   const [flash, setFlash] = useState<Record<string, "ok" | "fail">>({});
-  const [resetting, setResetting] = useState(false);
-  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [bypassing, setBypassing] = useState(false);
   const writeToken = useRef(0);
 
   // Switching channel or direction (Input EQ <-> Output EQ) reuses the same
@@ -394,39 +397,22 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     );
   }
 
-  /** Every stage back to its default values: flat bands, on, at their
-   * default frequencies, HP/LP off at the ends of the range. One at a time, each
-   * tile flashing its own outcome; the next reading shows the new values. */
-  async function handleResetAll() {
-    const ok = await confirm({
-      title: "Reset this EQ?",
-      description:
-        "Every band goes back to its default frequency, 1 Q and 0 dB, switched on. HP and LP go back to their defaults, switched off. This can't be undone.",
-      confirmLabel: "Reset all",
-      tone: "danger",
-    });
-    if (!ok) return;
+  /** Every active stage (bands, HP, LP) switched off; values stay, so each one
+   * comes back as it was when switched on again. One at a time, each tile
+   * flashing its own outcome; the next reading shows the new state. */
+  async function handleBypassAll() {
     setPreview(null);
     setWrites({});
-    setResetting(true);
+    setBypassing(true);
     for (const ref of stagesOf(eq)) {
+      if (!stageInfo(eq, ref, eqCapsByType).active) continue;
       const result =
         ref.kind === "band"
-          ? await handleBandChange(ref.bandIndex, {
-              filterType: "peaking",
-              freqHz: clampToRange(DEFAULT_BAND_FREQS_HZ[ref.bandIndex] ?? 1000, freqRange),
-              gainDb: clampToRange(0, gainRange),
-              q: clampToRange(1, qRangeFor("peaking")),
-              active: true,
-            })
-          : await handleCrossoverChange(ref.kind, {
-              filterType: FALLBACK_CHANNEL_EQ[ref.kind].filterType,
-              freqHz: clampToRange(FALLBACK_CHANNEL_EQ[ref.kind].freqHz ?? 1000, freqRange),
-              active: false,
-            });
+          ? await handleBandChange(ref.bandIndex, { active: false })
+          : await handleCrossoverChange(ref.kind, { active: false });
       flashStage(stageKey(ref), result.ok);
     }
-    setResetting(false);
+    setBypassing(false);
   }
 
   function handleToggleActive(ref: EqStageRef) {
@@ -469,17 +455,18 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-3">
-      {confirmDialog}
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
         <span className="min-w-0 flex-1 text-[length:var(--amp-font-size-xs)] text-[var(--amp-color-dimmed)]">{hint}</span>
         <Button
           size="sm"
           variant="secondary"
-          isDisabled={!interactive || resetting}
-          onPress={() => void handleResetAll()}
+          isDisabled={
+            !interactive || bypassing || !stagesOf(eq).some((ref) => stageInfo(eq, ref, eqCapsByType).active)
+          }
+          onPress={() => void handleBypassAll()}
         >
-          <RotateCcw size={14} />
-          Reset all
+          <Power size={14} />
+          Bypass all
         </Button>
         <ClipboardButtons
           actions={actions}

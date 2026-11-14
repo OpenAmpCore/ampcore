@@ -144,10 +144,10 @@ export function LibraryTable({
             <Hint text={entry.notes} className="flex">
               <Info size={14} className={entry.notes ? "" : "opacity-25"} />
             </Hint>
-            <span className="truncate font-medium">{entry.brand}</span>
-            <span className="truncate">{entry.model}</span>
-            <span className="truncate">{entry.family || "–"}</span>
-            <span className="truncate">{entry.application || "–"}</span>
+            <span className="font-medium [overflow-wrap:anywhere]">{entry.brand}</span>
+            <span className="[overflow-wrap:anywhere]">{entry.model}</span>
+            <span className="[overflow-wrap:anywhere]">{entry.family || "–"}</span>
+            <span className="[overflow-wrap:anywhere]">{entry.application || "–"}</span>
             <span className="tabular-nums">{entry.ways.length}</span>
             <RowMenu
               label={`Actions for ${speakerName(entry)}`}
