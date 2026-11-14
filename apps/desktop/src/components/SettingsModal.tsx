@@ -218,6 +218,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const peakHoldSurfaces = usePreference("peakHoldSurfaces");
   const limiterThresholdSurfaces = usePreference("limiterThresholdSurfaces");
   const outputMeterVolts = usePreference("outputMeterVolts");
+  const abbreviateBrands = usePreference("abbreviateBrands");
 
   useEffect(() => {
     if (!opened) return;
@@ -300,6 +301,19 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
                   <Switch
                     isSelected={outputMeterVolts}
                     onChange={(isSelected) => setPreference("outputMeterVolts", isSelected)}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                    </Switch.Content>
+                  </Switch>
+                </SettingRow>
+
+                <SettingRow label="Abbreviate brand names in the amp Speakers tab library">
+                  <Switch
+                    isSelected={abbreviateBrands}
+                    onChange={(isSelected) => setPreference("abbreviateBrands", isSelected)}
                   >
                     <Switch.Content>
                       <Switch.Control>
