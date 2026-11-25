@@ -428,6 +428,7 @@ mod tests {
         let r = cvr_param_ranges(&CvrFirmwareCapability::from_version(Some("1.1.9")));
         assert!(check_noise_gate_threshold(-20.0, &r).is_ok());
         assert!(check_noise_gate_threshold(-20.5, &r).is_err());
-        assert!(check_noise_gate_threshold(-51.0, &r).is_err());
+        assert!(check_noise_gate_threshold(-70.0, &r).is_ok());
+        assert!(check_noise_gate_threshold(-101.0, &r).is_err());
     }
 }

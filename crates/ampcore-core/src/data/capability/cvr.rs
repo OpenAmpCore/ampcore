@@ -261,7 +261,8 @@ pub fn cvr_param_ranges(firmware: &CvrFirmwareCapability) -> AmpParamRanges {
             max: 0.0,
         },
         noise_gate_threshold_dbu: ParamRange {
-            min: -50.0,
+            // The vendor field runs -100..0 and defaults to -70, which amps report.
+            min: -100.0,
             max: 20.0,
         },
         channel_name_max_length: 16,
@@ -400,9 +401,12 @@ pub fn resolve_live(firmware_version: &str) -> LiveCapability {
     }
 }
 
-/// How far either side of `amp_gain_base_dbv` the vendor app lets the gain be
-/// set: `MainVolGain::setMaxMinGain` makes the bounds `base - 6` and `base + 6`.
-pub const AMP_GAIN_SPAN_DB: f64 = 6.0;
+/// How far above and below `amp_gain_base_dbv` the vendor app lets the gain be
+/// set on 1.1.9, the only firmware with a gain setting:
+/// `Main_Whole_TY_Gain::LoadAMPSet` calls `setGainRange(6.0, 12.0)` there, so
+/// `MainVolGain::setMaxMinGain` makes the bounds `base + 6` and `base - 12`.
+pub const AMP_GAIN_UP_DB: f64 = 6.0;
+pub const AMP_GAIN_DOWN_DB: f64 = 12.0;
 
 /// The level, in dBV, an output's gain is set against — its full rated output
 /// in the current power mode. Low-impedance mode uses discovery's `gain_max`
@@ -421,11 +425,11 @@ pub fn amp_gain_base_dbv(gain_max: u32, power_mode: Option<PowerMode>) -> Option
     }
 }
 
-/// The dB an output's gain may be set to: `amp_gain_base_dbv` ±
-/// `AMP_GAIN_SPAN_DB`. This is the vendor UI's span, not a known firmware
+/// The dB an output's gain may be set to: `amp_gain_base_dbv` - `AMP_GAIN_DOWN_DB`
+/// to + `AMP_GAIN_UP_DB`. This is the vendor UI's span, not a known firmware
 /// limit — an amp can hold a gain outside it, set some other way.
 pub fn amp_gain_range_db(gain_max: u32, power_mode: Option<PowerMode>) -> Option<ParamRange> {
-    amp_gain_base_dbv(gain_max, power_mode).map(|base| ParamRange { min: base - AMP_GAIN_SPAN_DB, max: base + AMP_GAIN_SPAN_DB })
+    amp_gain_base_dbv(gain_max, power_mode).map(|base| ParamRange { min: base - AMP_GAIN_DOWN_DB, max: base + AMP_GAIN_UP_DB })
 }
 
 /// The input level (Vrms) that drives an output at `gain_db` to its full
@@ -467,11 +471,13 @@ mod tests {
     #[test]
     fn amp_gain_range_follows_power_mode() {
         let range = |gain_max, mode| amp_gain_range_db(gain_max, mode).map(|r| (r.min, r.max));
-        assert_eq!(range(42, Some(PowerMode::LowOhm)), Some((36.0, 48.0)));
-        assert_eq!(range(42, Some(PowerMode::V70)), Some((31.0, 43.0)));
-        assert_eq!(range(42, Some(PowerMode::V100)), Some((34.0, 46.0)));
+        // 12 dB down, 6 up: a gain at base - 12 (the reported 27 on a base of 39) is settable.
+        assert_eq!(range(42, Some(PowerMode::LowOhm)), Some((30.0, 48.0)));
+        assert_eq!(range(39, Some(PowerMode::LowOhm)), Some((27.0, 45.0)));
+        assert_eq!(range(42, Some(PowerMode::V70)), Some((25.0, 43.0)));
+        assert_eq!(range(42, Some(PowerMode::V100)), Some((28.0, 46.0)));
         // Constant-voltage modes don't need `gain_max` at all.
-        assert_eq!(range(0, Some(PowerMode::V70)), Some((31.0, 43.0)));
+        assert_eq!(range(0, Some(PowerMode::V70)), Some((25.0, 43.0)));
         assert_eq!(range(0, Some(PowerMode::LowOhm)), None);
         assert_eq!(range(42, None), None);
         // Gain equal to the base: full output at 1 V in.

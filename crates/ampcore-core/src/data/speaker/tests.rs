@@ -183,6 +183,22 @@ fn a_clamped_way_matches_once_applied() {
     assert!(matches!(speaker_status(&ch, &speaker, &library, Some(&cap)), SpeakerStatus::Edited { .. }));
 }
 
+/// The amp ignores a gate threshold while the gate is off, so it can't make a speaker Edited.
+#[test]
+fn gate_threshold_counts_only_while_the_gate_is_on() {
+    let (mut a, mut b) = (channel(), channel());
+    a.noise_gate_enabled = false;
+    b.noise_gate_enabled = false;
+    a.noise_gate_threshold_dbu = 0.0;
+    b.noise_gate_threshold_dbu = -70.0;
+    let way = SpeakerProcessing::from_channel(&a);
+    assert!(way.differences(&SpeakerProcessing::from_channel(&b)).is_empty());
+    a.noise_gate_enabled = true;
+    b.noise_gate_enabled = true;
+    let way = SpeakerProcessing::from_channel(&a);
+    assert_eq!(way.differences(&SpeakerProcessing::from_channel(&b)), ["Noise gate threshold"]);
+}
+
 #[test]
 fn whole_output_conflicts_with_older_firmware() {
     let mut saved_on_119 = channel();

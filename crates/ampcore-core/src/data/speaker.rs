@@ -284,7 +284,9 @@ impl SpeakerProcessing {
         out.push(("Polarity".to_string(), if self.phase_inverted { "inverted" } else { "normal" }.to_string()));
         out.push(("Output trim".into(), format!("{:.2} dB", round_to_step(self.output_trim_db, GAIN_STEPS))));
         out.push(("Noise gate".into(), if self.noise_gate_enabled { "on" } else { "off" }.to_string()));
-        out.push(("Noise gate threshold".into(), format!("{:.0} dBu", self.noise_gate_threshold_dbu)));
+        // Invisible to the amp (hash and push) while the gate is off, so not compared either.
+        let threshold = if self.noise_gate_enabled { format!("{:.0} dBu", self.noise_gate_threshold_dbu) } else { "—".into() };
+        out.push(("Noise gate threshold".into(), threshold));
         out.push(("Power mode".into(), format!("{:?}", self.power_mode)));
         out.push(("FIR".into(), if self.fir_bypassed { "bypassed" } else { "active" }.to_string()));
         out.push(("FIR filter".into(), self.fir.summary()));

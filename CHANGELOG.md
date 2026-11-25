@@ -2,6 +2,13 @@
 
 Release notes per desktop version, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. The release workflow copies the section matching the desktop version into the GitHub release and the in-app update dialog; a version without a section ships without notes. Mobile- or core-only items go under the same version, prefixed "Mobile:".
 
+## [0.3.15] - 2026-11-25
+
+### Fixed
+- Amp gain goes down to 12 dB below the amp's rated level, as in the vendor app (it stopped at 6 dB, so a gain lowered elsewhere couldn't be set back).
+- Noise gate threshold accepts values down to -100 dBu (the amp's own -70 default no longer jumps to -50).
+- A speaker is no longer marked Edited over a noise gate threshold the amp ignores while the gate is off.
+
 ## [0.3.14] - 2026-11-14
 
 ### Changed
